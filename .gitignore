@@ -1,0 +1,22 @@
+# VS Code
+.vscode/
+*.code-workspace
+
+# Сборка
+build/
+CMakeCache.txt
+CMakeFiles/
+Makefile
+*.o
+*.exe
+*.out
+lib/
+
+# Временные файлы
+*.tmp
+*.log
+*.vtk
+*.csv
+
+# Папки с результатами (если будем сохранять)
+output/
