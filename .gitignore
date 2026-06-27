@@ -15,7 +15,3 @@ cmake_install.cmake
 *.a
 *.so
 *.dylib
-
-# Keep source-downloaded libs if you want reproducible local builds.
-# Remove this line if you want Git to ignore downloaded SFML:
-# lib/sfml/

@@ -1,9 +1,4 @@
 {
     "cmake.sourceDirectory": "${workspaceFolder}",
-    "cmake.buildDirectory": "${workspaceFolder}/build",
-    "files.associations": {
-        "iostream": "cpp",
-        "vector": "cpp",
-        "filesystem": "cpp"
-    }
+    "cmake.buildDirectory": "${workspaceFolder}/build"
 }
