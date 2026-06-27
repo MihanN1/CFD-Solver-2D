@@ -14,17 +14,17 @@ The ultimate goal is to simulate the **Kármán vortex street** behind a cylinde
 ## Project Structure
 
 **Architecture**
-CFD-Solver-2D/
-├── .vscode/               (VS Code settings, optional)
-├── src/                   (source files)
-│   └── main.cpp           (entry point)
-├── include/               (header files)
-│   └──tiny_obj_loader.h   (for now no CMake connect and no vcpkg installed, also no STL-reader, only obj works)
-├── models/                (place 3D STL/OBJ files here)
-├── lib/                   (external libraries, if manually installed)
-│   └── sfml/              (SFML SDK)
-├── build/                 (build output, ignored by Git)
-├── CMakeLists.txt         (build configuration)
+CFD-Solver-2D/<br>
+├── .vscode/               (VS Code settings, optional)<br>
+├── src/                   (source files)<br>
+│   └── main.cpp           (entry point)<br>
+├── include/               (header files)<br>
+│   └──tiny_obj_loader.h   (for now no CMake connect and no vcpkg installed, also no STL-reader, only obj works)<br>
+├── models/                (place 3D STL/OBJ files here)<br>
+├── lib/                   (external libraries, if manually installed)<br>
+│   └── sfml/              (SFML SDK)<br>
+├── build/                 (build output, ignored by Git)<br>
+├── CMakeLists.txt         (build configuration)<br>
 ├── .gitignore
 └── README.md
 
