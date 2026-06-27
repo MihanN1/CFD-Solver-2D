@@ -1,7 +1,7 @@
 #include <SFML/Graphics.hpp>
 
 #include <tiny_obj_loader.h>
-#include <stl_reader.h>
+#include <stl_reader/stl_reader.h>
 
 #include <filesystem>
 #include <iostream>
@@ -10,13 +10,13 @@
 
 namespace fs = std::filesystem;
 
-static bool loadFirstObjFromModels()
+static void loadFirstObjFromModels()
 {
     const fs::path modelsDir = CFD_MODELS_DIR;
 
     if (!fs::exists(modelsDir)) {
         std::cout << "[models] folder not found: " << modelsDir << '\n';
-        return false;
+        return;
     }
 
     for (const auto& entry : fs::directory_iterator(modelsDir)) {
@@ -57,18 +57,17 @@ static bool loadFirstObjFromModels()
 
         if (!ok) {
             std::cout << "[OBJ] failed: " << inputFile << '\n';
-            return false;
+            return;
         }
 
         std::cout << "[OBJ] loaded: " << inputFile << '\n';
         std::cout << "[OBJ] vertices: " << attrib.vertices.size() / 3 << '\n';
         std::cout << "[OBJ] shapes: " << shapes.size() << '\n';
         std::cout << "[OBJ] materials: " << materials.size() << '\n';
-        return true;
+        return;
     }
 
     std::cout << "[OBJ] no .obj files in models/\n";
-    return false;
 }
 
 int main()

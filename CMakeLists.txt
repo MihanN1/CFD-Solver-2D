@@ -5,20 +5,14 @@ project(CFD_Solver_2D
     LANGUAGES CXX
 )
 
-# ============================================================
-# BASE SETTINGS
-# ============================================================
-
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Keep output predictable.
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
-# Project local folders.
 set(CFD_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(CFD_LIB_DIR     "${CMAKE_CURRENT_SOURCE_DIR}/lib")
 set(CFD_MODELS_DIR  "${CMAKE_CURRENT_SOURCE_DIR}/models")
@@ -29,10 +23,6 @@ file(MAKE_DIRECTORY "${CFD_MODELS_DIR}")
 
 include(FetchContent)
 include(GNUInstallDirs)
-
-# ============================================================
-# DOWNLOAD HELPER
-# ============================================================
 
 function(cfd_download_if_missing NAME URL OUT_FILE)
     if(EXISTS "${OUT_FILE}")
@@ -65,11 +55,7 @@ function(cfd_download_if_missing NAME URL OUT_FILE)
     message(STATUS "${NAME}: downloaded")
 endfunction()
 
-# ============================================================
 # OBJ - tiny_obj_loader
-# goes into: include/tiny_obj_loader.h
-# ============================================================
-
 set(TINYOBJ_HEADER "${CFD_INCLUDE_DIR}/tiny_obj_loader.h")
 
 cfd_download_if_missing(
@@ -78,50 +64,35 @@ cfd_download_if_missing(
     "${TINYOBJ_HEADER}"
 )
 
-# ============================================================
 # STL - stl_reader
-# goes into: lib/stl_reader/stl_reader.h
-# ============================================================
-
-set(STL_READER_DIR "${CFD_LIB_DIR}/stl_reader")
-set(STL_READER_HEADER "${STL_READER_DIR}/stl_reader.h")
-
-cfd_download_if_missing(
-    "stl_reader"
-    "https://raw.githubusercontent.com/sreiter/stl_reader/master/stl_reader.h"
-    "${STL_READER_HEADER}"
+# Скачать в lib/stl_reader через Git, не raw-файл.
+FetchContent_Declare(
+    stl_reader
+    URL https://github.com/sreiter/stl_reader/archive/refs/tags/v2.0.zip
+    SOURCE_DIR "${CFD_LIB_DIR}/stl_reader"
 )
 
-# ============================================================
-# SFML
-# goes into: lib/sfml
-# CMake downloads source there if missing.
-# It is then built together with this project.
-# ============================================================
+FetchContent_MakeAvailable(stl_reader)
 
+FetchContent_MakeAvailable(stl_reader)
+
+# SFML
 set(SFML_LOCAL_DIR "${CFD_LIB_DIR}/sfml")
 
-# Build SFML static to avoid DLL copying problems at start.
 set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
-
-# Disable unused modules/build parts.
 set(SFML_BUILD_AUDIO OFF CACHE BOOL "" FORCE)
 set(SFML_BUILD_NETWORK OFF CACHE BOOL "" FORCE)
 set(SFML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(SFML_BUILD_DOC OFF CACHE BOOL "" FORCE)
-
 FetchContent_Declare(
     SFML
-    GIT_REPOSITORY https://github.com/SFML/SFML.git
-    GIT_TAG 3.1.0
+    URL https://github.com/SFML/SFML/archive/refs/tags/3.1.0.zip
     SOURCE_DIR "${SFML_LOCAL_DIR}"
 )
 
 FetchContent_MakeAvailable(SFML)
 
-# ============================================================
-# PROGRAM
-# ============================================================
+FetchContent_MakeAvailable(SFML)
 
 add_executable(cfd_app
     src/main.cpp
@@ -131,7 +102,7 @@ add_executable(cfd_app
 target_include_directories(cfd_app
     PRIVATE
         "${CFD_INCLUDE_DIR}"
-        "${STL_READER_DIR}"
+        "${stl_reader_SOURCE_DIR}/include"
 )
 
 target_link_libraries(cfd_app
@@ -146,10 +117,6 @@ target_compile_definitions(cfd_app
         CFD_MODELS_DIR="${CFD_MODELS_DIR}"
 )
 
-# ============================================================
-# INSTALL
-# ============================================================
-
 install(
     TARGETS cfd_app
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
@@ -161,8 +128,8 @@ install(
 )
 
 install(
-    DIRECTORY "${STL_READER_DIR}/"
-    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/stl_reader
+    DIRECTORY "${stl_reader_SOURCE_DIR}/include/"
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
 )
 
 install(
