@@ -1,24 +1,60 @@
 # CFD-Solver-2D
 
-## Архитектура
+**A 2D incompressible Navier‑Stokes solver for external flows around arbitrary profiles.**
+
+CFD‑Solver‑2D is an educational/research project that implements a finite‑difference CFD solver for unsteady viscous incompressible flow. It uses the **Chorin projection method** on a **staggered MAC grid** with an **immersed boundary** technique to handle complex geometries. The code is written in C++17 and features:<br>
+- Interactive console parameter input.<br>
+- Real‑time visualisation with **SFML** (pressure, velocity magnitude, streamlines, vector field).<br>
+- Import of 3D models (STL/OBJ) with automatic slicing to obtain a 2D cross‑section profile.<br>
+
+The ultimate goal is to simulate the **Kármán vortex street** behind a cylinder or an airfoil at moderate Reynolds numbers.
+
+---
+
+## General info
+**Commit messages guide**<br>
+feat: new stable things!<br>
+fix: fixes<br>
+docs: documentation updates<br>
+refactor: code improving<br>
+**Planned features**<br>
+| Sprint |Focus                                                                         |<br>
+|--------|------------------------------------------------------------------------------|<br>
+| **1**  | Config parser, structured grid generation, circle mask (immersed boundary)   |<br>
+| **2**  | Predictor‑corrector solver (Chorin), SOR Poisson solver, CFL check           |<br>
+| **3**  | STL/OBJ import, 2D profile extraction by slicing, geometry masking           |<br>
+| **4**  | SFML‑based real‑time rendering, interactive controls (pause, mode switching) |<br>
+
+---
+
+## Architecture
 
 ```text
 CFD-Solver-2D/
 ├── .vscode/
+├── output/
 ├── src/
 │   ├── main.cpp
 │   └── tiny_obj_loader_impl.cpp
 ├── include/
-│   └── tiny_obj_loader.h       # скачивается CMake, если отсутствует
+│   └── tiny_obj_loader.h       #CMake adds this if its not there
 ├── models/
 ├── lib/
-│   ├── sfml/                   # скачивается CMake, если отсутствует
-│   └── stl_reader/             # скачивается CMake, если отсутствует
+│   ├── sfml/                   #CMake adds this if its not there
+│   └── stl_reader/             #CMake adds this if its not there
 ├── build/
 ├── CMakeLists.txt
 ├── .gitignore
+├── LICENSE
 └── README.md
 ```
+
+## Requirements
+
+- **C++17** compatible compiler (MSVC 2019/2022, GCC 9+, Clang 10+)<br>
+- **CMake** 3.10 or higher<br>
+
+---
 
 ## Build — PowerShell
 
