@@ -1,22 +1,21 @@
-# VS Code
-.vscode/
-*.code-workspace
-
-# Сборка
 build/
-CMakeCache.txt
+install/
+.vs/
+out/
 CMakeFiles/
-Makefile
-*.o
+CMakeCache.txt
+cmake_install.cmake
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
 *.exe
-*.out
-lib/
+*.dll
+*.lib
+*.a
+*.so
+*.dylib
 
-# Временные файлы
-*.tmp
-*.log
-*.vtk
-*.csv
-
-# Папки с результатами (если будем сохранять)
-output/
+# Keep source-downloaded libs if you want reproducible local builds.
+# Remove this line if you want Git to ignore downloaded SFML:
+# lib/sfml/

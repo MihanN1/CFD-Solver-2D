@@ -1,79 +1,79 @@
 # CFD-Solver-2D
 
-**A 2D incompressible Navier‑Stokes solver for external flows around arbitrary profiles.**
+## Structure
 
-CFD‑Solver‑2D is an educational/research project that implements a finite‑difference CFD solver for unsteady viscous incompressible flow. It uses the **Chorin projection method** on a **staggered MAC grid** with an **immersed boundary** technique to handle complex geometries. The code is written in C++17 and features:<br>
-- Interactive console parameter input.<br>
-- Real‑time visualisation with **SFML** (pressure, velocity magnitude, streamlines, vector field).<br>
-- Import of 3D models (STL/OBJ) with automatic slicing to obtain a 2D cross‑section profile.<br>
+```text
+CFD-Solver-2D/
+├── .vscode/
+├── src/
+│   ├── main.cpp
+│   └── tiny_obj_loader_impl.cpp
+├── include/
+│   └── tiny_obj_loader.h       # auto-downloaded if missing
+├── models/
+│   └── .gitkeep
+├── lib/
+│   ├── sfml/                   # auto-downloaded if missing
+│   └── stl_reader/             # auto-downloaded if missing
+├── build/
+├── CMakeLists.txt
+├── .gitignore
+└── README.md
+```
 
-The ultimate goal is to simulate the **Kármán vortex street** behind a cylinder or an airfoil at moderate Reynolds numbers.
+## What CMake does
 
----
+- If `include/tiny_obj_loader.h` is missing, it downloads it.
+- If `lib/stl_reader/stl_reader.h` is missing, it downloads it.
+- If `lib/sfml/` is missing, it downloads SFML source into `lib/sfml`.
+- It builds `cfd_app`.
+- It installs executable/header/model folders with `cmake --install`.
 
-## Project Structure
+## Build — Visual Studio 2022
 
-**Architecture**
-CFD-Solver-2D/<br>
-├── .vscode/               (VS Code settings, optional)<br>
-├── src/                   (source files)<br>
-│   └── main.cpp           (entry point)<br>
-├── include/               (header files)<br>
-│   └──tiny_obj_loader.h   (for now no CMake connect and no vcpkg installed, also no STL-reader, only obj works)<br>
-├── models/                (place 3D STL/OBJ files here)<br>
-├── lib/                   (external libraries, if manually installed)<br>
-│   └── sfml/              (SFML SDK)<br>
-├── build/                 (build output, ignored by Git)<br>
-├── CMakeLists.txt         (build configuration)<br>
-├── .gitignore<br>
-└── README.md<br>
+```bat
+rmdir /s /q build
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake --build build --config Release
+cmake --install build --config Release --prefix install
+```
 
-**Commit messages**<br>
-feat: new stable things!<br>
-fix: fixes<br>
-docs: documentation updates<br>
-refactor: code improving<br>
+Run:
 
-## Current Status (Sprint 0)
+```bat
+install\bin\cfd_app.exe
+```
 
-This repository contains the **initial project skeleton**:
+## Build — Ninja
 
-- CMake build system configured.<br>
-- Basic `main.cpp` with a "Hello, World!" placeholder.<br>
-- Git repository structure with `develop` branch.<br>
-- README and `.gitignore` prepared.<br>
+Open Developer Command Prompt for VS.
 
-**No numerical solver or visualisation has been implemented yet.**  <br>
-The project is ready for development to begin.<br>
+```bat
+rmdir /s /q build
+cmake -S . -B build -G Ninja
+cmake --build build
+cmake --install build --prefix install
+```
 
----
+Run:
 
-## Planned Features (Roadmap)
+```bat
+install\bin\cfd_app.exe
+```
 
-| Sprint |Focus                                                                         |<br>
-|--------|------------------------------------------------------------------------------|<br>
-| **1**  | Config parser, structured grid generation, circle mask (immersed boundary)   |<br>
-| **2**  | Predictor‑corrector solver (Chorin), SOR Poisson solver, CFL check           |<br>
-| **3**  | STL/OBJ import, 2D profile extraction by slicing, geometry masking           |<br>
-| **4**  | SFML‑based real‑time rendering, interactive controls (pause, mode switching) |<br>
+## Models
 
----
+Put `.obj` files into:
 
-## Requirements
+```text
+models/
+```
 
-- **C++17** compatible compiler (MSVC 2019/2022, GCC 9+, Clang 10+)<br>
-- **CMake** 3.10 or higher<br>
-- **Optional dependencies** (only for visualisation and import):<br>
-  - [SFML](https://www.sfml-dev.org/) (≥ 2.6 or 3.0)<br>
-  - [tinyobjloader](https://github.com/tinyobjloader/tinyobjloader) (header‑only)<br>
-  - OpenGL (system library)<br>
+At start the app tries to load the first `.obj` file and prints info to console.
 
----
+## Notes
 
-## Building the Project
-
-### 1. Clone the repository
-
-```bash
-git clone git@github.com:yourusername/CFD-Solver-2D.git
-cd CFD-Solver-2D
+- OBJ loader: `tiny_obj_loader.h`
+- STL loader: `stl_reader.h`
+- Window/render: SFML
+- No vcpkg needed
