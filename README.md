@@ -23,7 +23,7 @@ CFD-Solver-2D/
 ## Build — PowerShell
 
 ```powershell
-cd "C:\Users\alans\3D Objects\.git\CFD-Solver-2D-full-fixed"
+cd "...\CFD-Solver-2D-full-fixed"
 
 if (Test-Path build) { Remove-Item build -Recurse -Force }
 if (Test-Path install) { Remove-Item install -Recurse -Force }
