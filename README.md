@@ -30,7 +30,6 @@ CFD-Solver-2D/<br>
 
 **Commit messages**<br>
 feat: new stable things!<br>
-
 fix: fixes<br>
 docs: documentation updates<br>
 refactor: code improving<br>
