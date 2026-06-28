@@ -1,9 +1,9 @@
 build/
 install/
 .vs/
-output/
+.vscode/
+out/
 CMakeFiles/
-lib/
 CMakeCache.txt
 cmake_install.cmake
 *.sln

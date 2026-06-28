@@ -31,18 +31,21 @@ refactor: code improving<br>
 
 ```text
 CFD-Solver-2D/
-├── .vscode/
-├── output/
+├── .git/                       #<- not saved by github
+├── .vscode/                    #<- not saved by github
+├── .vs/                        #<- not saved by github
+├── out/                        #CMake files here <- not saved by github
+├── output/                     #Files with results here <- github doesnt save insides
 ├── src/
 │   ├── main.cpp
 │   └── tiny_obj_loader_impl.cpp
-├── include/
+├── include/                    #<- isnt saved if empty
 │   └── tiny_obj_loader.h       #CMake adds this if its not there
-├── models/
-├── lib/
+├── models/                     #<- github doesnt save insides
+├── lib/                        #<- isnt saved if empty
 │   ├── sfml/                   #CMake adds this if its not there
 │   └── stl_reader/             #CMake adds this if its not there
-├── build/
+├── build/                      #main.exe file here <- not saved by github
 ├── CMakeLists.txt
 ├── .gitignore
 ├── LICENSE
