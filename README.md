@@ -1,3 +1,5 @@
+(lets just forget that we pushed 12 commits just for things to build normally and files to look at least alright 'cause we're stooooopid as shi)
+(from Kuzya: i dunno how it works, i have a feeling it's something alive, and changes by itself <3. TOTALLY NOT ME COMMITING 12 TIMES)
 # CFD-Solver-2D
 
 **A 2D incompressible Navier‑Stokes solver for external flows around arbitrary profiles.**
@@ -31,18 +33,21 @@ refactor: code improving<br>
 
 ```text
 CFD-Solver-2D/
-├── .vscode/
-├── output/
+├── .git/                       #<- not saved by github
+├── .vscode/                    #<- not saved by github
+├── .vs/                        #<- not saved by github
+├── out/                        #CMake files here <- not saved by github
+├── output/                     #Files with results here <- github doesnt save insides
 ├── src/
 │   ├── main.cpp
 │   └── tiny_obj_loader_impl.cpp
-├── include/
+├── include/                    #<- isnt saved if empty
 │   └── tiny_obj_loader.h       #CMake adds this if its not there
-├── models/
-├── lib/
+├── models/                     #<- github doesnt save insides
+├── lib/                        #<- isnt saved if empty
 │   ├── sfml/                   #CMake adds this if its not there
 │   └── stl_reader/             #CMake adds this if its not there
-├── build/
+├── build/                      #main.exe file here <- not saved by github
 ├── CMakeLists.txt
 ├── .gitignore
 ├── LICENSE
