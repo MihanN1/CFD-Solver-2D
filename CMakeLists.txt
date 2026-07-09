@@ -97,6 +97,9 @@ FetchContent_MakeAvailable(SFML)
 add_executable(cfd_app
     src/main.cpp
     src/tiny_obj_loader_impl.cpp
+    src/Config.cpp
+    src/Mesh.cpp
+    src/Solver.cpp
 )
 
 target_include_directories(cfd_app
