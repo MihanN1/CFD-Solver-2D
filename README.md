@@ -32,18 +32,17 @@ The ultimate goal is to simulate the **Karman vortex street** behind a cylinder 
 
 We solve the 2D incompressible Navier–Stokes equations (kinematic pressure, ρ = 1):
 
-**Momentum:**
-\[
-\frac{\partial u}{\partial t} + u\frac{\partial u}{\partial x} + v\frac{\partial u}{\partial y} = -\frac{\partial p}{\partial x} + \nu \nabla^2 u
-\]
-\[
-\frac{\partial v}{\partial t} + u\frac{\partial v}{\partial x} + v\frac{\partial v}{\partial y} = -\frac{\partial p}{\partial y} + \nu \nabla^2 v
-\]
+**Momentum (X):**
 
-**Continuity:**
-\[
-\frac{\partial u}{\partial x} + \frac{\partial v}{\partial y} = 0
-\]
+![](https://latex.codecogs.com/svg.image?\frac{\partial%20u}{\partial%20t}%20+%20u\frac{\partial%20u}{\partial%20x}%20+%20v\frac{\partial%20u}{\partial%20y}%20=%20-\frac{\partial%20p}{\partial%20x}%20+%20\nu%20\nabla^2%20u)
+
+**Momentum (Y):**
+
+![](https://latex.codecogs.com/svg.image?\frac{\partial%20v}{\partial%20t}%20+%20u\frac{\partial%20v}{\partial%20x}%20+%20v\frac{\partial%20v}{\partial%20y}%20=%20-\frac{\partial%20p}{\partial%20y}%20+%20\nu%20\nabla^2%20v)
+
+**Continuity (incompressibility):**
+
+![](https://latex.codecogs.com/svg.image?\frac{\partial%20u}{\partial%20x}%20+%20\frac{\partial%20v}{\partial%20y}%20=%200)
 
 The **Chorin projection** splits each time step into:
 1. **Predictor** – compute intermediate velocities \(u^*, v^*\) without pressure.
