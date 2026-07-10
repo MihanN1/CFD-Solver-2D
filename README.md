@@ -46,7 +46,7 @@ We solve the 2D incompressible Navier–Stokes equations (kinematic pressure, ρ
 
 The **Chorin projection** splits each time step into:
 1. **Predictor** – compute intermediate velocities \(u^*, v^*\) without pressure.
-2. **Poisson equation** – solve \(\nabla^2 p = \frac{1}{\Delta t} ( \frac{\partial u^*}{\partial x} + \frac{\partial v^*}{\partial y} )\) using SOR.
+2. **Poisson equation** – solve ![](https://latex.codecogs.com/svg.image?\nabla^2%20p%20=%20\frac{1}{\Delta%20t}%20\left(%20\frac{\partial%20u^*}{\partial%20x}%20+%20\frac{\partial%20v^*}{\partial%20y}%20\right)) using SOR.
 3. **Corrector** – update velocities with the pressure gradient.
 
 Boundary conditions: no‑slip on solid walls, constant velocity at inlet, zero‑gradient at outlet, free‑slip at top/bottom.
