@@ -42,7 +42,13 @@ void Solver::computeDt() {
         }
     }
 
-    double dtCFL = cfg.CFL * std::min(mesh.dx, mesh.dy) / std::max(maxU, maxV);
+    double vmax = std::max(maxU, maxV);
+    double dtCFL;
+
+    if (vmax < 1e-12)
+        dtCFL = 1e9;
+    else
+        dtCFL = cfg.CFL * std::min(mesh.dx, mesh.dy) / vmax;
     // Also consider diffusive stability: dt <= 0.5 * dx^2 / nu
     double dtDiff = 0.5 * std::min(mesh.dx*mesh.dx, mesh.dy*mesh.dy) / cfg.nu;
     dt = std::min(dtCFL, dtDiff);
@@ -55,16 +61,15 @@ void Solver::predictor() {
     double nu = cfg.nu;
     int nx = cfg.nx, ny = cfg.ny;
 
-    // Compute u_star for internal fluid cells (i = 1..nx-1, j = 0..ny-1)
+    // Compute u_star for internal fluid cells (i = 1..nx-1, j = 1..ny-1)
     // u is on vertical faces, so we need to compute convection and diffusion at those points
-    for (int j = 0; j < ny; ++j) {
+    for (int j = 1; j < ny-1; ++j) {
         for (int i = 1; i < nx; ++i) { // internal faces
             // Skip if solid
-            if (mesh.solid[j * nx + i] == 1) {
+            if (mesh.solid[j * nx + i] == 1 || mesh.solid[j * nx + (i - 1)] == 1) {
                 u_star[idxU(i, j)] = 0.0;
                 continue;
             }
-
             // Convection: upwind for u
             double u_ij = u[idxU(i, j)];
             double u_e = u[idxU(i+1, j)], u_w = u[idxU(i-1, j)];
@@ -88,8 +93,8 @@ void Solver::predictor() {
 
     // Compute v_star similarly
     for (int j = 1; j < ny; ++j) { // internal horizontal faces
-        for (int i = 0; i < nx; ++i) {
-            if (mesh.solid[j * nx + i] == 1) {
+        for (int i = 1; i < nx-1; ++i) {
+            if (mesh.solid[j * nx + i] == 1 || mesh.solid[(j - 1) * nx + i] == 1) {
                 v_star[idxV(i, j)] = 0.0;
                 continue;
             }
@@ -182,6 +187,7 @@ void Solver::solvePoisson() {
         }
         iter++;
     }
+    p[idxP(0,0)] = 0.0;
     // Optionally print residual
     // std::cout << "SOR iterations: " << iter << ", residual: " << residual << std::endl;
     // I think its not needed this much so its commentated by default
@@ -194,7 +200,7 @@ void Solver::corrector() {
     // Update u: u_new = u_star - dt * (p(i+1) - p(i)) / dx
     for (int j = 0; j < ny; ++j) {
         for (int i = 1; i < nx; ++i) { // internal faces
-            if (mesh.solid[j * nx + i] == 1) {
+            if (mesh.solid[j * nx + i] == 1 || mesh.solid[j * nx + (i - 1)] == 1) {
                 u[idxU(i, j)] = 0.0;
                 continue;
             }
@@ -209,7 +215,7 @@ void Solver::corrector() {
     // Update v: v_new = v_star - dt * (p(j+1) - p(j)) / dy
     for (int j = 1; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
-            if (mesh.solid[j * nx + i] == 1) {
+            if (mesh.solid[j * nx + i] == 1 || mesh.solid[(j - 1) * nx + i] == 1) {
                 v[idxV(i, j)] = 0.0;
                 continue;
             }
@@ -222,18 +228,26 @@ void Solver::corrector() {
 
     // Enforce no-slip inside solid and on boundaries
     for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i <= nx; ++i) {
-            if (mesh.solid[j * nx + i] == 1) {
+        for (int i = 1; i < nx; ++i) {
+            if (mesh.solid[j * nx + i] == 1 || mesh.solid[j * nx + (i - 1)] == 1) {
                 u[idxU(i, j)] = 0.0;
             }
         }
     }
-    for (int j = 0; j <= ny; ++j) {
+    for (int j = 0; j < ny; ++j) {
+        u[idxU(0, j)] = 0.0;
+        u[idxU(nx, j)] = 0.0;
+    }
+    for (int j = 1; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
-            if (mesh.solid[j * nx + i] == 1) {
+            if (mesh.solid[j * nx + i] == 1 || mesh.solid[(j - 1) * nx + i] == 1) {
                 v[idxV(i, j)] = 0.0;
             }
         }
+    }
+    for (int i = 0; i < nx; ++i) {
+        v[idxV(i, 0)] = 0.0;
+        v[idxV(i, ny)] = 0.0;
     }
 
     // Apply boundary conditions again
@@ -345,7 +359,14 @@ void Solver::saveVTK(int stepNum) const {
         }
         fout << "\n";
     }
+    fout << "SCALARS solid int 1\n";
+    fout << "LOOKUP_TABLE default\n";
 
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            fout << mesh.solid[j * nx + i] << "\n";
+        }
+    }
     fout << "VECTORS velocity float\n";
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
