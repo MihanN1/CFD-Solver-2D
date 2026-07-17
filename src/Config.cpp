@@ -23,7 +23,7 @@ void Config::readFromConsole() {
     std::cin >> CFL;
     std::cout << "Enter total simulation time(seconds): ";
     std::cin >> totalTime;
-    std::cout << "Enter SOR relaxation parameter omega (1.0-2.0): ";
+    std::cout << "Enter SOR relaxation parameter omega (1.6-1.85): ";
     std::cin >> omega;
     std::cout << "Enter SOR tolerance (e.g., 1e-5): ";
     std::cin >> tol;

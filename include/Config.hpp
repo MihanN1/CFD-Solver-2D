@@ -20,7 +20,7 @@ struct Config {
     double totalTime = 10.0;
 
     // SOR
-    double omega = 1.5;
+    double omega = 1.85;
     double tol = 1e-5;
     int maxIterSOR = 10000;
 
