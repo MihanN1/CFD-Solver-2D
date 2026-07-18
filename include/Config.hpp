@@ -25,8 +25,11 @@ struct Config {
     int maxIterSOR = 10000;
 
     // Geometry
-    std::string modelFile = "none";
-    double sliceAngle = 0.0;   // degrees
+    std::string geometryFile = "none";
+    double sliceAngleX = 0.0;   // degrees
+    double sliceAngleZ = 0.0;   // degrees
+    double sliceRotation = 0.0;   // degrees
+    bool invertSection = false; // doesn't allow to invert the model by default
 
     // Methods
     void readFromConsole();

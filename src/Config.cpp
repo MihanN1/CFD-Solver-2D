@@ -30,9 +30,15 @@ void Config::readFromConsole() {
     std::cout << "Enter max SOR iterations: ";
     std::cin >> maxIterSOR;
     std::cout << "Enter path to 3D model (or 'none' for circle): ";
-    std::cin >> modelFile;
-    std::cout << "Enter slice angle (degrees, default 0): ";
-    std::cin >> sliceAngle;
+    std::cin >> geometryFile;
+    std::cout << "Enter around the axis going towards the observer (degrees, default 0): ";
+    std::cin >> sliceAngleX;
+    std::cout << "Enter around a vertical axis (degrees, default 0): ";
+    std::cin >> sliceAngleZ;
+    std::cout << "Enter rotation in the simulation plane (degrees, default 0): ";
+    std::cin >> sliceRotation;
+    std::cout << "Enter <true> if you want to mirror the section, press <enter> if not: ";
+    std::cin >> invertSection;
     std::cout << "Configuration read.\n";
     std::cout << "Enter density ro. Make sure that the gas/liquid is incompressible(meaning for air speed its less than 0.3M)(kg/m^3): ";
     std::cin >> ro; 
@@ -52,8 +58,11 @@ void Config::print() const {
     std::cout << "  omega         = " << omega << "\n";
     std::cout << "  tol           = " << tol << "\n";
     std::cout << "  maxIterSOR    = " << maxIterSOR << "\n";
-    std::cout << "  modelFile     = " << modelFile << "\n";
-    std::cout << "  sliceAngle    = " << sliceAngle << " deg\n";
+    std::cout << "  geometryFile     = " << geometryFile << "\n";
+    std::cout << "  sliceAngleX    = " << sliceAngleX << " deg\n";
+    std::cout << "  sliceAngleZ    = " << sliceAngleZ << " deg\n";
+    std::cout << "  invertSection  = " << invertSection << "\n";
+    std::cout << "  sliceRotation    = " << sliceRotation << " deg\n";
     std::cout << "  ro            = " << ro << "kg/m^3\n"; 
     std::cout << "--------------------------------\n";
 }
@@ -97,12 +106,21 @@ bool Config::modifyParam(const std::string& name) {
     } else if (lower == "maxitersor") {
         std::cout << "New maxIterSOR: ";
         std::cin >> maxIterSOR;
-    } else if (lower == "modelfile") {
-        std::cout << "New modelFile: ";
-        std::cin >> modelFile;
-    } else if (lower == "sliceangle") {
-        std::cout << "New sliceAngle (deg): ";
-        std::cin >> sliceAngle;
+    } else if (lower == "geometryfile") {
+        std::cout << "New geometryFile: ";
+        std::cin >> geometryFile;
+    } else if (lower == "sliceanglex") {
+        std::cout << "New sliceAngleX (deg): ";
+        std::cin >> sliceAngleX;
+    }else if (lower == "sliceanglez") {
+        std::cout << "New sliceAngleZ (deg): ";
+        std::cin >> sliceAngleZ;
+    }else if (lower == "invertsection") {
+        std::cout << "New invertSection: ";
+        std::cin >> invertSection;
+    } else if (lower == "slicerotation") {
+        std::cout << "New sliceRotation (deg): ";
+        std::cin >> sliceRotation;
     } else if (lower == "ro") {
         std::cout << "New ro(kg/m^3): ";
         std::cin >> ro;
