@@ -61,7 +61,7 @@ void Solver::predictor() {
     double nu = cfg.nu;
     int nx = cfg.nx, ny = cfg.ny;
 
-    // Compute u_star for internal fluid cells (i = 1..nx-1, j = 1..ny-1)
+    // Compute u_star for internal fluid cells (i = 1..nx-1, j = 1..ny-2)
     // u is on vertical faces, so we need to compute convection and diffusion at those points
     for (int j = 1; j < ny-1; ++j) {
         for (int i = 1; i < nx; ++i) { // internal faces
