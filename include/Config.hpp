@@ -36,7 +36,4 @@ struct Config {
     void print() const;
     bool modifyParam(const std::string& name);
     bool confirm();   // returns true if confirmed, false if modified
-
-    // Density
-    double ro = 1.225;
 };
