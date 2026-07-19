@@ -23,7 +23,7 @@ The ultimate goal is to simulate the **Karman vortex street** behind a cylinder 
   - Corrector step updating velocities.
   - Dynamic time step based on CFL and diffusive stability.
 - ✅ **VTK output** – saves pressure (physical, in Pa) and velocity fields every N steps (configurable).
-- ❌ **Profile import** – STL/OBJ loading and slicing will be added in Sprint 3.
+- ✅ **Profile import** – STL/OBJ loading and slicing will be added in Sprint 3.
 - ❌ **Built‑in visualization** – SFML rendering will be added in Sprint 4.
 
 ---
@@ -116,9 +116,8 @@ Follow the interactive prompts to set:
 - Flow parameters (U0, nu, Re – if set to 0 it will be computed later)
 - Time parameters (CFL, totalTime)
 - SOR parameters (omega, tol, maxIterSOR)
-- Geometry (currently only none for circle; model file and slice angle are reserved)
+- Geometry (three angles for section and its rotation on simulation plane)
 After confirmation, the solver starts and writes solution_*.vtk files in the working directory.
-
 Visualization of Results
 - Open the generated .vtk files in ParaView.
 - Build contours, streamlines, and vector fields.
