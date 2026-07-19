@@ -84,48 +84,25 @@ void Solver::predictor() {
             }
             // Convection: upwind for u
             double u_ij = u[idxU(i, j)];
-            double u_e = 0.25 * (
-                u[idxU(i+1, j-1)] +
-                u[idxU(i+1, j)] +
-                u[idxU(i,   j-1)] +
-                u[idxU(i,   j)]
-            );
-            double u_w = 0.25 * (
-                u[idxU(i,   j-1)] +
-                u[idxU(i,   j)] +
-                u[idxU(i-1, j-1)] +
-                u[idxU(i-1, j)]
-            );
             double v_n = 0.25 * (
                 v[idxV(i-1, j+1)] +
                 v[idxV(i,   j+1)] +
                 v[idxV(i-1, j)] +
                 v[idxV(i,   j)]
             );
-            double v_s = 0.25 * (
-                v[idxV(i-1, j)] +
-                v[idxV(i,   j)] +
-                v[idxV(i-1, j-1)] +
-                v[idxV(i,   j-1)]
-            ); // v on horizontal faces
             
-            double v_adv = 0.5 * (v_n + v_s);
 
-            // du/dx at (i,j) using upwind
-            double dudx = (u_ij > 0) ? (u_ij - u_w) / dx : (u_e - u_ij) / dx;
-            // du/dy at (i,j) – need v and u values
-            //  For upwind in y:
             double u_top = u[idxU(i, j+1)];
             double u_bot = u[idxU(i, j-1)];
             double u_right = u[idxU(i+1, j)];
             double u_left  = u[idxU(i-1, j)];
-            double dudy = (v_adv > 0) ? (u_ij - u_bot) / dy : (u_top - u_ij) / dy;
-
+            double dudy = (v_n > 0) ? (u_ij - u_bot) / dy : (u_top - u_ij) / dy;
+            double dudx = (u_ij > 0) ? (u_ij - u_left) / dx : (u_right - u_ij) / dx;
             // Diffusion: central differences
             double d2udx2 = (u_right - 2.0*u_ij + u_left) / (dx*dx);
             double d2udy2 = (u_top - 2.0*u_ij + u_bot) / (dy*dy);
 
-            u_star[idxU(i, j)] = u_ij + dt * (- (u_ij * dudx + v_adv * dudy) + nu * (d2udx2 + d2udy2));
+            u_star[idxU(i, j)] = u_ij + dt * (- (u_ij * dudx + v_n * dudy) + nu * (d2udx2 + d2udy2));
         }
     }
 
@@ -138,47 +115,26 @@ void Solver::predictor() {
             }
 
             double v_ij = v[idxV(i, j)];
-            double v_n = 0.25 * (
-                v[idxV(i-1, j+1)] +
-                v[idxV(i,   j+1)] +
-                v[idxV(i-1, j)] +
-                v[idxV(i,   j)]
-            );
-            double v_s = 0.25 * (
-                v[idxV(i-1, j)] +
-                v[idxV(i,   j)] +
-                v[idxV(i-1, j-1)] +
-                v[idxV(i,   j-1)]
-            );
             double u_e = 0.25 * (
                 u[idxU(i+1, j-1)] +
                 u[idxU(i+1, j)] +
                 u[idxU(i,   j-1)] +
                 u[idxU(i,   j)]
             );
-            double u_w = 0.25 * (
-                u[idxU(i,   j-1)] +
-                u[idxU(i,   j)] +
-                u[idxU(i-1, j-1)] +
-                u[idxU(i-1, j)]
-            );
-
-            double u_adv = 0.5 * (u_e + u_w);
-
-            // dv/dx with upwind in x
-            double dvdx = (u_adv > 0) ? (v_ij - v[idxV(i-1, j)]) / dx : (v[idxV(i+1, j)] - v_ij) / dx;
-            // dv/dy with upwind in y
-            double dvdy = (v_ij > 0) ? (v_ij - v_s) / dy : (v_n - v_ij) / dy;
-
-            // Diffusion
             double v_right = v[idxV(i+1, j)];
             double v_left  = v[idxV(i-1, j)];
             double v_top = v[idxV(i, j+1)];
             double v_bot = v[idxV(i, j-1)];
+            // dv/dx with upwind in x
+            double dvdx = (u_e > 0) ? (v_ij - v_left) / dx : (v_right - v_ij) / dx;
+            // dv/dy with upwind in y
+            double dvdy = (v_ij > 0) ? (v_ij - v_bot) / dy : (v_top - v_ij) / dy;
+
+            // Diffusion
             double d2vdx2 = (v_right - 2.0*v_ij + v_left) / (dx*dx);
             double d2vdy2 = (v_top - 2.0*v_ij + v_bot) / (dy*dy);
 
-            v_star[idxV(i, j)] = v_ij + dt * (- (u_adv * dvdx + v_ij * dvdy) + nu * (d2vdx2 + d2vdy2));
+            v_star[idxV(i, j)] = v_ij + dt * (- (u_e * dvdx + v_ij * dvdy) + nu * (d2vdx2 + d2vdy2));
         }
     }
 
