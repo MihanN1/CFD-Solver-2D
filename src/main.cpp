@@ -23,9 +23,9 @@ int main() {
 
     // Instruction about geometry import
     std::cout << "\nNote: This version supports STL and OBJ models.\n";
-    std::cout << "      The mask is generated from the projection of the model\n";
-    std::cout << "      onto the XY plane (slice angle is applied). You will be able to zoom in and out.\n";
-    std::cout << "      Currently, only a circle is used as placeholder.\n";
+    std::cout << "      The mask is generated from a central plane section of the model.\n";
+    std::cout << "      Slice angles, in-plane rotation, and optional mirroring are applied.\n";
+    std::cout << "      Enter 'none' to use the circle verification geometry.\n";
 
     std::cout << "      Total simulation time: " << cfg.totalTime << " s.\n";
     std::cout << "      (Time‑stepping will stop when current time reaches this. You will be able to go forwards and backwards in time.)\n";

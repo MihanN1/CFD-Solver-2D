@@ -7,7 +7,8 @@
 CFD‑Solver‑2D is an educational/research project that implements a finite‑difference CFD solver for unsteady viscous incompressible flow. It uses the **Chorin projection method** on a **staggered MAC grid** with an **immersed boundary** technique to handle complex geometries. The code is written in C++17 and features:
 - Interactive console parameter input with confirmation and on‑the‑fly editing.
 - **Currently**: full numerical solver with VTK output for post‑processing in ParaView.
-- **Planned**: real‑time visualisation with SFML and import of 3D models (STL/OBJ).
+- **Currently**: STL/OBJ loading, central plane section extraction, and geometry masking.
+- **Planned**: real‑time visualisation with SFML.
 
 The ultimate goal is to simulate the **Karman vortex street** behind a cylinder or an airfoil at moderate Reynolds numbers.
 
@@ -16,14 +17,14 @@ The ultimate goal is to simulate the **Karman vortex street** behind a cylinder 
 ## Current Status (after Sprint 2)
 
 - ✅ **Interactive configuration** – all parameters are entered via console, can be reviewed and modified before starting.
-- ✅ **Structured grid** – uniform Cartesian grid with circle mask (immersed boundary).
+- ✅ **Structured grid** – uniform Cartesian grid with imported-profile or circle mask.
 - ✅ **Full Navier–Stokes solver** – Chorin projection method:
   - Predictor step with upwind convection and central diffusion.
   - SOR iterative solver for the pressure Poisson equation.
   - Corrector step updating velocities.
   - Dynamic time step based on CFL and diffusive stability.
 - ✅ **VTK output** – saves pressure (physical, in Pa) and velocity fields every N steps (configurable).
-- ✅ **Profile import** – STL/OBJ loading and slicing will be added in Sprint 3.
+- ✅ **Profile import** – STL/OBJ loading, oriented central slicing, rotation, mirroring, and mask generation.
 - ❌ **Built‑in visualization** – SFML rendering will be added in Sprint 4.
 
 ---
@@ -51,6 +52,32 @@ The **Chorin projection** splits each time step into:
 
 Boundary conditions: no‑slip on solid walls, constant velocity at inlet, zero‑gradient at outlet, free‑slip at top/bottom.
 
+### Geometry section
+
+The imported triangle mesh is centred at its bounding-box centre \(\mathbf{c}\).
+The section plane is
+
+\[
+(\mathbf{x}-\mathbf{c})\cdot\mathbf{n}=0,
+\]
+
+where \(\mathbf{n}\) is constructed from `sliceAngleX` and `sliceAngleZ`.
+Each triangle edge with signed endpoint distances \(d_a\) and \(d_b\) crosses
+the plane at
+
+\[
+\mathbf{x}_{section}
+=
+\mathbf{a}
++
+\frac{d_a}{d_a-d_b}(\mathbf{b}-\mathbf{a}).
+\]
+
+The resulting segments are connected into closed contours. The largest closed
+contour is optionally mirrored, rotated by `sliceRotation`, scaled to
+\(0.2\min(L_x,L_y)\), centred in the domain, rasterized, and filled with the
+even–odd point-in-polygon rule.
+
 ---
 
 ## Architecture
@@ -73,7 +100,7 @@ CFD-Solver-2D/
 ├── models/ (place STL/OBJ files here)
 ├── lib/
 │ ├── sfml/ (will be used in Sprint 4)
-│ └── stl_reader/ (will be used in Sprint 3)
+│ └── stl_reader/ (STL import)
 ├── build/ (build directory, ignored by Git)
 ├── CMakeLists.txt
 ├── .gitignore
@@ -116,8 +143,11 @@ Follow the interactive prompts to set:
 - Flow parameters (U0, nu, Re – if set to 0 it will be computed later)
 - Time parameters (CFL, totalTime)
 - SOR parameters (omega, tol, maxIterSOR)
-- Geometry (three angles for section and its rotation on simulation plane)
+- Geometry file (`.stl`, `.obj`, or `none` for the verification circle)
+- Section orientation (`sliceAngleX`, `sliceAngleZ`)
+- In-plane rotation and optional mirroring
 After confirmation, the solver starts and writes solution_*.vtk files in the working directory.
+
 Visualization of Results
 - Open the generated .vtk files in ParaView.
 - Build contours, streamlines, and vector fields.
@@ -127,7 +157,7 @@ You can animate the sequence to observe vortex shedding.
 
 | Sprint | Focus |
 |--------|-------|
-| **3**  | STL/OBJ import, 2D profile extraction by slicing, geometry masking |
+| **3**  | Geometry hardening: multiple contours, holes, and malformed/non-manifold mesh diagnostics |
 | **4**  | SFML‑based real‑time rendering, interactive controls (pause, mode switching, zoom, time scrubbing) |
 | **Bonus** | Optional extension to compressible flows (gas dynamics) after core features are stable. Also the code will be properly optimized, fixed and checked.|
 

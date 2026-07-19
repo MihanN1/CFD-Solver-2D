@@ -1,7 +1,22 @@
 #include "Config.hpp"
+#include <cctype>
 #include <iostream>
 #include <limits>
-#include <cctype>
+
+namespace {
+std::string readGeometryPath() {
+    std::string path;
+    std::getline(std::cin >> std::ws, path);
+
+    if (path.size() >= 2 &&
+        ((path.front() == '"' && path.back() == '"') ||
+         (path.front() == '\'' && path.back() == '\''))) {
+        path = path.substr(1, path.size() - 2);
+    }
+
+    return path;
+}
+}
 
 void Config::readFromConsole() {
     std::cout << "=== CFD-Solver-2D Configuration ===\n";
@@ -30,18 +45,19 @@ void Config::readFromConsole() {
     std::cout << "Enter max SOR iterations: ";
     std::cin >> maxIterSOR;
     std::cout << "Enter path to 3D model (or 'none' for circle): ";
-    std::cin >> geometryFile;
+    geometryFile = readGeometryPath();
     std::cout << "Enter around the axis going towards the observer (degrees, default 0): ";
     std::cin >> sliceAngleX;
     std::cout << "Enter around a vertical axis (degrees, default 0): ";
     std::cin >> sliceAngleZ;
     std::cout << "Enter rotation in the simulation plane (degrees, default 0): ";
     std::cin >> sliceRotation;
-    std::cout << "Enter <true> if you want to mirror the section, press <enter> if not: ";
+    std::cout << "Mirror the section? (0 = no, 1 = yes): ";
     std::cin >> invertSection;
     std::cout << "Configuration read.\n";
     std::cout << "Enter density ro. Make sure that the gas/liquid is incompressible(meaning for air speed its less than 0.3M)(kg/m^3): ";
-    std::cin >> ro; 
+    std::cin >> ro;
+    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 
 }
 void Config::print() const {
@@ -68,7 +84,10 @@ void Config::print() const {
 }
 bool Config::modifyParam(const std::string& name) {
     std::string lower = name;
-    for (char& c : lower) c = std::tolower(c);
+    for (char& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    bool usedFormattedInput = true;
 
     if (lower == "lx") {
         std::cout << "New Lx: ";
@@ -108,7 +127,8 @@ bool Config::modifyParam(const std::string& name) {
         std::cin >> maxIterSOR;
     } else if (lower == "geometryfile") {
         std::cout << "New geometryFile: ";
-        std::cin >> geometryFile;
+        geometryFile = readGeometryPath();
+        usedFormattedInput = false;
     } else if (lower == "sliceanglex") {
         std::cout << "New sliceAngleX (deg): ";
         std::cin >> sliceAngleX;
@@ -128,6 +148,9 @@ bool Config::modifyParam(const std::string& name) {
         std::cout << "Unknown parameter: " << name << "\n";
         return false;
     }
+    if (usedFormattedInput) {
+        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
+    }
     std::cout << "Parameter updated.\n";
     return true;
 }
@@ -138,7 +161,6 @@ bool Config::confirm() {
     std::cout << "> ";
 
     std::string input;
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n'); // clear newline
     std::getline(std::cin, input);
 
     if (input.empty()) {
