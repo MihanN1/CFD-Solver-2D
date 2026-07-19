@@ -5,7 +5,7 @@
 #include <iomanip>
 #include <algorithm>
 
-static const int SAVE_INTERVAL = 100; // save every 100 steps
+static const int SAVE_INTERVAL = 1; // save every step, so that we can determine the mistakes and debug the code more easily. It can be changed to a larger number for faster simulations.
 
 Solver::Solver(const Config& cfg, const Mesh& mesh)
     : cfg(cfg), mesh(mesh)
@@ -18,14 +18,26 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
     v_star.resize(cfg.nx * (cfg.ny + 1), 0.0);
 }
 
-void Solver::initFields() {
-    // Initialize u with U0 at inlet (left boundary)
-    for (int j = 0; j < cfg.ny; ++j) {
-        u[idxU(0, j)] = cfg.U0;
+void Solver::initFields()
+{
+    std::fill(p.begin(), p.end(), 0.0);
+    std::fill(u.begin(), u.end(), 0.0);
+    std::fill(v.begin(), v.end(), 0.0);
+
+    for (int j = 0; j < cfg.ny; j++) {
+        for (int i = 0; i <= cfg.nx; i++) {
+            bool solidLeft = false;
+            bool solidRight = false;
+            if (i > 0)
+                solidLeft = mesh.solid[j*cfg.nx + (i-1)];
+            if (i < cfg.nx)
+                solidRight = mesh.solid[j*cfg.nx + i];
+            if (!(solidLeft || solidRight))
+                u[idxU(i,j)] = cfg.U0;
+        }
     }
-    // Other fields remain zero
-    // Solid cells will be zeroed at each step
-    std::cout << "Fields initialized.\n";
+    applyBC();
+    std::cout<<"Fields initialized.\n";
 }
 
 void Solver::computeDt() {
@@ -72,19 +84,22 @@ void Solver::predictor() {
             }
             // Convection: upwind for u
             double u_ij = u[idxU(i, j)];
-            double u_e = u[idxU(i+1, j)], u_w = u[idxU(i-1, j)];
-            double v_n = v[idxV(i, j+1)], v_s = v[idxV(i, j)]; // v on horizontal faces
+            double v_n = 0.25 * (
+                v[idxV(i-1, j+1)] +
+                v[idxV(i,   j+1)] +
+                v[idxV(i-1, j)] +
+                v[idxV(i,   j)]
+            );
+            
 
-            // du/dx at (i,j) using upwind
-            double dudx = (u_ij > 0) ? (u_ij - u_w) / dx : (u_e - u_ij) / dx;
-            // du/dy at (i,j) – need v and u values
-            //  For upwind in y:
-            double u_top = 0.5 * (u[idxU(i, j+1)] + u[idxU(i+1, j+1)]); // interpolate u at top face
-            double u_bot = 0.5 * (u[idxU(i, j-1)] + u[idxU(i+1, j-1)]);
+            double u_top = u[idxU(i, j+1)];
+            double u_bot = u[idxU(i, j-1)];
+            double u_right = u[idxU(i+1, j)];
+            double u_left  = u[idxU(i-1, j)];
             double dudy = (v_n > 0) ? (u_ij - u_bot) / dy : (u_top - u_ij) / dy;
-
+            double dudx = (u_ij > 0) ? (u_ij - u_left) / dx : (u_right - u_ij) / dx;
             // Diffusion: central differences
-            double d2udx2 = (u_e - 2.0*u_ij + u_w) / (dx*dx);
+            double d2udx2 = (u_right - 2.0*u_ij + u_left) / (dx*dx);
             double d2udy2 = (u_top - 2.0*u_ij + u_bot) / (dy*dy);
 
             u_star[idxU(i, j)] = u_ij + dt * (- (u_ij * dudx + v_n * dudy) + nu * (d2udx2 + d2udy2));
@@ -92,7 +107,7 @@ void Solver::predictor() {
     }
 
     // Compute v_star similarly
-    for (int j = 1; j < ny; ++j) { // internal horizontal faces
+    for (int j = 1; j < ny-1; ++j) { // internal horizontal faces
         for (int i = 1; i < nx-1; ++i) {
             if (mesh.solid[j * nx + i] == 1 || mesh.solid[(j - 1) * nx + i] == 1) {
                 v_star[idxV(i, j)] = 0.0;
@@ -100,18 +115,24 @@ void Solver::predictor() {
             }
 
             double v_ij = v[idxV(i, j)];
-            double v_n = v[idxV(i, j+1)], v_s = v[idxV(i, j-1)];
-            double u_e = u[idxU(i+1, j)], u_w = u[idxU(i, j)];
-
+            double u_e = 0.25 * (
+                u[idxU(i+1, j-1)] +
+                u[idxU(i+1, j)] +
+                u[idxU(i,   j-1)] +
+                u[idxU(i,   j)]
+            );
+            double v_right = v[idxV(i+1, j)];
+            double v_left  = v[idxV(i-1, j)];
+            double v_top = v[idxV(i, j+1)];
+            double v_bot = v[idxV(i, j-1)];
             // dv/dx with upwind in x
-            double dvdx = (u_e > 0) ? (v_ij - v[idxV(i-1, j)]) / dx : (v[idxV(i+1, j)] - v_ij) / dx;
+            double dvdx = (u_e > 0) ? (v_ij - v_left) / dx : (v_right - v_ij) / dx;
             // dv/dy with upwind in y
-            double dvdy = (v_ij > 0) ? (v_ij - v_s) / dy : (v_n - v_ij) / dy;
+            double dvdy = (v_ij > 0) ? (v_ij - v_bot) / dy : (v_top - v_ij) / dy;
 
             // Diffusion
-            double v_right = v[idxV(i+1, j)], v_left = v[idxV(i-1, j)];
             double d2vdx2 = (v_right - 2.0*v_ij + v_left) / (dx*dx);
-            double d2vdy2 = (v_n - 2.0*v_ij + v_s) / (dy*dy);
+            double d2vdy2 = (v_top - 2.0*v_ij + v_bot) / (dy*dy);
 
             v_star[idxV(i, j)] = v_ij + dt * (- (u_e * dvdx + v_ij * dvdy) + nu * (d2vdx2 + d2vdy2));
         }
@@ -130,8 +151,9 @@ void Solver::predictor() {
     }
     // Top/Bottom: slip or free-slip (we use zero gradient for u, v=0)
     for (int i = 0; i <= nx; ++i) {
-        u_star[idxU(i, 0)] = u_star[idxU(i, 1)];    // bottom
-        u_star[idxU(i, ny)] = u_star[idxU(i, ny-1)]; // top
+        u_star[idxU(i, 0)] = u_star[idxU(i, 1)];
+        // Верхняя граница существует только как ny-1
+        u_star[idxU(i, ny-1)] = u_star[idxU(i, ny-2)];
     }
     for (int i = 0; i < nx; ++i) {
         v_star[idxV(i, 0)] = 0.0;   // bottom (no vertical flow)
@@ -269,7 +291,7 @@ void Solver::applyBC() {
     // Top/Bottom: free slip (u gradient zero, v=0)
     for (int i = 0; i <= nx; ++i) {
         u[idxU(i, 0)] = u[idxU(i, 1)];
-        u[idxU(i, ny)] = u[idxU(i, ny-1)];
+        u[idxU(i, ny-1)] = u[idxU(i, ny-2)];
     }
     for (int i = 0; i < nx; ++i) {
         v[idxV(i, 0)] = 0.0;
@@ -328,10 +350,10 @@ void Solver::saveVTK(int stepNum) const {
     fout << "CFD-Solver-2D output, step " << stepNum << "\n";
     fout << "ASCII\n";
     fout << "DATASET STRUCTURED_POINTS\n";
-    fout << "DIMENSIONS " << nx << " " << ny << " 1\n";
+    fout << "DIMENSIONS " << nx + 1 << " " << ny + 1 << " 1\n";
     fout << "ORIGIN 0 0 0\n";
     fout << "SPACING " << dx << " " << dy << " 0\n";
-    fout << "POINT_DATA " << (nx * ny) << "\n";
+    fout << "CELL_DATA " << nx * ny << "\n";
 
     // Compute cell-centred fields
     std::vector<double> p_cell(nx * ny);
@@ -361,11 +383,12 @@ void Solver::saveVTK(int stepNum) const {
     }
     fout << "SCALARS solid int 1\n";
     fout << "LOOKUP_TABLE default\n";
-
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            fout << mesh.solid[j * nx + i] << "\n";
+    for (int j = 0; j < ny; ++j){
+        for (int i = 0; i < nx; ++i)
+        {
+            fout << mesh.solid[j*nx+i] << " ";
         }
+        fout << "\n";
     }
     fout << "VECTORS velocity float\n";
     for (int j = 0; j < ny; ++j) {
