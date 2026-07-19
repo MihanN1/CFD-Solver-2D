@@ -144,8 +144,10 @@ Follow the interactive prompts to set:
 - Time parameters (CFL, totalTime)
 - SOR parameters (omega, tol, maxIterSOR)
 - Geometry file (`.stl`, `.obj`, or `none` for the verification circle)
-- Section orientation and rotation (three angles: `sliceAngleX`, `sliceAngleZ`, and in-plane rotation), with optional mirroring
+- Section orientation (`sliceAngleX`, `sliceAngleZ`)
+- In-plane rotation and optional mirroring
 After confirmation, the solver starts and writes solution_*.vtk files in the working directory.
+
 Visualization of Results
 - Open the generated .vtk files in ParaView.
 - Build contours, streamlines, and vector fields.
