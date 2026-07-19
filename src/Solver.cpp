@@ -5,7 +5,7 @@
 #include <iomanip>
 #include <algorithm>
 
-static const int SAVE_INTERVAL = 1; // save every 100 steps
+static const int SAVE_INTERVAL = 1; // save every step, so that we can determine the mistakes and debug the code more easily. It can be changed to a larger number for faster simulations.
 
 Solver::Solver(const Config& cfg, const Mesh& mesh)
     : cfg(cfg), mesh(mesh)
@@ -76,7 +76,7 @@ void Solver::predictor() {
     // Compute u_star for internal fluid cells (i = 1..nx-1, j = 1..ny-1)
     // u is on vertical faces, so we need to compute convection and diffusion at those points
     for (int j = 1; j < ny-1; ++j) {
-        for (int i = 1; i < nx-1; ++i) { // internal faces
+        for (int i = 1; i < nx; ++i) { // internal faces
             // Skip if solid
             if (mesh.solid[j * nx + i] == 1 || mesh.solid[j * nx + (i - 1)] == 1) {
                 u_star[idxU(i, j)] = 0.0;
