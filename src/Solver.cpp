@@ -54,18 +54,21 @@ void Solver::computeDt() {
         }
     }
 
-    double vmax = std::max(maxU, maxV);
-    double dtCFL;
-
-    if (vmax < 1e-12)
-        dtCFL = 1e9;
+    double advDenom = maxU / mesh.dx + maxV / mesh.dy;
+    double dtAdv;
+    if (advDenom < 1e-12)
+        dtAdv = 1e9;
     else
-        dtCFL = cfg.CFL * std::min(mesh.dx, mesh.dy) / vmax;
-    // Also consider diffusive stability: dt <= 0.5 * dx^2 / nu
-    double dtDiff = 0.5 * std::min(mesh.dx*mesh.dx, mesh.dy*mesh.dy) / cfg.nu;
-    dt = std::min(dtCFL, dtDiff);
+        dtAdv = cfg.CFL / advDenom;
+    double invDx2 = 1.0 / (mesh.dx * mesh.dx);
+    double invDy2 = 1.0 / (mesh.dy * mesh.dy);
+    double dtDiff = 1.0 /
+        (2.0 * cfg.nu * (invDx2 + invDy2));
+
+    dt = std::min(dtAdv, dtDiff);
     // Guard against zero or negative
-    if (dt <= 0.0) dt = 1e-6;
+    if (dt <= 0.0 || std::isnan(dt) || std::isinf(dt))
+        dt = 1e-6;
 }
 
 void Solver::predictor() {
@@ -107,7 +110,7 @@ void Solver::predictor() {
     }
 
     // Compute v_star similarly
-    for (int j = 1; j < ny-1; ++j) { // internal horizontal faces
+    for (int j = 1; j < ny; ++j) { // internal horizontal faces
         for (int i = 1; i < nx-1; ++i) {
             if (mesh.solid[j * nx + i] == 1 || mesh.solid[(j - 1) * nx + i] == 1) {
                 v_star[idxV(i, j)] = 0.0;
@@ -285,7 +288,6 @@ void Solver::applyBC() {
     // Outlet: zero gradient
     for (int j = 0; j < ny; ++j) {
         u[idxU(nx, j)] = u[idxU(nx-1, j)];
-        v[idxV(nx, j)] = v[idxV(nx-1, j)];
     }
     // Top/Bottom: free slip (u gradient zero, v=0)
     for (int i = 0; i <= nx; ++i) {
