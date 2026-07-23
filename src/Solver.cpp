@@ -203,9 +203,15 @@ void Solver::solvePoisson() {
                 double p_new = (1.0 - omega) * p_old + omega * p_explicit;
                 p[idxP(i, j)] = p_new;
 
-                // Compute residual (max absolute difference)
-                double res = std::abs(p_new - p_old);
-                if (res > residual) residual = res;
+                // Residual of Poisson equation
+                double laplace =
+                    (p_e - 2.0 * p_new + p_w) * invDx2 +
+                    (p_n - 2.0 * p_new + p_s) * invDy2;
+
+                double res = std::abs(laplace - f);
+
+                if (res > residual)
+                    residual = res;
             }
         }
         iter++;
