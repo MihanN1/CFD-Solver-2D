@@ -11,18 +11,18 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
     : cfg(cfg), mesh(mesh)
 {
     // Allocate arrays
-    p.resize(cfg.nx * cfg.ny, 0.0);
-    u.resize((cfg.nx + 1) * cfg.ny, 0.0);
-    v.resize(cfg.nx * (cfg.ny + 1), 0.0);
-    u_star.resize((cfg.nx + 1) * cfg.ny, 0.0);
-    v_star.resize(cfg.nx * (cfg.ny + 1), 0.0);
+    p.assign(cfg.nx * cfg.ny, 0.0f);
+    u.assign((cfg.nx + 1) * cfg.ny, 0.0f);
+    v.assign(cfg.nx * (cfg.ny + 1), 0.0f);
+    u_star.assign((cfg.nx + 1) * cfg.ny, 0.0f);
+    v_star.assign(cfg.nx * (cfg.ny + 1), 0.0f);
 }
 
 void Solver::initFields()
 {
-    std::fill(p.begin(), p.end(), 0.0);
-    std::fill(u.begin(), u.end(), 0.0);
-    std::fill(v.begin(), v.end(), 0.0);
+    std::fill(p.begin(), p.end(), 0.0f);
+    std::fill(u.begin(), u.end(), 0.0f);
+    std::fill(v.begin(), v.end(), 0.0f);
 
     for (int j = 0; j < cfg.ny; j++) {
         for (int i = 0; i <= cfg.nx; i++) {
@@ -42,15 +42,15 @@ void Solver::initFields()
 
 void Solver::computeDt() {
     // Find max absolute velocities
-    double maxU = 0.0, maxV = 0.0;
+    float maxU = 0.0f, maxV = 0.0f;
     for (int j = 0; j < cfg.ny; ++j) {
         for (int i = 0; i <= cfg.nx; ++i) {
-            maxU = std::max(maxU, std::abs(u[idxU(i, j)]));
+            maxU = std::max(maxU, std::fabs(u[idxU(i, j)]));
         }
     }
     for (int j = 0; j <= cfg.ny; ++j) {
         for (int i = 0; i < cfg.nx; ++i) {
-            maxV = std::max(maxV, std::abs(v[idxV(i, j)]));
+            maxV = std::max(maxV, std::fabs(v[idxV(i, j)]));
         }
     }
 
@@ -60,10 +60,10 @@ void Solver::computeDt() {
         dtAdv = 1e9;
     else
         dtAdv = cfg.CFL / advDenom;
-    double invDx2 = 1.0 / (mesh.dx * mesh.dx);
-    double invDy2 = 1.0 / (mesh.dy * mesh.dy);
-    double dtDiff = 1.0 /
-        (2.0 * cfg.nu * (invDx2 + invDy2));
+    double invDx2 = 1.0f / (mesh.dx * mesh.dx);
+    double invDy2 = 1.0f / (mesh.dy * mesh.dy);
+    double dtDiff = 1.0f /
+        (2.0f * cfg.nu * (invDx2 + invDy2));
 
     dt = std::min(dtAdv, dtDiff);
     // Guard against zero or negative
@@ -72,8 +72,8 @@ void Solver::computeDt() {
 }
 
 void Solver::predictor() {
-    double dx = mesh.dx, dy = mesh.dy;
-    double nu = cfg.nu;
+    float dx = mesh.dx, dy = mesh.dy;
+    float nu = cfg.nu;
     int nx = cfg.nx, ny = cfg.ny;
 
     // Compute u_star for internal fluid cells (i = 1..nx-1, j = 1..ny-2)
@@ -81,13 +81,13 @@ void Solver::predictor() {
     for (int j = 1; j < ny-1; ++j) {
         for (int i = 1; i < nx; ++i) { // internal faces
             // Skip if solid
-            if (mesh.solid[j * nx + i] == 1 || mesh.solid[j * nx + (i - 1)] == 1) {
+            if (mesh.solid[j * nx + i] || mesh.solid[j * nx + (i - 1)]) {
                 u_star[idxU(i, j)] = 0.0;
                 continue;
             }
             // Convection: upwind for u
-            double u_ij = u[idxU(i, j)];
-            double v_n = 0.25 * (
+            float u_ij = u[idxU(i, j)];
+            float v_n = 0.25f * (
                 v[idxV(i-1, j+1)] +
                 v[idxV(i,   j+1)] +
                 v[idxV(i-1, j)] +
@@ -95,15 +95,15 @@ void Solver::predictor() {
             );
             
 
-            double u_top = u[idxU(i, j+1)];
-            double u_bot = u[idxU(i, j-1)];
-            double u_right = u[idxU(i+1, j)];
-            double u_left  = u[idxU(i-1, j)];
-            double dudy = (v_n > 0) ? (u_ij - u_bot) / dy : (u_top - u_ij) / dy;
-            double dudx = (u_ij > 0) ? (u_ij - u_left) / dx : (u_right - u_ij) / dx;
+            float u_top = u[idxU(i, j+1)];
+            float u_bot = u[idxU(i, j-1)];
+            float u_right = u[idxU(i+1, j)];
+            float u_left  = u[idxU(i-1, j)];
+            float dudy = (v_n > 0) ? (u_ij - u_bot) / dy : (u_top - u_ij) / dy;
+            float dudx = (u_ij > 0) ? (u_ij - u_left) / dx : (u_right - u_ij) / dx;
             // Diffusion: central differences
-            double d2udx2 = (u_right - 2.0*u_ij + u_left) / (dx*dx);
-            double d2udy2 = (u_top - 2.0*u_ij + u_bot) / (dy*dy);
+            float d2udx2 = (u_right - 2.0f*u_ij + u_left) / (dx*dx);
+            float d2udy2 = (u_top - 2.0f*u_ij + u_bot) / (dy*dy);
 
             u_star[idxU(i, j)] = u_ij + dt * (- (u_ij * dudx + v_n * dudy) + nu * (d2udx2 + d2udy2));
         }
@@ -112,30 +112,30 @@ void Solver::predictor() {
     // Compute v_star similarly
     for (int j = 1; j < ny; ++j) { // internal horizontal faces
         for (int i = 1; i < nx-1; ++i) {
-            if (mesh.solid[j * nx + i] == 1 || mesh.solid[(j - 1) * nx + i] == 1) {
+            if (mesh.solid[j * nx + i] || mesh.solid[(j - 1) * nx + i]) {
                 v_star[idxV(i, j)] = 0.0;
                 continue;
             }
 
-            double v_ij = v[idxV(i, j)];
-            double u_e = 0.25 * (
+            float v_ij = v[idxV(i, j)];
+            float u_e = 0.25f * (
                 u[idxU(i+1, j-1)] +
                 u[idxU(i+1, j)] +
                 u[idxU(i,   j-1)] +
                 u[idxU(i,   j)]
             );
-            double v_right = v[idxV(i+1, j)];
-            double v_left  = v[idxV(i-1, j)];
-            double v_top = v[idxV(i, j+1)];
-            double v_bot = v[idxV(i, j-1)];
+            float v_right = v[idxV(i+1, j)];
+            float v_left  = v[idxV(i-1, j)];
+            float v_top = v[idxV(i, j+1)];
+            float v_bot = v[idxV(i, j-1)];
             // dv/dx with upwind in x
-            double dvdx = (u_e > 0) ? (v_ij - v_left) / dx : (v_right - v_ij) / dx;
+            float dvdx = (u_e > 0) ? (v_ij - v_left) / dx : (v_right - v_ij) / dx;
             // dv/dy with upwind in y
-            double dvdy = (v_ij > 0) ? (v_ij - v_bot) / dy : (v_top - v_ij) / dy;
+            float dvdy = (v_ij > 0) ? (v_ij - v_bot) / dy : (v_top - v_ij) / dy;
 
             // Diffusion
-            double d2vdx2 = (v_right - 2.0*v_ij + v_left) / (dx*dx);
-            double d2vdy2 = (v_top - 2.0*v_ij + v_bot) / (dy*dy);
+            float d2vdx2 = (v_right - 2.0f*v_ij + v_left) / (dx*dx);
+            float d2vdy2 = (v_top - 2.0f*v_ij + v_bot) / (dy*dy);
 
             v_star[idxV(i, j)] = v_ij + dt * (- (u_e * dvdx + v_ij * dvdy) + nu * (d2vdx2 + d2vdy2));
         }
@@ -163,52 +163,52 @@ void Solver::predictor() {
 }
 
 void Solver::solvePoisson() {
-    double dx = mesh.dx, dy = mesh.dy;
+    const float dx = mesh.dx, dy = mesh.dy;
     int nx = cfg.nx, ny = cfg.ny;
-    double omega = cfg.omega;
-    double tol = cfg.tol;
+    float omega = cfg.omega;
+    float tol = cfg.tol;
     int maxIter = cfg.maxIterSOR;
 
     // Precompute coefficients
-    double invDx2 = 1.0 / (dx*dx);
-    double invDy2 = 1.0 / (dy*dy);
-    double coeff = 1.0 / (2.0 * (invDx2 + invDy2));
+    float invDx2 = 1.0f / (dx*dx);
+    float invDy2 = 1.0f / (dy*dy);
+    float coeff = 1.0f / (2.0f * (invDx2 + invDy2));
 
     int iter = 0;
-    double residual = 1.0;
+    float residual = 1.0f;
 
     while (iter < maxIter && residual > tol) {
-        residual = 0.0;
+        residual = 0.0f;
         // SOR sweep over interior cells (excluding solid)
         for (int j = 0; j < ny; ++j) {
             for (int i = 0; i < nx; ++i) {
-                if (mesh.solid[j * nx + i] == 1) continue; // skip solid
+                if (mesh.solid[j * nx + i]) continue; // skip solid
 
                 // Compute divergence of u_star, v_star at cell centre
-                double div = (u_star[idxU(i+1, j)] - u_star[idxU(i, j)]) / dx
+                float div = (u_star[idxU(i+1, j)] - u_star[idxU(i, j)]) / dx
                            + (v_star[idxV(i, j+1)] - v_star[idxV(i, j)]) / dy;
 
                 // Right-hand side of Poisson: div / dt
-                double f = div / dt;
+                float f = div / static_cast<float>(dt);
 
                 // Compute explicit pressure from neighbours (use latest values)
-                double p_e = (i+1 < nx && mesh.solid[j*nx + (i+1)] == 0) ? p[idxP(i+1, j)] : p[idxP(i, j)];
-                double p_w = (i-1 >= 0 && mesh.solid[j*nx + (i-1)] == 0) ? p[idxP(i-1, j)] : p[idxP(i, j)];
-                double p_n = (j+1 < ny && mesh.solid[(j+1)*nx + i] == 0) ? p[idxP(i, j+1)] : p[idxP(i, j)];
-                double p_s = (j-1 >= 0 && mesh.solid[(j-1)*nx + i] == 0) ? p[idxP(i, j-1)] : p[idxP(i, j)];
+                float p_e = (i+1 < nx && !mesh.solid[j*nx + (i+1)]) ? p[idxP(i+1, j)] : p[idxP(i, j)];
+                float p_w = (i-1 >= 0 && !mesh.solid[j*nx + (i-1)]) ? p[idxP(i-1, j)] : p[idxP(i, j)];
+                float p_n = (j+1 < ny && !mesh.solid[(j+1)*nx + i]) ? p[idxP(i, j+1)] : p[idxP(i, j)];
+                float p_s = (j-1 >= 0 && !mesh.solid[(j-1)*nx + i]) ? p[idxP(i, j-1)] : p[idxP(i, j)];
 
-                double p_explicit = coeff * ( (p_e + p_w) * invDx2 + (p_n + p_s) * invDy2 - f );
+                float p_explicit = coeff * ( (p_e + p_w) * invDx2 + (p_n + p_s) * invDy2 - f );
 
-                double p_old = p[idxP(i, j)];
-                double p_new = (1.0 - omega) * p_old + omega * p_explicit;
+                float p_old = p[idxP(i, j)];
+                float p_new = (1.0 - omega) * p_old + omega * p_explicit;
                 p[idxP(i, j)] = p_new;
 
                 // Residual of Poisson equation
-                double laplace =
-                    (p_e - 2.0 * p_new + p_w) * invDx2 +
-                    (p_n - 2.0 * p_new + p_s) * invDy2;
+                float laplace =
+                    (p_e - 2.0f * p_new + p_w) * invDx2 +
+                    (p_n - 2.0f * p_new + p_s) * invDy2;
 
-                double res = std::abs(laplace - f);
+                float res = std::fabs(laplace - f);
 
                 if (res > residual)
                     residual = res;
@@ -216,27 +216,27 @@ void Solver::solvePoisson() {
         }
         iter++;
     }
-    p[idxP(0,0)] = 0.0;
+    p[idxP(0,0)] = 0.0f;
     // Optionally print residual
     // std::cout << "SOR iterations: " << iter << ", residual: " << residual << std::endl;
     // I think its not needed this much so its commentated by default
 }
 
 void Solver::corrector() {
-    double dx = mesh.dx, dy = mesh.dy;
+    const float dx = mesh.dx, dy = mesh.dy;
     int nx = cfg.nx, ny = cfg.ny;
 
     // Update u: u_new = u_star - dt * (p(i+1) - p(i)) / dx
     for (int j = 0; j < ny; ++j) {
         for (int i = 1; i < nx; ++i) { // internal faces
-            if (mesh.solid[j * nx + i] == 1 || mesh.solid[j * nx + (i - 1)] == 1) {
+            if (mesh.solid[j * nx + i] || mesh.solid[j * nx + (i - 1)]) {
                 u[idxU(i, j)] = 0.0;
                 continue;
             }
             // So gradient = (p[i] - p[i-1]) / dx
-            double p_right = (i < nx && mesh.solid[j*nx + i] == 0) ? p[idxP(i, j)] : p[idxP(i-1, j)];
-            double p_left  = (i-1 >= 0 && mesh.solid[j*nx + (i-1)] == 0) ? p[idxP(i-1, j)] : p[idxP(i, j)];
-            double dpdx = (p_right - p_left) / dx;
+            float p_right = (i < nx && !mesh.solid[j*nx + i]) ? p[idxP(i, j)] : p[idxP(i-1, j)];
+            float p_left  = (i-1 >= 0 && !mesh.solid[j*nx + (i-1)]) ? p[idxP(i-1, j)] : p[idxP(i, j)];
+            float dpdx = (p_right - p_left) / dx;
             u[idxU(i, j)] = u_star[idxU(i, j)] - dt * dpdx;
         }
     }
@@ -244,13 +244,13 @@ void Solver::corrector() {
     // Update v: v_new = v_star - dt * (p(j+1) - p(j)) / dy
     for (int j = 1; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
-            if (mesh.solid[j * nx + i] == 1 || mesh.solid[(j - 1) * nx + i] == 1) {
+            if (mesh.solid[j * nx + i] || mesh.solid[(j - 1) * nx + i]) {
                 v[idxV(i, j)] = 0.0;
                 continue;
             }
-            double p_top = (j < ny && mesh.solid[(j)*nx + i] == 0) ? p[idxP(i, j)] : p[idxP(i, j-1)];
-            double p_bot = (j-1 >= 0 && mesh.solid[(j-1)*nx + i] == 0) ? p[idxP(i, j-1)] : p[idxP(i, j)];
-            double dpdy = (p_top - p_bot) / dy;
+            float p_top = (j < ny && !mesh.solid[(j)*nx + i]) ? p[idxP(i, j)] : p[idxP(i, j-1)];
+            float p_bot = (j-1 >= 0 && !mesh.solid[(j-1)*nx + i]) ? p[idxP(i, j-1)] : p[idxP(i, j)];
+            float dpdy = (p_top - p_bot) / dy;
             v[idxV(i, j)] = v_star[idxV(i, j)] - dt * dpdy;
         }
     }
@@ -258,7 +258,7 @@ void Solver::corrector() {
     // Enforce no-slip inside solid and on boundaries
     for (int j = 0; j < ny; ++j) {
         for (int i = 1; i < nx; ++i) {
-            if (mesh.solid[j * nx + i] == 1 || mesh.solid[j * nx + (i - 1)] == 1) {
+            if (mesh.solid[j * nx + i] || mesh.solid[j * nx + (i - 1)]) {
                 u[idxU(i, j)] = 0.0;
             }
         }
@@ -269,7 +269,7 @@ void Solver::corrector() {
     }
     for (int j = 1; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
-            if (mesh.solid[j * nx + i] == 1 || mesh.solid[(j - 1) * nx + i] == 1) {
+            if (mesh.solid[j * nx + i] || mesh.solid[(j - 1) * nx + i]) {
                 v[idxV(i, j)] = 0.0;
             }
         }
@@ -343,7 +343,7 @@ void Solver::run() {
 
 void Solver::saveVTK(int stepNum) const {
     int nx = cfg.nx, ny = cfg.ny;
-    double dx = mesh.dx, dy = mesh.dy;
+    const float dx = mesh.dx, dy = mesh.dy;
 
     std::string filename = "solution_" + std::to_string(stepNum) + ".vtk";
     std::ofstream fout(filename);
@@ -362,18 +362,18 @@ void Solver::saveVTK(int stepNum) const {
     fout << "CELL_DATA " << nx * ny << "\n";
 
     // Compute cell-centred fields
-    std::vector<double> p_cell(nx * ny);
-    std::vector<double> u_cell(nx * ny), v_cell(nx * ny);
+    std::vector<float> p_cell(nx * ny);
+    std::vector<float> u_cell(nx * ny), v_cell(nx * ny);
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
             p_cell[j * nx + i] = p[idxP(i, j)] * cfg.ro; // physical pressure (Pa)
             // average u from left and right faces
-            double u_left = u[idxU(i, j)];
-            double u_right = u[idxU(i+1, j)];
+            float u_left = u[idxU(i, j)];
+            float u_right = u[idxU(i+1, j)];
             u_cell[j * nx + i] = 0.5 * (u_left + u_right);
             // average v from bottom and top faces
-            double v_bot = v[idxV(i, j)];
-            double v_top = v[idxV(i, j+1)];
+            float v_bot = v[idxV(i, j)];
+            float v_top = v[idxV(i, j+1)];
             v_cell[j * nx + i] = 0.5 * (v_bot + v_top);
         }
     }

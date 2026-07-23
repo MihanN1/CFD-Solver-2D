@@ -16,11 +16,11 @@ private:
 
     // Fields on staggered grid
     // Pressure (cell centres): size nx * ny
-    std::vector<double> p;
+    std::vector<float> p;
     // u on vertical faces: size (nx+1) * ny
-    std::vector<double> u, u_star;
+    std::vector<float> u, u_star;
     // v on horizontal faces: size nx * (ny+1)
-    std::vector<double> v, v_star;
+    std::vector<float> v, v_star;
 
     double currentTime = 0.0;
     int step = 0;

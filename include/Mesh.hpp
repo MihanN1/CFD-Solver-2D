@@ -28,7 +28,7 @@ public:
     std::vector<int> solid;   // 1 = inside body, 0 = fluid
     std::vector<Triangle> triangles;
     GeometryType geometryType = GeometryType::STL;
-    double dx, dy;
+    float dx, dy;
     int nx, ny;
 
     void initCircle(double cx, double cy, double R);
