@@ -150,7 +150,6 @@ void Solver::predictor() {
     // Outlet (right): zero gradient (neumann)
     for (int j = 0; j < ny; ++j) {
         u_star[idxU(nx, j)] = u_star[idxU(nx-1, j)];
-        v_star[idxV(nx, j)] = v_star[idxV(nx-1, j)];
     }
     // Top/Bottom: slip or free-slip (we use zero gradient for u, v=0)
     for (int i = 0; i <= nx; ++i) {
