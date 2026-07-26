@@ -9,8 +9,7 @@ void Multigrid::solve(
     std::vector<float>& pressure,
     const std::vector<float>& rhs,
     const std::vector<bool>& solid,
-    float omega,
-    int iterations)
+    float omega)
 {
     if (levels == 0)
         buildHierarchy();
@@ -18,6 +17,10 @@ void Multigrid::solve(
     pressureLevels[0] = pressure;
     rhsLevels[0] = rhs;
     solidLevels[0] = solid;
+    std::fill(
+        residualLevels[0].begin(),
+        residualLevels[0].end(),
+        0.0f);
     constexpr float tolerance = 1e-6f;
 
     for (int level = 1; level < levels; ++level)
@@ -36,13 +39,23 @@ void Multigrid::solve(
             solidLevels[level].begin(),
             solidLevels[level].end(),
             false);
+        std::fill(
+            residualLevels[level].begin(),
+            residualLevels[level].end(),
+            0.0f);
     }
 
-    for (int cycle = 0; cycle < iterations; ++cycle){
-        vCycle(0, omega);
+    fullMultigrid(omega);
+
+    constexpr int finalVCycles = 2;
+
+    for (int cycle = 0; cycle < finalVCycles; ++cycle){
         computeResidual(0);
+
         if (computeResidualNorm() < tolerance)
             break;
+
+        vCycle(0, omega);
     }
     pressure = pressureLevels[0];
 }
@@ -60,65 +73,68 @@ void Multigrid::smoothSOR(
     const float invDy2 = levelInvDy2[level];
 
     for (int iter = 0; iter < iterations; ++iter){
-        for (int j = 1; j < ny - 1; ++j){
-            const int row = j * nx;
-            const int rowTop = (j + 1) * nx;
-            const int rowBottom = (j - 1) * nx;
-            for (int i = 1; i < nx - 1; ++i){
-                const int id = row + i;
+        for (int color = 0; color < 2; ++color){
+            for (int j = 1; j < ny - 1; ++j){
+                const int row = j * nx;
+                const int rowTop = (j + 1) * nx;
+                const int rowBottom = (j - 1) * nx;
+                int iStart = 1 + ((j + color) & 1);
+                for (int i = iStart; i < nx - 1; i += 2){
+                    const int id = row + i;
 
-                if (solid[id])
-                    continue;
+                    if (solid[id])
+                        continue;
 
-                float diagonal = 0.0f;
+                    float diagonal = 0.0f;
 
-                float pLeft;
-                if (solid[id - 1]){
-                    pLeft = pressure[id];
+                    float pLeft;
+                    if (solid[id - 1]){
+                        pLeft = pressure[id];
+                    }
+                    else{
+                        pLeft = pressure[id - 1];
+                        diagonal += invDx2;
+                    }
+
+                    float pRight;
+                    if (solid[id + 1]){
+                        pRight = pressure[id];
+                    }
+                    else{
+                        pRight = pressure[id + 1];
+                        diagonal += invDx2;
+                    }
+
+                    float pDown;
+                    if (solid[rowBottom + i]){
+                        pDown = pressure[id];
+                    }
+                    else{
+                        pDown = pressure[rowBottom + i];
+                        diagonal += invDy2;
+                    }
+
+                    float pUp;
+                    if (solid[rowTop + i]){
+                        pUp = pressure[id];
+                    }
+                    else{
+                        pUp = pressure[rowTop + i];
+                        diagonal += invDy2;
+                    }
+
+                    if (diagonal == 0.0f)
+                        continue;
+
+                    const float pNew =
+                        ((pLeft + pRight) * invDx2 +
+                        (pDown + pUp) * invDy2 -
+                        rhs[id]) / diagonal;
+
+                    pressure[id] =
+                        (1.0f - omega) * pressure[id] +
+                        omega * pNew;
                 }
-                else{
-                    pLeft = pressure[id - 1];
-                    diagonal += invDx2;
-                }
-
-                float pRight;
-                if (solid[id + 1]){
-                    pRight = pressure[id];
-                }
-                else{
-                    pRight = pressure[id + 1];
-                    diagonal += invDx2;
-                }
-
-                float pDown;
-                if (solid[rowBottom + i]){
-                    pDown = pressure[id];
-                }
-                else{
-                    pDown = pressure[rowBottom + i];
-                    diagonal += invDy2;
-                }
-
-                float pUp;
-                if (solid[rowTop + i]){
-                    pUp = pressure[id];
-                }
-                else{
-                    pUp = pressure[rowTop + i];
-                    diagonal += invDy2;
-                }
-
-                if (diagonal == 0.0f)
-                    continue;
-
-                const float pNew =
-                    ((pLeft + pRight) * invDx2 +
-                    (pDown + pUp) * invDy2 -
-                    rhs[id]) / diagonal;
-
-                pressure[id] =
-                    (1.0f - omega) * pressure[id] +
-                    omega * pNew;
             }
         }
     }
@@ -363,6 +379,91 @@ void Multigrid::prolongateCorrection(int coarseLevel){
         }
     }
 }
+void Multigrid::prolongateSolution(int coarseLevel){
+    if (coarseLevel <= 0)
+        return;
+
+    int fineLevel = coarseLevel - 1;
+
+    std::fill(pressureLevels[fineLevel].begin(), pressureLevels[fineLevel].end(), 0.0f);
+
+    const int fineNx = levelNx[fineLevel];
+    const int fineNy = levelNy[fineLevel];
+
+    const int coarseNx = levelNx[coarseLevel];
+    const int coarseNy = levelNy[coarseLevel];
+
+    auto& finePressure = pressureLevels[fineLevel];
+
+    const auto& coarsePressure = pressureLevels[coarseLevel];
+    const auto& fineSolid = solidLevels[fineLevel];
+    const auto& coarseSolid = solidLevels[coarseLevel];
+
+    for (int j = 0; j < fineNy; ++j){
+        const float y = static_cast<float>(j) * 0.5f;
+
+        int jc0 = static_cast<int>(y);
+        int jc1 = std::min(jc0 + 1, coarseNy - 1);
+        
+        float ty = y - jc0;
+
+        for (int i = 0; i < fineNx; ++i){
+
+            const int fineId = j * fineNx + i;
+
+            if (fineSolid[fineId])
+                continue;
+
+            const float x = static_cast<float>(i) * 0.5f;
+
+            int ic0 = static_cast<int>(x);
+            int ic1 = std::min(ic0 + 1, coarseNx - 1);
+
+            float tx = x - ic0;
+
+            const int id00 = jc0 * coarseNx + ic0;
+            const int id10 = jc0 * coarseNx + ic1;
+            const int id01 = jc1 * coarseNx + ic0;
+            const int id11 = jc1 * coarseNx + ic1;
+
+            float value = 0.0f;
+            float weight = 0.0f;
+
+            const float w00 = (1.0f - tx) * (1.0f - ty);
+            const float w10 = tx * (1.0f - ty);
+            const float w01 = (1.0f - tx) * ty;
+            const float w11 = tx * ty;
+
+            if (!coarseSolid[id00])
+            {
+                value += w00 * coarsePressure[id00];
+                weight += w00;
+            }
+
+            if (!coarseSolid[id10])
+            {
+                value += w10 * coarsePressure[id10];
+                weight += w10;
+            }
+
+            if (!coarseSolid[id01])
+            {
+                value += w01 * coarsePressure[id01];
+                weight += w01;
+            }
+
+            if (!coarseSolid[id11])
+            {
+                value += w11 * coarsePressure[id11];
+                weight += w11;
+            }
+
+            if (weight > 0.0f)
+                finePressure[fineId] = value / weight;
+
+        }
+    }
+}
 // Multigrid vCycle, recursive! Cool, right?
 void Multigrid::vCycle(
     int level,
@@ -370,7 +471,7 @@ void Multigrid::vCycle(
 {
     const int preSmooth = 2;
     const int postSmooth = 2;
-    const int coarseSmooth = 10;
+    const int coarseSmooth = 20;
     // Coarsest grid
     if (level == levels - 1)
     {
@@ -420,4 +521,96 @@ void Multigrid::vCycle(
         solidLevels[level],
         omega,
         postSmooth);
+}
+void Multigrid::restrictRHS(int fineLevel){
+    if (fineLevel + 1 >= levels)
+        return;
+
+    int coarseLevel = fineLevel + 1;
+
+    auto& fineRhs = rhsLevels[fineLevel];
+    auto& coarseRhs = rhsLevels[coarseLevel];
+
+    int fineNx = levelNx[fineLevel];
+    int fineNy = levelNy[fineLevel];
+
+    int coarseNx = levelNx[coarseLevel];
+    int coarseNy = levelNy[coarseLevel];
+
+    auto& fineSolid = solidLevels[fineLevel];
+    auto& coarseSolid = solidLevels[coarseLevel];
+
+    for (int j = 1; j < coarseNy - 1; j++)
+    {
+        for (int i = 1; i < coarseNx - 1; i++)
+        {
+            int fi = std::min(i * 2, fineNx - 1);
+            int fj = std::min(j * 2, fineNy - 1);
+
+            float sum = 0.0f;
+            float wsum = 0.0f;
+
+            auto add = [&](int x,int y,float w)
+            {
+                if(x<0||x>=fineNx||y<0||y>=fineNy)
+                    return;
+
+                int id=y*fineNx+x;
+
+                if(!fineSolid[id])
+                {
+                    sum+=w*fineRhs[id];
+                    wsum+=w;
+                }
+            };
+
+            add(fi-1,fj-1,1);
+            add(fi  ,fj-1,2);
+            add(fi+1,fj-1,1);
+
+            add(fi-1,fj  ,2);
+            add(fi  ,fj  ,4);
+            add(fi+1,fj  ,2);
+
+            add(fi-1,fj+1,1);
+            add(fi  ,fj+1,2);
+            add(fi+1,fj+1,1);
+
+            coarseRhs[j*coarseNx+i]=(wsum>0)?sum/wsum:0;
+            int fj0 = std::max(fj - 1, 0);
+            int fi0 = std::max(fi - 1, 0);
+
+            coarseSolid[j * coarseNx + i] =
+                fineSolid[fj * fineNx + fi] &&
+                fineSolid[fj * fineNx + fi0] &&
+                fineSolid[fj0 * fineNx + fi] &&
+                fineSolid[fj0 * fineNx + fi0];
+        }
+    }
+}
+void Multigrid::fullMultigrid(float omega){
+    int coarsest = levels - 1;
+
+    for (int level = 0; level < coarsest; ++level)
+        restrictRHS(level);
+
+    std::fill(
+        pressureLevels[coarsest].begin(),
+        pressureLevels[coarsest].end(),
+        0.0f);
+
+    smoothSOR(
+        coarsest,
+        pressureLevels[coarsest],
+        rhsLevels[coarsest],
+        solidLevels[coarsest],
+        omega,
+        12);
+
+    for (int level = coarsest; level > 0; --level)
+    {
+        prolongateSolution(level);
+
+        vCycle(level - 1, omega);
+    }
 }

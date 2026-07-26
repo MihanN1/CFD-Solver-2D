@@ -32,6 +32,10 @@ private:
 
     void buildHierarchy();
 
+    void fullMultigrid(float omega);
+
+    void restrictRHS(int fineLevel);
+
     void vCycle(
         int level,
         float omega);
@@ -41,8 +45,7 @@ private:
         std::vector<float>& pressure,
         const std::vector<float>& rhs,
         const std::vector<bool>& solid,
-        float omega,
-        int iterations);
+        float omega);
 
     void computeResidual(int level);
     float computeResidualNorm() const;
@@ -50,4 +53,5 @@ private:
     void restrictResidual(int fineLevel);
 
     void prolongateCorrection(int coarseLevel);
+    void prolongateSolution(int coarseLevel);
 };

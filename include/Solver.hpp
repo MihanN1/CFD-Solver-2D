@@ -29,6 +29,8 @@ private:
     double currentTime = 0.0;
     int step = 0;
     double dt = 0.0;  // current time step
+    std::vector<uint8_t> uFluidMask;
+    std::vector<uint8_t> vFluidMask;
 
     // Helper methods
     void initFields();
@@ -37,6 +39,7 @@ private:
     void solvePoisson();
     void corrector();
     void applyBC();
+    void buildFaceMasks(); // build masks for u and v to identify fluid faces
 
     // VTK output
     void saveVTK(int stepNum) const;

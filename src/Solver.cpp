@@ -6,6 +6,7 @@
 #include <algorithm>
 
 static const int SAVE_INTERVAL = 1; // save every step, so that we can determine the mistakes and debug the code more easily. It can be changed to a larger number for faster simulations.
+constexpr int dtUpdateInterval = 5;
 
 Solver::Solver(const Config& cfg, const Mesh& mesh)
     : 
@@ -28,6 +29,7 @@ void Solver::initFields()
     std::fill(rhs.begin(), rhs.end(), 0.0f);
     std::fill(u.begin(), u.end(), 0.0f);
     std::fill(v.begin(), v.end(), 0.0f);
+    buildFaceMasks();
 
     for (int j = 0; j < cfg.ny; j++) {
         for (int i = 0; i <= cfg.nx; i++) {
@@ -45,16 +47,44 @@ void Solver::initFields()
     std::cout<<"Fields initialized.\n";
 }
 
+void Solver::buildFaceMasks(){
+    int nx = cfg.nx;
+    int ny = cfg.ny;
+
+    uFluidMask.assign((nx + 1) * ny, 0);
+    vFluidMask.assign(nx * (ny + 1), 0);
+
+    // u faces
+    for (int j = 0; j < ny; ++j){
+        for (int i = 1; i < nx; ++i){
+            if (!mesh.solid[j*nx+i] && !mesh.solid[j*nx+i-1]){
+                uFluidMask[idxU(i,j)] = 1;
+            }
+        }
+    }
+
+    // v faces
+    for (int j = 1; j < ny; ++j){
+        for (int i = 0; i < nx; ++i){
+            if (!mesh.solid[j*nx+i] && !mesh.solid[(j-1)*nx+i]){
+                vFluidMask[idxV(i,j)] = 1;
+            }
+        }
+    }
+}
+
 void Solver::computeDt() {
     // Find max absolute velocities
     float maxU = 0.0f, maxV = 0.0f;
     for (int j = 0; j < cfg.ny; ++j) {
         for (int i = 0; i <= cfg.nx; ++i) {
+            if (!uFluidMask[idxU(i,j)]) continue;
             maxU = std::max(maxU, std::fabsf(u[idxU(i, j)]));
         }
     }
     for (int j = 0; j <= cfg.ny; ++j) {
         for (int i = 0; i < cfg.nx; ++i) {
+            if (!vFluidMask[idxV(i,j)]) continue;
             maxV = std::max(maxV, std::fabsf(v[idxV(i, j)]));
         }
     }
@@ -96,7 +126,7 @@ void Solver::predictor() {
         const int rowVTop = (j + 1) * nx;
         for (int i = 1; i < nx; ++i) { // internal faces
             // Skip if solid
-            if (mesh.solid[j * nx + i] || mesh.solid[j * nx + (i - 1)]) {
+            if (!uFluidMask[idxU(i,j)]) {
                 u_star[rowU + i] = 0.0;
                 continue;
             }
@@ -132,7 +162,7 @@ void Solver::predictor() {
         const int rowU = j * (nx + 1);
         const int rowUBot = (j - 1) * (nx + 1);
         for (int i = 1; i < nx-1; ++i) {
-            if (mesh.solid[j * nx + i] || mesh.solid[(j - 1) * nx + i]) {
+            if (!vFluidMask[idxV(i,j)]) {
                 v_star[rowV + i] = 0.0;
                 continue;
             }
@@ -186,8 +216,6 @@ void Solver::solvePoisson() {
     const float invDx = 1.f / mesh.dx, invDy = 1.f / mesh.dy;
     int nx = cfg.nx, ny = cfg.ny;
     float omega = cfg.omega;
-    float tol = cfg.tol;
-    int iterations = cfg.iterations;
 
     for (int j = 0; j < ny; ++j) {
         const int row = j * nx;
@@ -210,8 +238,7 @@ void Solver::solvePoisson() {
         p,
         rhs,
         mesh.solid,
-        omega,
-        iterations);
+        omega);
 }
 
 void Solver::corrector() {
@@ -222,7 +249,7 @@ void Solver::corrector() {
     for (int j = 0; j < ny; ++j) {
         const int row = j * nx;
         for (int i = 1; i < nx; ++i) { // internal faces
-            if (mesh.solid[row + i] || mesh.solid[row + (i - 1)]) {
+            if (!uFluidMask[idxU(i,j)]) {
                 u[idxU(i, j)] = 0.0;
                 continue;
             }
@@ -239,7 +266,7 @@ void Solver::corrector() {
         const int row = j * nx;
         const int rowBot = (j - 1) * nx;
         for (int i = 0; i < nx; ++i) {
-            if (mesh.solid[row + i] || mesh.solid[rowBot + i]) {
+            if (!vFluidMask[idxV(i,j)]) {
                 v[idxV(i, j)] = 0.0;
                 continue;
             }
@@ -248,30 +275,6 @@ void Solver::corrector() {
             float dpdy = (p_top - p_bot) * invDy;
             v[idxV(i, j)] = v_star[idxV(i, j)] - dt * dpdy;
         }
-    }
-
-    // Enforce no-slip inside solid and on boundaries
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 1; i < nx; ++i) {
-            if (mesh.solid[j * nx + i] || mesh.solid[j * nx + (i - 1)]) {
-                u[idxU(i, j)] = 0.0;
-            }
-        }
-    }
-    for (int j = 0; j < ny; ++j) {
-        u[idxU(0, j)] = 0.0;
-        u[idxU(nx, j)] = 0.0;
-    }
-    for (int j = 1; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            if (mesh.solid[j * nx + i] || mesh.solid[(j - 1) * nx + i]) {
-                v[idxV(i, j)] = 0.0;
-            }
-        }
-    }
-    for (int i = 0; i < nx; ++i) {
-        v[idxV(i, 0)] = 0.0;
-        v[idxV(i, ny)] = 0.0;
     }
 
     // Apply boundary conditions again
@@ -310,7 +313,8 @@ void Solver::run() {
     saveVTK(step);
 
     while (currentTime < cfg.totalTime) {
-        computeDt();
+        if (step % dtUpdateInterval == 0)
+            computeDt();
         if (currentTime + dt > cfg.totalTime) dt = cfg.totalTime - currentTime; // avoid overshoot
 
         predictor();

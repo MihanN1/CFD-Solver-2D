@@ -21,7 +21,6 @@ struct Config {
 
     // SOR
     float omega = 1.85f;
-    int iterations = 20;
 
     // Geometry
     std::string geometryFile = "none";
