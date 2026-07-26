@@ -100,6 +100,7 @@ add_executable(cfd_app
     src/Config.cpp
     src/Mesh.cpp
     src/Solver.cpp
+    src/Multigrid.cpp
 )
 
 target_include_directories(cfd_app

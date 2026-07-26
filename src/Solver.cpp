@@ -8,10 +8,14 @@
 static const int SAVE_INTERVAL = 1; // save every step, so that we can determine the mistakes and debug the code more easily. It can be changed to a larger number for faster simulations.
 
 Solver::Solver(const Config& cfg, const Mesh& mesh)
-    : cfg(cfg), mesh(mesh)
+    : 
+    cfg(cfg),
+    mesh(mesh),
+    multigrid(cfg.nx, cfg.ny, mesh.dx, mesh.dy)
 {
     // Allocate arrays
     p.assign(cfg.nx * cfg.ny, 0.0f);
+    rhs.assign(cfg.nx * cfg.ny, 0.0f);
     u.assign((cfg.nx + 1) * cfg.ny, 0.0f);
     v.assign(cfg.nx * (cfg.ny + 1), 0.0f);
     u_star.assign((cfg.nx + 1) * cfg.ny, 0.0f);
@@ -21,6 +25,7 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
 void Solver::initFields()
 {
     std::fill(p.begin(), p.end(), 0.0f);
+    std::fill(rhs.begin(), rhs.end(), 0.0f);
     std::fill(u.begin(), u.end(), 0.0f);
     std::fill(v.begin(), v.end(), 0.0f);
 
@@ -182,77 +187,31 @@ void Solver::solvePoisson() {
     int nx = cfg.nx, ny = cfg.ny;
     float omega = cfg.omega;
     float tol = cfg.tol;
-    int maxIter = cfg.maxIterSOR;
+    int iterations = cfg.iterations;
 
-    // Precompute coefficients
-    float invDx2 = 1.0f * invDx * invDx;
-    float invDy2 = 1.0f * invDy * invDy;
-    float coeff = 1.0f / (2.0f * (invDx2 + invDy2));
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        const int rowTop = (j + 1) * nx;
 
-    int iter = 0;
-    float residual = 1.0f;
-
-    while (iter < maxIter && residual > tol) {
-        residual = 0.0f;
-        // SOR sweep over interior cells (excluding solid)
-        for (int j = 0; j < ny; ++j) {
-            const int row = j * nx;
-            const int rowTop = (j + 1) * nx;
-            const int rowBot = (j - 1) * nx;
-            for (int i = 0; i < nx; ++i) {
-                if (mesh.solid[row + i]) continue; // skip solid
-
-                // Compute divergence of u_star, v_star at cell centre
-                float div = (u_star[row + (i+1)] - u_star[row + i]) * invDx
-                           + (v_star[rowTop + i] - v_star[row + i]) * invDy;
-
-                // Right-hand side of Poisson: div / dt
-                float f = div / static_cast<float>(dt);
-
-                // Compute explicit pressure from neighbours (use latest values)
-                float p_e = (i+1 < nx && !mesh.solid[row + (i+1)]) ? p[row + (i+1)] : p[row + i];
-                float p_w = (i-1 >= 0 && !mesh.solid[row + (i-1)]) ? p[row + (i-1)] : p[row + i];
-                float p_n = (j+1 < ny && !mesh.solid[rowTop + i]) ? p[rowTop + i] : p[row + i];
-                float p_s = (j-1 >= 0 && !mesh.solid[rowBot + i]) ? p[rowBot + i] : p[row + i];
-
-                float p_explicit = coeff * ( (p_e + p_w) * invDx2 + (p_n + p_s) * invDy2 - f );
-
-                float p_old = p[row + i];
-                float p_new = (1.0 - omega) * p_old + omega * p_explicit;
-                p[row + i] = p_new;
-
-                // Residual of Poisson equation
-                const float p_c = p[row + i];
-                const float p_e_res =
-                    (i + 1 < nx && !mesh.solid[row + i + 1])
-                        ? p[row + i + 1]
-                        : p_c;
-                const float p_w_res =
-                    (i > 0 && !mesh.solid[row + i - 1])
-                        ? p[row + i - 1]
-                        : p_c;
-                const float p_n_res =
-                    (j + 1 < ny && !mesh.solid[rowTop + i])
-                        ? p[rowTop + i]
-                        : p_c;
-                const float p_s_res =
-                    (j > 0 && !mesh.solid[rowBot + i])
-                        ? p[rowBot + i]
-                        : p_c;
-                const float laplace =
-                    (p_e_res - 2.f*p_c + p_w_res) * invDx2 +
-                    (p_n_res - 2.f*p_c + p_s_res) * invDy2;
-                const float res = fabsf(laplace - f);
-                if(res > residual)
-                    residual = res;
+        for (int i = 0; i < nx; ++i) {
+            if (mesh.solid[row + i]) {
+                rhs[row + i] = 0.0f;
+                continue;
             }
+
+            const float div =
+                (u_star[row + i + 1] - u_star[row + i]) * invDx +
+                (v_star[rowTop + i] - v_star[row + i]) * invDy;
+            rhs[row + i] = div / static_cast<float>(dt);
         }
-        iter++;
     }
-    p[idxP(0,0)] = 0.0f;
-    // Optionally print residual
-    // std::cout << "SOR iterations: " << iter << ", residual: " << residual << std::endl;
-    // I think its not needed this much so its commentated by default
+
+    multigrid.solve(
+        p,
+        rhs,
+        mesh.solid,
+        omega,
+        iterations);
 }
 
 void Solver::corrector() {

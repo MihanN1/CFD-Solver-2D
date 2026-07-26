@@ -1,6 +1,7 @@
 #pragma once
 #include "Config.hpp"
 #include "Mesh.hpp"
+#include "Multigrid.hpp"
 #include <vector>
 #include <string>
 
@@ -13,10 +14,13 @@ public:
 private:
     const Config& cfg;
     const Mesh& mesh;
+    Multigrid multigrid;
 
     // Fields on staggered grid
     // Pressure (cell centres): size nx * ny
     std::vector<float> p;
+    // Right-hand side of Poisson equation
+    std::vector<float> rhs;
     // u on vertical faces: size (nx+1) * ny
     std::vector<float> u, u_star;
     // v on horizontal faces: size nx * (ny+1)

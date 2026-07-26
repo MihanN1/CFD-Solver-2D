@@ -20,9 +20,8 @@ struct Config {
     double totalTime = 10.0;
 
     // SOR
-    float omega = 1.85;
-    float tol = 1e-5;
-    int maxIterSOR = 10000;
+    float omega = 1.85f;
+    int iterations = 20;
 
     // Geometry
     std::string geometryFile = "none";
