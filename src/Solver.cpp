@@ -254,7 +254,7 @@ void Solver::corrector() {
                 continue;
             }
             // So gradient = (p[i] - p[i-1]) / dx
-            float p_right = (i < nx && !mesh.solid[row + i]) ? p[row + i] : p[row + (i-1)];
+            float p_right = (!mesh.solid[row + i]) ? p[row + i] : p[row + (i-1)];
             float p_left  = (i-1 >= 0 && !mesh.solid[row + (i-1)]) ? p[row + (i-1)] : p[row + i];
             float dpdx = (p_right - p_left) * invDx;
             u[idxU(i, j)] = u_star[idxU(i, j)] - dt * dpdx;
@@ -270,7 +270,7 @@ void Solver::corrector() {
                 v[idxV(i, j)] = 0.0;
                 continue;
             }
-            float p_top = (j < ny && !mesh.solid[row + i]) ? p[row + i] : p[rowBot + i];
+            float p_top = (!mesh.solid[row + i]) ? p[row + i] : p[rowBot + i];
             float p_bot = (j-1 >= 0 && !mesh.solid[rowBot + i]) ? p[rowBot + i] : p[row + i];
             float dpdy = (p_top - p_bot) * invDy;
             v[idxV(i, j)] = v_star[idxV(i, j)] - dt * dpdy;

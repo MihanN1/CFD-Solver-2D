@@ -301,6 +301,9 @@ Possible future extensions include:
 - Adaptive mesh refinement (AMR)
 - Turbulence models
 - Compressible flow solver
+- Cavity flow
+- Moving objects (NO idea how to do it for now, but ill figure that out)
+- Flow start coordinates and width of the flow
 
 ---
 

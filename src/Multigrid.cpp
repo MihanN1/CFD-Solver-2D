@@ -123,7 +123,7 @@ void Multigrid::smoothSOR(
                         diagonal += invDy2;
                     }
 
-                    if (diagonal == 0.0f)
+                    if (diagonal < 1e-12f)
                         continue;
 
                     const float pNew =
