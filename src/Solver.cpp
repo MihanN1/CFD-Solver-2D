@@ -233,7 +233,6 @@ void Solver::predictor() {
 
             __m256 uright =
                 _mm256_loadu_ps(uRow + i + 1);
-
             __m256 uleft =
                 _mm256_loadu_ps(uRow + i - 1);
                 __m256 vt0 =
