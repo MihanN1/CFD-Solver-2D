@@ -1,5 +1,6 @@
 #pragma once
 #include <vector>
+#include <cstdint>
 
 class Multigrid {
 public:
@@ -8,7 +9,7 @@ public:
     void solve(
         std::vector<float>& pressure,
         const std::vector<float>& rhs,
-        const std::vector<bool>& solid,
+        const std::vector<uint8_t>& solid,
         float omega,
         int iterations);
 
@@ -24,7 +25,7 @@ private:
     std::vector<std::vector<float>> pressureLevels;
     std::vector<std::vector<float>> rhsLevels;
     std::vector<std::vector<float>> residualLevels;
-    std::vector<std::vector<bool>> solidLevels;
+    std::vector<std::vector<uint8_t>> solidLevels;
     std::vector<int> levelNx;
     std::vector<int> levelNy;
     std::vector<float> levelInvDx2;
@@ -44,8 +45,9 @@ private:
         int level,
         std::vector<float>& pressure,
         const std::vector<float>& rhs,
-        const std::vector<bool>& solid,
-        float omega);
+        const std::vector<uint8_t>& solid,
+        float omega,
+        int iterations);
 
     void computeResidual(int level);
     float computeResidualNorm() const;

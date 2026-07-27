@@ -40,6 +40,8 @@ void Config::readFromConsole() {
     std::cin >> totalTime;
     std::cout << "Enter SOR relaxation parameter omega (1.6-1.85): ";
     std::cin >> omega;
+    std::cout << "Enter multigrid iterations(2 by default, 3-5 MAX recommended): ";
+    std::cin >> mgIterations;
     std::cout << "Enter path to 3D model (or 'none' for circle): ";
     geometryFile = readGeometryPath();
     std::cout << "Enter around the axis going towards the observer (degrees, default 0): ";
@@ -68,6 +70,7 @@ void Config::print() const {
     std::cout << "  CFL           = " << CFL << "\n";
     std::cout << "  totalTime        = " << totalTime << "\n";
     std::cout << "  omega         = " << omega << "\n";
+    std::cout << "  mgIterations   = " << mgIterations << "\n";
     std::cout << "  geometryFile     = " << geometryFile << "\n";
     std::cout << "  sliceAngleX    = " << sliceAngleX << " deg\n";
     std::cout << "  sliceAngleZ    = " << sliceAngleZ << " deg\n";
@@ -113,6 +116,9 @@ bool Config::modifyParam(const std::string& name) {
     } else if (lower == "omega") {
         std::cout << "New omega: ";
         std::cin >> omega;
+    } else if (lower == "mgiterations") {
+        std::cout << "New mgIterations: ";
+        std::cin >> mgIterations;
     } else if (lower == "geometryfile") {
         std::cout << "New geometryFile: ";
         geometryFile = readGeometryPath();

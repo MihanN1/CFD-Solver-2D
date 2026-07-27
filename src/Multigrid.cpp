@@ -8,8 +8,9 @@ Multigrid::Multigrid(int nx_, int ny_, float dx_, float dy_): nx(nx_), ny(ny_), 
 void Multigrid::solve(
     std::vector<float>& pressure,
     const std::vector<float>& rhs,
-    const std::vector<bool>& solid,
-    float omega)
+    const std::vector<uint8_t>& solid,
+    float omega,
+    int iterations)
 {
     if (levels == 0)
         buildHierarchy();
@@ -47,9 +48,7 @@ void Multigrid::solve(
 
     fullMultigrid(omega);
 
-    constexpr int finalVCycles = 2;
-
-    for (int cycle = 0; cycle < finalVCycles; ++cycle){
+    for (int cycle = 0; cycle < iterations; ++cycle){
         computeResidual(0);
 
         if (computeResidualNorm() < tolerance)
@@ -63,7 +62,7 @@ void Multigrid::smoothSOR(
     int level,
     std::vector<float>& pressure,
     const std::vector<float>& rhs,
-    const std::vector<bool>& solid,
+    const std::vector<uint8_t>& solid,
     float omega,
     int iterations){
     const int nx = levelNx[level];

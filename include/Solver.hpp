@@ -31,6 +31,7 @@ private:
     double dt = 0.0;  // current time step
     std::vector<uint8_t> uFluidMask;
     std::vector<uint8_t> vFluidMask;
+    std::vector<uint8_t> solidMask;
 
     // Helper methods
     void initFields();

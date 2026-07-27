@@ -30,6 +30,7 @@ void Solver::initFields()
     std::fill(u.begin(), u.end(), 0.0f);
     std::fill(v.begin(), v.end(), 0.0f);
     buildFaceMasks();
+    solidMask.assign(mesh.solid.begin(), mesh.solid.end());
 
     for (int j = 0; j < cfg.ny; j++) {
         for (int i = 0; i <= cfg.nx; i++) {
@@ -73,39 +74,42 @@ void Solver::buildFaceMasks(){
     }
 }
 
-void Solver::computeDt() {
-    // Find max absolute velocities
-    float maxU = 0.0f, maxV = 0.0f;
-    for (int j = 0; j < cfg.ny; ++j) {
-        for (int i = 0; i <= cfg.nx; ++i) {
-            if (!uFluidMask[idxU(i,j)]) continue;
-            maxU = std::max(maxU, std::fabsf(u[idxU(i, j)]));
+void Solver::computeDt(){
+    float maxU = 0.0f;
+    float maxV = 0.0f;
+
+    int nx = cfg.nx;
+    int ny = cfg.ny;
+
+    for (int j = 0; j < ny; ++j){
+        const int rowU = j * (nx + 1);
+        const int rowV = j * nx;
+
+        for (int i = 0; i < nx; ++i){
+            maxU = std::max(maxU, std::fabs(u[rowU + i]));
+            maxV = std::max(maxV, std::fabs(v[rowV + i]));
         }
-    }
-    for (int j = 0; j <= cfg.ny; ++j) {
-        for (int i = 0; i < cfg.nx; ++i) {
-            if (!vFluidMask[idxV(i,j)]) continue;
-            maxV = std::max(maxV, std::fabsf(v[idxV(i, j)]));
-        }
+        maxU = std::max(maxU, std::fabs(u[rowU + nx]));
     }
     const float invDx = 1.f / mesh.dx;
     const float invDy = 1.f / mesh.dy;
 
-    float advDenom = maxU * invDx + maxV * invDy;
-    double dtAdv;
-    if (advDenom < 1e-12)
-        dtAdv = 1e9;
-    else
-        dtAdv = cfg.CFL / advDenom;
-    double invDx2 = 1.0f * invDx * invDx;
-    double invDy2 = 1.0f * invDy * invDy;
-    double dtDiff = 1.0f /
-        (2.0f * cfg.nu * (invDx2 + invDy2));
+    const float adv = maxU * invDx + maxV * invDy;
+
+    const float dtAdv =
+        (adv < 1e-12f) ?
+        1e9f :
+        cfg.CFL / adv;
+
+    const float dtDiff =
+        1.f /
+        (2.f * cfg.nu *
+        (invDx * invDx + invDy * invDy));
 
     dt = std::min(dtAdv, dtDiff);
-    // Guard against zero or negative
-    if (dt <= 0.0 || std::isnan(dt) || std::isinf(dt))
-        dt = 1e-6;
+
+    if (dt <= 0.f || std::isnan(dt) || std::isinf(dt))
+        dt = 1e-6f;
 }
 
 void Solver::predictor() {
@@ -237,8 +241,9 @@ void Solver::solvePoisson() {
     multigrid.solve(
         p,
         rhs,
-        mesh.solid,
-        omega);
+        solidMask,
+        omega,
+        2);
 }
 
 void Solver::corrector() {

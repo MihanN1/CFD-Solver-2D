@@ -22,6 +22,9 @@ struct Config {
     // SOR
     float omega = 1.85f;
 
+    // Multigrid iterations
+    int mgIterations = 2;
+
     // Geometry
     std::string geometryFile = "none";
     float sliceAngleX = 0.0;   // degrees
