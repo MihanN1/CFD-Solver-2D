@@ -174,6 +174,8 @@ void Multigrid::computeResidual(int level){
     const int ny = levelNy[level];
     const float invDx2 = levelInvDx2[level];
     const float invDy2 = levelInvDy2[level];
+    const __m256 invDx2Vec = _mm256_set1_ps(invDx2);
+    const __m256 invDy2Vec = _mm256_set1_ps(invDy2);
 
     auto& p = pressureLevels[level];
     auto& rhs = rhsLevels[level];
@@ -185,17 +187,80 @@ void Multigrid::computeResidual(int level){
         const int row = j * nx;
         const int rowTop = (j + 1) * nx;
         const int rowBottom = (j - 1) * nx;
+        int i = 1;
+        for (; i <= nx - 9; i += 8){
+            bool skip = false;
+            for (int k = 0; k < 8; ++k){
+                if (solid[row + i + k])
+                {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip){
+                for (int k = 0; k < 8; ++k){
+                    int ii = i + k;
+                    int id = row + ii;
+                    if (solid[id]){
+                        residual[id] = 0.f;
+                        continue;
+                    }
+                    float Ap = 0.0f;
+                    if (!solid[id - 1])
+                        Ap += (p[id - 1] - p[id]) * invDx2;
 
-        for (int i = 1; i < nx - 1; ++i){
+                    if (!solid[id + 1])
+                        Ap += (p[id + 1] - p[id]) * invDx2;
+
+                    if (!solid[rowBottom + ii])
+                        Ap += (p[rowBottom + ii] - p[id]) * invDy2;
+
+                    if (!solid[rowTop + ii])
+                        Ap += (p[rowTop + ii] - p[id]) * invDy2;
+
+                    residual[id] = rhs[id] - Ap;
+                }
+                continue;
+            }
+            __m256 pCenter =
+                _mm256_loadu_ps(p.data() + row + i);
+            __m256 pLeft =
+                _mm256_loadu_ps(p.data() + row + i - 1);
+            __m256 pRight =
+                _mm256_loadu_ps(p.data() + row + i + 1);
+            __m256 pDown =
+                _mm256_loadu_ps(p.data() + rowBottom + i);
+            __m256 pUp =
+                _mm256_loadu_ps(p.data() + rowTop + i);
+            __m256 rhsVec =
+                _mm256_loadu_ps(rhs.data() + row + i);
+            __m256 Ap =
+                _mm256_add_ps(
+                    _mm256_mul_ps(
+                        _mm256_add_ps(
+                            _mm256_sub_ps(pLeft, pCenter),
+                            _mm256_sub_ps(pRight, pCenter)),
+                        invDx2Vec),
+                    _mm256_mul_ps(
+                        _mm256_add_ps(
+                            _mm256_sub_ps(pDown, pCenter),
+                            _mm256_sub_ps(pUp, pCenter)),
+                        invDy2Vec));
+            __m256 res =
+                _mm256_sub_ps(
+                    rhsVec,
+                    Ap);
+            _mm256_storeu_ps(
+                residual.data() + row + i,
+                res);
+        }
+        for (; i < nx - 1; ++i){
             const int id = row + i;
-
             if (solid[id]){
                 residual[id] = 0.0f;
                 continue;
             }
-
             float Ap = 0.0f;
-
             if (!solid[id - 1])
                 Ap += (p[id - 1] - p[id]) * invDx2;
 
@@ -214,9 +279,25 @@ void Multigrid::computeResidual(int level){
 }
 float Multigrid::computeResidualNorm() const{
     const auto& residual = residualLevels[0];
-    float sum = 0.0f;
-    for (float r : residual)
-        sum += r * r;
+    const float* ptr = residual.data();
+    const int n = static_cast<int>(residual.size());
+    __m256 sumVec = _mm256_setzero_ps();
+    int i = 0;
+    for (; i <= n - 8; i += 8){
+        __m256 r =
+            _mm256_loadu_ps(ptr + i);
+        sumVec =
+            _mm256_add_ps(
+                sumVec,
+                _mm256_mul_ps(r, r));
+    }
+    alignas(32) float tmp[8];
+    _mm256_store_ps(tmp, sumVec);
+    float sum =
+        tmp[0] + tmp[1] + tmp[2] + tmp[3] +
+        tmp[4] + tmp[5] + tmp[6] + tmp[7];
+    for (; i < n; ++i)
+        sum += ptr[i] * ptr[i];
     return std::sqrt(sum);
 }
 void Multigrid::restrictResidual(int fineLevel){
