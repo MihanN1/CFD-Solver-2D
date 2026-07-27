@@ -1,6 +1,7 @@
 #include "Multigrid.hpp"
 #include <algorithm>
 #include <cmath>
+#include <immintrin.h>
 
 Multigrid::Multigrid(int nx_, int ny_, float dx_, float dy_): nx(nx_), ny(ny_), dx(dx_), dy(dy_), levels(0)
 {}
@@ -39,7 +40,7 @@ void Multigrid::solve(
         std::fill(
             solidLevels[level].begin(),
             solidLevels[level].end(),
-            false);
+            static_cast<uint8_t>(0));
         std::fill(
             residualLevels[level].begin(),
             residualLevels[level].end(),
@@ -84,43 +85,32 @@ void Multigrid::smoothSOR(
                     if (solid[id])
                         continue;
 
-                    float diagonal = 0.0f;
+                    const float self = pressure[id];
 
-                    float pLeft;
-                    if (solid[id - 1]){
-                        pLeft = pressure[id];
-                    }
-                    else{
-                        pLeft = pressure[id - 1];
-                        diagonal += invDx2;
-                    }
+                    const float leftMask  = solid[id - 1] ? 0.0f : 1.0f;
+                    const float rightMask = solid[id + 1] ? 0.0f : 1.0f;
+                    const float downMask  = solid[rowBottom + i] ? 0.0f : 1.0f;
+                    const float upMask    = solid[rowTop + i] ? 0.0f : 1.0f;
 
-                    float pRight;
-                    if (solid[id + 1]){
-                        pRight = pressure[id];
-                    }
-                    else{
-                        pRight = pressure[id + 1];
-                        diagonal += invDx2;
-                    }
+                    const float pLeft =
+                        leftMask * pressure[id - 1] +
+                        (1.0f - leftMask) * self;
 
-                    float pDown;
-                    if (solid[rowBottom + i]){
-                        pDown = pressure[id];
-                    }
-                    else{
-                        pDown = pressure[rowBottom + i];
-                        diagonal += invDy2;
-                    }
+                    const float pRight =
+                        rightMask * pressure[id + 1] +
+                        (1.0f - rightMask) * self;
 
-                    float pUp;
-                    if (solid[rowTop + i]){
-                        pUp = pressure[id];
-                    }
-                    else{
-                        pUp = pressure[rowTop + i];
-                        diagonal += invDy2;
-                    }
+                    const float pDown =
+                        downMask * pressure[rowBottom + i] +
+                        (1.0f - downMask) * self;
+
+                    const float pUp =
+                        upMask * pressure[rowTop + i] +
+                        (1.0f - upMask) * self;
+
+                    const float diagonal =
+                        (leftMask + rightMask) * invDx2 +
+                        (downMask + upMask) * invDy2;
 
                     if (diagonal < 1e-12f)
                         continue;
@@ -130,9 +120,8 @@ void Multigrid::smoothSOR(
                         (pDown + pUp) * invDy2 -
                         rhs[id]) / diagonal;
 
-                    pressure[id] =
-                        (1.0f - omega) * pressure[id] +
-                        omega * pNew;
+                    const float oldP = pressure[id];
+                    pressure[id] = oldP + omega * (pNew - oldP);
                 }
             }
         }
@@ -169,7 +158,7 @@ void Multigrid::buildHierarchy(){
         pressureLevels.emplace_back(size, 0.0f);
         rhsLevels.emplace_back(size, 0.0f);
         residualLevels.emplace_back(size, 0.0f);
-        solidLevels.emplace_back(size, false);
+        solidLevels.emplace_back(size, static_cast<uint8_t>(0));
 
         if (currentNx <= 2 || currentNy <= 2)
             break;
@@ -288,11 +277,12 @@ void Multigrid::restrictResidual(int fineLevel){
             add(x + 1, y + 1, 1.0f);
             coarseRhs[j * coarseNx + i] = weightSum > 0.0f ? sum / weightSum : 0.0f;
 
-            coarseSolid[j * coarseNx + i] =
+            coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(
                 fineSolid[fj * fineNx + fi] &&
                 fineSolid[fj * fineNx + fi0] &&
                 fineSolid[fj0 * fineNx + fi] &&
-                fineSolid[fj0 * fineNx + fi0];
+                fineSolid[fj0 * fineNx + fi0]
+            );
         }
     }
 }
@@ -579,11 +569,12 @@ void Multigrid::restrictRHS(int fineLevel){
             int fj0 = std::max(fj - 1, 0);
             int fi0 = std::max(fi - 1, 0);
 
-            coarseSolid[j * coarseNx + i] =
+            coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(
                 fineSolid[fj * fineNx + fi] &&
                 fineSolid[fj * fineNx + fi0] &&
                 fineSolid[fj0 * fineNx + fi] &&
-                fineSolid[fj0 * fineNx + fi0];
+                fineSolid[fj0 * fineNx + fi0]
+            );
         }
     }
 }

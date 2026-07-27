@@ -4,6 +4,7 @@
 #include <fstream>
 #include <iomanip>
 #include <algorithm>
+#include <immintrin.h>
 
 static const int SAVE_INTERVAL = 1; // save every step, so that we can determine the mistakes and debug the code more easily. It can be changed to a larger number for faster simulations.
 constexpr int dtUpdateInterval = 5;
@@ -80,16 +81,46 @@ void Solver::computeDt(){
 
     int nx = cfg.nx;
     int ny = cfg.ny;
+    const __m256 signMask = _mm256_set1_ps(-0.0f);
+    __m256 maxUVec = _mm256_setzero_ps();
+    __m256 maxVVec = _mm256_setzero_ps();
 
-    for (int j = 0; j < ny; ++j){
+    for (int j = 0; j < ny; ++j)
+    {
         const int rowU = j * (nx + 1);
         const int rowV = j * nx;
 
-        for (int i = 0; i < nx; ++i){
+        int i = 0;
+        for (; i <= nx - 8; i += 8)
+        {
+            __m256 uVec = _mm256_andnot_ps(signMask,
+                _mm256_loadu_ps(u.data() + rowU + i));
+            __m256 vVec = _mm256_andnot_ps(signMask,
+                _mm256_loadu_ps(v.data() + rowV + i));
+
+            maxUVec = _mm256_max_ps(maxUVec, uVec);
+            maxVVec = _mm256_max_ps(maxVVec, vVec);
+        }
+
+        // хвост обязателен
+        for (; i < nx; ++i)
+        {
             maxU = std::max(maxU, std::fabs(u[rowU + i]));
             maxV = std::max(maxV, std::fabs(v[rowV + i]));
         }
+
         maxU = std::max(maxU, std::fabs(u[rowU + nx]));
+    }
+
+    // горизонтальная редукция ОДИН раз
+    alignas(32) float tmpU[8], tmpV[8];
+    _mm256_store_ps(tmpU, maxUVec);
+    _mm256_store_ps(tmpV, maxVVec);
+
+    for (int k = 0; k < 8; ++k)
+    {
+        maxU = std::max(maxU, tmpU[k]);
+        maxV = std::max(maxV, tmpV[k]);
     }
     const float invDx = 1.f / mesh.dx;
     const float invDy = 1.f / mesh.dy;
@@ -119,100 +150,363 @@ void Solver::predictor() {
     const float invDy2 = invDy * invDy;
     float nu = cfg.nu;
     int nx = cfg.nx, ny = cfg.ny;
+    const float* __restrict uPtr = u.data();
+    const float* __restrict vPtr = v.data();
+    float* __restrict uStar = u_star.data();
+    float* __restrict vStar = v_star.data();
+    const float dtNu = dt * nu;
+    const float dtConv = dt;
+    constexpr float quarter = 0.25f;
 
     // Compute u_star for internal fluid cells (i = 1..nx-1, j = 1..ny-2)
     // u is on vertical faces, so we need to compute convection and diffusion at those points
     for (int j = 1; j < ny-1; ++j) {
         const int rowU = j * (nx + 1);
+        const uint8_t* uMask = uFluidMask.data() + rowU;
         const int rowUTop = (j + 1) * (nx + 1);
         const int rowUBot = (j - 1) * (nx + 1);
         const int rowV = j * nx;
         const int rowVTop = (j + 1) * nx;
-        for (int i = 1; i < nx; ++i) { // internal faces
-            // Skip if solid
-            if (!uFluidMask[idxU(i,j)]) {
-                u_star[rowU + i] = 0.0;
+        const float* __restrict uRow = uPtr + rowU;
+        const float* __restrict uTop = uPtr + rowUTop;
+        const float* __restrict uBot = uPtr + rowUBot;
+        const float* __restrict vRow = vPtr + rowV;
+        const float* __restrict vTop = vPtr + rowVTop;
+        float* __restrict uStarRow = uStar + rowU;
+        int i = 1;
+        for (; i <= nx - 8; i += 8)
+        {
+            bool skip = false;
+
+            for (int k = 0; k < 8; k++)
+            {
+                if (!uMask[i + k])
+                {
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip){
+                for (int k = 0; k < 8; ++k){
+                    int ii = i + k;
+                    if (!uMask[ii]){
+                        uStarRow[ii] = 0.f;
+                        continue;
+                    }
+                    // Skip if solid
+                    if (!uMask[i]) {
+                    uStarRow[i] = 0.0;
+                        continue;
+                    }
+                    // Convection: upwind for u
+                    float u_ij = uRow[i];
+                    float v_n = quarter * (
+                        vTop[i-1] +
+                        vTop[i] +
+                        vRow[i-1] +
+                        vRow[i]
+                    );
+                    
+
+                    float u_top = uTop[i];
+                    float u_bot = uBot[i];
+                    float u_right = uRow[i+1];
+                    float u_left  = uRow[i-1];
+                    float dudy = (v_n > 0) ? (u_ij - u_bot) * invDy : (u_top - u_ij) * invDy;
+                    float dudx = (u_ij > 0) ? (u_ij - u_left) * invDx : (u_right - u_ij) * invDx;
+                    // Diffusion: central differences
+                    float d2udx2 = (u_right - 2.0f*u_ij + u_left) * invDx2;
+                    float d2udy2 = (u_top - 2.0f*u_ij + u_bot) * invDy2;
+
+                    uStarRow[i] = u_ij - dtConv * (u_ij * dudx + v_n * dudy) + dtNu * (d2udx2 + d2udy2);
+                }
                 continue;
             }
-            // Convection: upwind for u
-            float u_ij = u[rowU + i];
-            float v_n = 0.25f * (
-                v[rowVTop + (i-1)] +
-                v[rowVTop + i] +
-                v[rowV + (i-1)] +
-                v[rowV + i]
-            );
-            
+            __m256 uij =
+                _mm256_loadu_ps(uRow + i);
 
-            float u_top = u[rowUTop + i];
-            float u_bot = u[rowUBot + i];
-            float u_right = u[rowU + (i+1)];
-            float u_left  = u[rowU + (i-1)];
-            float dudy = (v_n > 0) ? (u_ij - u_bot) * invDy : (u_top - u_ij) * invDy;
-            float dudx = (u_ij > 0) ? (u_ij - u_left) * invDx : (u_right - u_ij) * invDx;
-            // Diffusion: central differences
-            float d2udx2 = (u_right - 2.0f*u_ij + u_left) * invDx2;
-            float d2udy2 = (u_top - 2.0f*u_ij + u_bot) * invDy2;
+            __m256 utop =
+                _mm256_loadu_ps(uTop + i);
 
-            u_star[rowU + i] = u_ij + dt * (- (u_ij * dudx + v_n * dudy) + nu * (d2udx2 + d2udy2));
-        }
+            __m256 ubot =
+                _mm256_loadu_ps(uBot + i);
+
+            __m256 uright =
+                _mm256_loadu_ps(uRow + i + 1);
+
+            __m256 uleft =
+                _mm256_loadu_ps(uRow + i - 1);
+                __m256 vt0 =
+                    _mm256_loadu_ps(vTop + i - 1);
+
+                __m256 vt1 =
+                    _mm256_loadu_ps(vTop + i);
+
+                __m256 vb0 =
+                    _mm256_loadu_ps(vRow + i - 1);
+
+                __m256 vb1 =
+                    _mm256_loadu_ps(vRow + i);
+
+                __m256 vn =
+                    _mm256_mul_ps(
+                        _mm256_add_ps(
+                            _mm256_add_ps(vt0, vt1),
+                            _mm256_add_ps(vb0, vb1)),
+                        _mm256_set1_ps(0.25f));
+                __m256 dudx_back =
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(uij, uleft),
+                        _mm256_set1_ps(invDx));
+
+                __m256 dudx_forw =
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(uright, uij),
+                        _mm256_set1_ps(invDx));
+
+                __m256 dudy_back =
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(uij, ubot),
+                        _mm256_set1_ps(invDy));
+
+                __m256 dudy_forw =
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(utop, uij),
+                        _mm256_set1_ps(invDy));
+                __m256 zero = _mm256_setzero_ps();
+
+                __m256 maskU =
+                    _mm256_cmp_ps(uij, zero, _CMP_GT_OS);
+
+                __m256 dudx =
+                    _mm256_blendv_ps(
+                        dudx_forw,
+                        dudx_back,
+                        maskU);
+                __m256 maskV =
+                    _mm256_cmp_ps(vn, zero, _CMP_GT_OS);
+
+                __m256 dudy =
+                    _mm256_blendv_ps(
+                        dudy_forw,
+                        dudy_back,
+                        maskV);
+                __m256 two = _mm256_set1_ps(2.f);
+
+                __m256 d2udx2 =
+                    _mm256_mul_ps(
+                        _mm256_add_ps(
+                            uright,
+                            _mm256_sub_ps(
+                                uleft,
+                                _mm256_mul_ps(two,uij))),
+                        _mm256_set1_ps(invDx2));
+                __m256 d2udy2 =
+                    _mm256_mul_ps(
+                        _mm256_add_ps(
+                            utop,
+                            _mm256_sub_ps(
+                                ubot,
+                                _mm256_mul_ps(two, uij))),
+                        _mm256_set1_ps(invDy2));
+                __m256 conv =
+                    _mm256_add_ps(
+                        _mm256_mul_ps(uij,dudx),
+                        _mm256_mul_ps(vn,dudy));
+                __m256 diff =
+                    _mm256_add_ps(
+                        d2udx2,
+                        d2udy2);
+                __m256 res =
+                    _mm256_add_ps(
+                        _mm256_sub_ps(
+                            uij,
+                            _mm256_mul_ps(
+                                _mm256_set1_ps(dtConv),
+                                conv)),
+                        _mm256_mul_ps(
+                            _mm256_set1_ps(dtNu),
+                            diff));
+                _mm256_storeu_ps(
+                    uStarRow+i,
+                    res);
+                }
     }
 
     // Compute v_star similarly
-    for (int j = 1; j < ny; ++j) { // internal horizontal faces
+    for (int j = 1; j < ny; ++j){ // internal horizontal faces
         const int rowV = j * nx;
+        const uint8_t* vMask = vFluidMask.data() + rowV;
         const int rowVTop = (j + 1) * nx;
         const int rowVBot = (j - 1) * nx;
         const int rowU = j * (nx + 1);
         const int rowUBot = (j - 1) * (nx + 1);
-        for (int i = 1; i < nx-1; ++i) {
-            if (!vFluidMask[idxV(i,j)]) {
-                v_star[rowV + i] = 0.0;
-                continue;
+        const float* __restrict vRow = vPtr + rowV;
+        const float* __restrict vTop = vPtr + rowVTop;
+        const float* __restrict vBot = vPtr + rowVBot;
+        const float* __restrict uRow = uPtr + rowU;
+        const float* __restrict uBot = uPtr + rowUBot;
+        float* __restrict vStarRow = vStar + rowV;
+        int i = 1;
+        for (; i <= nx - 9; i += 8)
+        {
+            bool skip = false;
+            for (int k = 0; k < 8; ++k)
+            {
+                if (!vMask[i + k])
+                {
+                    skip = true;
+                    break;
+                }
             }
 
-            float v_ij = v[rowV + i];
-            float u_e = 0.25f * (
-                u[rowU + (i+1)] +
-                u[rowUBot + (i+1)] +
-                u[rowU + i] +
-                u[rowUBot + i]
-            );
-            float v_right = v[rowV + (i+1)];
-            float v_left  = v[rowV + (i-1)];
-            float v_top = v[rowVTop + i];
-            float v_bot = v[rowVBot + i];
-            // dv/dx with upwind in x
-            float dvdx = (u_e > 0) ? (v_ij - v_left) * invDx : (v_right - v_ij) * invDx;
-            // dv/dy with upwind in y
-            float dvdy = (v_ij > 0) ? (v_ij - v_bot) * invDy : (v_top - v_ij) * invDy;
-
-            // Diffusion
-            float d2vdx2 = (v_right - 2.0f*v_ij + v_left) * invDx2;
-            float d2vdy2 = (v_top - 2.0f*v_ij + v_bot) * invDy2;
-
-            v_star[rowV + i] = v_ij + dt * (- (u_e * dvdx + v_ij * dvdy) + nu * (d2vdx2 + d2vdy2));
+            if (skip){
+                for (int k = 0; k < 8; ++k){
+                    int ii = i + k;
+                    if (!vMask[ii]){
+                        vStarRow[ii] = 0.f;
+                        continue;
+                    }
+                    if (!vMask[i]){
+                        vStarRow[i] = 0.0;
+                            continue;
+                    }
+                    float v_ij = vRow[i];
+                    float u_e = quarter * (
+                        uRow[i+1] +
+                        uBot[i+1] +
+                        uRow[i] +
+                        uBot[i]
+                    );
+                    float v_right = vRow[i+1];
+                    float v_left  = vRow[i-1];
+                    float v_top = vTop[i];
+                    float v_bot = vBot[i];
+                    // dv/dx with upwind in x
+                    float dvdx = (u_e > 0) ? (v_ij - v_left) * invDx : (v_right - v_ij) * invDx;
+                    // dv/dy with upwind in y
+                    float dvdy = (v_ij > 0) ? (v_ij - v_bot) * invDy : (v_top - v_ij) * invDy;
+                    // Diffusion
+                    float d2vdx2 = (v_right - 2.0f*v_ij + v_left) * invDx2;
+                    float d2vdy2 = (v_top - 2.0f*v_ij + v_bot) * invDy2;
+                    vStarRow[i] = v_ij - dtConv * (u_e * dvdx + v_ij * dvdy) + dtNu * (d2vdx2 + d2vdy2);
+                }
+            }
+            __m256 vij =
+                _mm256_loadu_ps(vRow + i);
+            __m256 vtop =
+                _mm256_loadu_ps(vTop + i);
+            __m256 vbot =
+                _mm256_loadu_ps(vBot + i);
+            __m256 vleft =
+                _mm256_loadu_ps(vRow + i - 1);
+            __m256 vright =
+                _mm256_loadu_ps(vRow + i + 1);
+            __m256 ur0 =
+                _mm256_loadu_ps(uRow + i);
+            __m256 ur1 =
+                _mm256_loadu_ps(uRow + i + 1);
+            __m256 ub0 =
+                _mm256_loadu_ps(uBot + i);
+            __m256 ub1 =
+                _mm256_loadu_ps(uBot + i + 1);
+            __m256 ue =
+                _mm256_mul_ps(
+                    _mm256_add_ps(
+                        _mm256_add_ps(ur0, ur1),
+                        _mm256_add_ps(ub0, ub1)),
+                    _mm256_set1_ps(0.25f));
+            __m256 dvdx_back =
+                _mm256_mul_ps(
+                    _mm256_sub_ps(vij, vleft),
+                    _mm256_set1_ps(invDx));
+            __m256 dvdx_forw =
+                _mm256_mul_ps(
+                    _mm256_sub_ps(vright, vij),
+                    _mm256_set1_ps(invDx));
+            __m256 dvdy_back =
+                _mm256_mul_ps(
+                    _mm256_sub_ps(vij, vbot),
+                    _mm256_set1_ps(invDy));
+            __m256 dvdy_forw =
+                _mm256_mul_ps(
+                    _mm256_sub_ps(vtop, vij),
+                    _mm256_set1_ps(invDy));
+            __m256 zero = _mm256_setzero_ps();
+            __m256 maskU =
+                _mm256_cmp_ps(ue, zero, _CMP_GT_OS);
+            __m256 dvdx =
+                _mm256_blendv_ps(
+                    dvdx_forw,
+                    dvdx_back,
+                    maskU);
+            __m256 maskV =
+                _mm256_cmp_ps(vij, zero, _CMP_GT_OS);
+            __m256 dvdy =
+                _mm256_blendv_ps(
+                    dvdy_forw,
+                    dvdy_back,
+                    maskV);
+            __m256 two =
+                _mm256_set1_ps(2.f);
+            __m256 d2vdx2 =
+                _mm256_mul_ps(
+                    _mm256_add_ps(
+                        vright,
+                        _mm256_sub_ps(
+                            vleft,
+                            _mm256_mul_ps(two, vij))),
+                    _mm256_set1_ps(invDx2));
+            __m256 d2vdy2 =
+                _mm256_mul_ps(
+                    _mm256_add_ps(
+                        vtop,
+                        _mm256_sub_ps(
+                            vbot,
+                            _mm256_mul_ps(two, vij))),
+                    _mm256_set1_ps(invDy2));
+            __m256 conv =
+                _mm256_add_ps(
+                    _mm256_mul_ps(ue, dvdx),
+                    _mm256_mul_ps(vij, dvdy));
+            __m256 diff =
+                _mm256_add_ps(
+                    d2vdx2,
+                    d2vdy2);
+            __m256 res =
+                _mm256_add_ps(
+                    _mm256_sub_ps(
+                        vij,
+                        _mm256_mul_ps(
+                            _mm256_set1_ps(dtConv),
+                            conv)),
+                    _mm256_mul_ps(
+                        _mm256_set1_ps(dtNu),
+                        diff));
+            _mm256_storeu_ps(
+                vStarRow + i,
+                res);
         }
     }
 
     // Apply BC to u_star and v_star
     // Inlet (left): u_star = U0, v_star = 0
     for (int j = 0; j < ny; ++j) {
-        u_star[idxU(0, j)] = cfg.U0;
-        v_star[idxV(0, j)] = 0.0; // v on left face
+        uStar[idxU(0, j)] = cfg.U0;
+        vStar[idxV(0, j)] = 0.0; // v on left face
     }
     // Outlet (right): zero gradient (neumann)
     for (int j = 0; j < ny; ++j) {
-        u_star[idxU(nx, j)] = u_star[idxU(nx-1, j)];
+        uStar[idxU(nx, j)] = uStar[idxU(nx-1, j)];
     }
     // Top/Bottom: slip or free-slip (we use zero gradient for u, v=0)
     for (int i = 0; i <= nx; ++i) {
-        u_star[idxU(i, 0)] = u_star[idxU(i, 1)];
-        u_star[idxU(i, ny-1)] = u_star[idxU(i, ny-2)];
+        uStar[idxU(i, 0)] = uStar[idxU(i, 1)];
+        uStar[idxU(i, ny-1)] = uStar[idxU(i, ny-2)];
     }
     for (int i = 0; i < nx; ++i) {
-        v_star[idxV(i, 0)] = 0.0;   // bottom (no vertical flow)
-        v_star[idxV(i, ny)] = 0.0;  // top
+        vStar[idxV(i, 0)] = 0.0;   // bottom (no vertical flow)
+        vStar[idxV(i, ny)] = 0.0;  // top
     }
 }
 
@@ -220,24 +514,60 @@ void Solver::solvePoisson() {
     const float invDx = 1.f / mesh.dx, invDy = 1.f / mesh.dy;
     int nx = cfg.nx, ny = cfg.ny;
     float omega = cfg.omega;
-
+    const __m256 invDxVec = _mm256_set1_ps(invDx);
+    const __m256 invDyVec = _mm256_set1_ps(invDy);
+    const __m256 invDtVec = _mm256_set1_ps(1.0f / dt);
     for (int j = 0; j < ny; ++j) {
         const int row = j * nx;
         const int rowTop = (j + 1) * nx;
-
-        for (int i = 0; i < nx; ++i) {
-            if (mesh.solid[row + i]) {
-                rhs[row + i] = 0.0f;
+        int i = 0;
+        for (; i <= nx - 8; i += 8){
+            bool skip = false;
+            for (int k = 0; k < 8; ++k){
+                if (mesh.solid[row + i + k]){
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip){
+                for (int k = 0; k < 8; ++k){
+                    int ii = i + k;
+                    if (mesh.solid[row + ii]){
+                        rhs[row + ii] = 0.f;
+                        continue;
+                    }
+                    float div =
+                        (u_star[row + ii + 1] - u_star[row + ii]) * invDx +
+                        (v_star[rowTop + ii] - v_star[row + ii]) * invDy;
+                    rhs[row + ii] = div / dt;
+                }
                 continue;
             }
-
-            const float div =
-                (u_star[row + i + 1] - u_star[row + i]) * invDx +
-                (v_star[rowTop + i] - v_star[row + i]) * invDy;
-            rhs[row + i] = div / static_cast<float>(dt);
+            __m256 uR =
+                _mm256_loadu_ps(u_star.data() + row + i + 1);
+            __m256 uL =
+                _mm256_loadu_ps(u_star.data() + row + i);
+            __m256 vT =
+                _mm256_loadu_ps(v_star.data() + rowTop + i);
+            __m256 vB =
+                _mm256_loadu_ps(v_star.data() + row + i);
+            __m256 div =
+                _mm256_add_ps(
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(uR, uL),
+                        invDxVec),
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(vT, vB),
+                        invDyVec));
+            __m256 rhsVec =
+                _mm256_mul_ps(
+                    div,
+                    invDtVec);
+            _mm256_storeu_ps(
+                rhs.data() + row + i,
+                rhsVec);
         }
     }
-
     multigrid.solve(
         p,
         rhs,
@@ -253,16 +583,55 @@ void Solver::corrector() {
     // Update u: u_new = u_star - dt * (p(i+1) - p(i)) / dx
     for (int j = 0; j < ny; ++j) {
         const int row = j * nx;
-        for (int i = 1; i < nx; ++i) { // internal faces
-            if (!uFluidMask[idxU(i,j)]) {
-                u[idxU(i, j)] = 0.0;
+        int i = 1;
+        const __m256 invDxVec = _mm256_set1_ps(invDx);
+        const __m256 dtVec    = _mm256_set1_ps(dt);
+        for (; i <= nx - 8; i += 8){
+            bool skip = false;
+            for (int k = 0; k < 8; ++k){
+                if (!uFluidMask[idxU(i + k, j)]){
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip){
+                for (int k = 0; k < 8; ++k){
+                    int ii = i + k;
+                    if (!uFluidMask[idxU(ii, j)]){
+                        u[idxU(ii, j)] = 0.f;
+                        continue;
+                    }
+                    float p_right =
+                        (!mesh.solid[row + ii])
+                            ? p[row + ii]
+                            : p[row + ii - 1];
+                    float p_left =
+                        (!mesh.solid[row + ii - 1])
+                            ? p[row + ii - 1]
+                            : p[row + ii];
+                    float dpdx = (p_right - p_left) * invDx;
+                    u[idxU(ii, j)] =
+                        u_star[idxU(ii, j)] - dt * dpdx;
+                }
                 continue;
             }
-            // So gradient = (p[i] - p[i-1]) / dx
-            float p_right = (!mesh.solid[row + i]) ? p[row + i] : p[row + (i-1)];
-            float p_left  = (i-1 >= 0 && !mesh.solid[row + (i-1)]) ? p[row + (i-1)] : p[row + i];
-            float dpdx = (p_right - p_left) * invDx;
-            u[idxU(i, j)] = u_star[idxU(i, j)] - dt * dpdx;
+            __m256 pRight =
+                _mm256_loadu_ps(p.data() + row + i);
+            __m256 pLeft =
+                _mm256_loadu_ps(p.data() + row + i - 1);
+            __m256 uStar =
+                _mm256_loadu_ps(u_star.data() + idxU(i, j));
+            __m256 dpdx =
+                _mm256_mul_ps(
+                    _mm256_sub_ps(pRight, pLeft),
+                    invDxVec);
+            __m256 res =
+                _mm256_sub_ps(
+                    uStar,
+                    _mm256_mul_ps(dtVec, dpdx));
+            _mm256_storeu_ps(
+                u.data() + idxU(i, j),
+                res);
         }
     }
 
@@ -270,18 +639,59 @@ void Solver::corrector() {
     for (int j = 1; j < ny; ++j) {
         const int row = j * nx;
         const int rowBot = (j - 1) * nx;
-        for (int i = 0; i < nx; ++i) {
-            if (!vFluidMask[idxV(i,j)]) {
-                v[idxV(i, j)] = 0.0;
+        int i = 0;
+        const __m256 invDyVec = _mm256_set1_ps(invDy);
+        const __m256 dtVec    = _mm256_set1_ps(dt);
+        for (; i <= nx - 8; i += 8){
+            bool skip = false;
+            for (int k = 0; k < 8; ++k){
+                if (!vFluidMask[idxV(i + k, j)]){
+                    skip = true;
+                    break;
+                }
+            }
+            if (skip){
+                for (int k = 0; k < 8; ++k){
+                    int ii = i + k;
+                    if (!vFluidMask[idxV(ii, j)]){
+                        v[idxV(ii, j)] = 0.f;
+                        continue;
+                    }
+                    float p_top =
+                        (!mesh.solid[row + ii])
+                            ? p[row + ii]
+                            : p[rowBot + ii];
+                    float p_bot =
+                        (!mesh.solid[rowBot + ii])
+                            ? p[rowBot + ii]
+                            : p[row + ii];
+                    float dpdy = (p_top - p_bot) * invDy;
+                    v[idxV(ii, j)] =
+                        v_star[idxV(ii, j)] - dt * dpdy;
+                }
                 continue;
             }
-            float p_top = (!mesh.solid[row + i]) ? p[row + i] : p[rowBot + i];
-            float p_bot = (j-1 >= 0 && !mesh.solid[rowBot + i]) ? p[rowBot + i] : p[row + i];
-            float dpdy = (p_top - p_bot) * invDy;
-            v[idxV(i, j)] = v_star[idxV(i, j)] - dt * dpdy;
+            __m256 pTop =
+                _mm256_loadu_ps(p.data() + row);
+
+            pTop = _mm256_loadu_ps(p.data() + row + i);
+            __m256 pBot =
+                _mm256_loadu_ps(p.data() + rowBot + i);
+            __m256 vStar =
+                _mm256_loadu_ps(v_star.data() + idxV(i, j));
+            __m256 dpdy =
+                _mm256_mul_ps(
+                    _mm256_sub_ps(pTop, pBot),
+                    invDyVec);
+            __m256 res =
+                _mm256_sub_ps(
+                    vStar,
+                    _mm256_mul_ps(dtVec, dpdy));
+            _mm256_storeu_ps(
+                v.data() + idxV(i, j),
+                res);
         }
     }
-
     // Apply boundary conditions again
     applyBC();
 }
