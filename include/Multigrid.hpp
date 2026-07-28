@@ -12,7 +12,6 @@ public:
         const std::vector<uint8_t>& solid,
         float omega,
         int iterations);
-
 private:
     int nx;
     int ny;
@@ -30,6 +29,12 @@ private:
     std::vector<int> levelNy;
     std::vector<float> levelInvDx2;
     std::vector<float> levelInvDy2;
+    #ifdef USE_CUDA
+        std::vector<float*> dPressureLevels;
+        std::vector<float*> dRhsLevels;
+        std::vector<float*> dResidualLevels;
+        std::vector<uint8_t*> dSolidLevels;
+    #endif
 
     void buildHierarchy();
 
@@ -56,4 +61,44 @@ private:
 
     void prolongateCorrection(int coarseLevel);
     void prolongateSolution(int coarseLevel);
+    #ifdef USE_CUDA
+    public:
+        void solveCuda(
+            std::vector<float>& pressure,
+            const std::vector<float>& rhs,
+            const std::vector<uint8_t>& solid,
+            float omega,
+            int iterations);
+
+    private:
+        void smoothSORCuda(
+            int level,
+            float omega,
+            int iterations);
+
+        void computeResidualCuda(int level);
+
+        float computeResidualNormCuda();
+
+        void restrictResidualCuda(int fineLevel);
+
+        void restrictRHSCuda(int fineLevel);
+
+        void prolongateCorrectionCuda(int coarseLevel);
+
+        void prolongateSolutionCuda(int coarseLevel);
+
+        void vCycleCuda(
+            int level,
+            float omega);
+
+        void fullMultigridCuda(float omega);
+
+        size_t sizeBytes(int level) const;
+
+        std::vector<float*> dPressureLevels;
+        std::vector<float*> dRhsLevels;
+        std::vector<float*> dResidualLevels;
+        std::vector<uint8_t*> dSolidLevels;
+    #endif
 };

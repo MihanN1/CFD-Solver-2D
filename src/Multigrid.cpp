@@ -2,6 +2,9 @@
 #include <algorithm>
 #include <cmath>
 #include <immintrin.h>
+#ifdef USE_CUDA
+#include "MultigridCuda.cuh"
+#endif
 
 Multigrid::Multigrid(int nx_, int ny_, float dx_, float dy_): nx(nx_), ny(ny_), dx(dx_), dy(dy_), levels(0)
 {}
@@ -13,6 +16,10 @@ void Multigrid::solve(
     float omega,
     int iterations)
 {
+    #ifdef USE_CUDA
+        solveCuda(pressure, rhs, solid, omega, iterations);
+        return;
+    #endif
     if (levels == 0)
         buildHierarchy();
 

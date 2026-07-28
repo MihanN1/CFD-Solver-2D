@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.23)
 
 project(CFD_Solver_2D
     VERSION 0.1.0
-    LANGUAGES CXX
+    LANGUAGES CXX CUDA
 )
 
 set(CMAKE_CXX_STANDARD 17)
@@ -101,6 +101,7 @@ add_executable(cfd_app
     src/Mesh.cpp
     src/Solver.cpp
     src/Multigrid.cpp
+    src/MultigridCuda.cu
 )
 
 target_include_directories(cfd_app
@@ -114,6 +115,13 @@ target_link_libraries(cfd_app
         SFML::Graphics
         SFML::Window
         SFML::System
+)
+
+find_package(CUDAToolkit REQUIRED)
+
+target_link_libraries(cfd_app
+    PRIVATE
+        CUDA::cudart
 )
 
 target_compile_definitions(cfd_app
