@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <algorithm>
 #include <immintrin.h>
+#include <array>
 
 static const int SAVE_INTERVAL = 1; // save every step, so that we can determine the mistakes and debug the code more easily. It can be changed to a larger number for faster simulations.
 constexpr int dtUpdateInterval = 5;
@@ -858,69 +859,97 @@ void Solver::run() {
 void Solver::saveVTK(int stepNum) const {
     int nx = cfg.nx, ny = cfg.ny;
     const float dx = mesh.dx, dy = mesh.dy;
+    constexpr size_t BUFFER_FLOATS = 4096;
+    std::array<uint32_t, BUFFER_FLOATS> buffer;
+    size_t bufferPos = 0;
 
     std::string filename = "solution_" + std::to_string(stepNum) + ".vtk";
-    std::ofstream fout(filename);
-    if (!fout.is_open()) {
-        std::cerr << "Cannot open " << filename << " for writing.\n";
+    std::ofstream fout(filename, std::ios::binary);
+    if (!fout){
+        std::cerr << "Cannot open " << filename << '\n';
         return;
     }
-
-    fout << "# vtk DataFile Version 3.0\n";
-    fout << "CFD-Solver-2D output, step " << stepNum << "\n";
-    fout << "ASCII\n";
-    fout << "DATASET STRUCTURED_POINTS\n";
-    fout << "DIMENSIONS " << nx + 1 << " " << ny + 1 << " 1\n";
-    fout << "ORIGIN 0 0 0\n";
-    fout << "SPACING " << dx << " " << dy << " 0\n";
-    fout << "CELL_DATA " << nx * ny << "\n";
-
-    // Compute cell-centred fields
-    std::vector<float> p_cell(nx * ny);
-    std::vector<float> u_cell(nx * ny), v_cell(nx * ny);
-    for (int j = 0; j < ny; ++j) {
-        const int rowP = j*nx;
-        const int rowU = j*(nx+1);
-        const int rowV = j*nx;
-        const int rowVTop = (j+1)*nx;
-        for (int i = 0; i < nx; ++i) {
-            p_cell[j * nx + i] = p[rowP + i] * cfg.ro; // physical pressure (Pa)
-            // average u from left and right faces
-            float u_left = u[rowU + i];
-            float u_right = u[rowU + i + 1];
-            u_cell[j * nx + i] = 0.5 * (u_left + u_right);
-            // average v from bottom and top faces
-            float v_bot = v[rowV + i];
-            float v_top = v[rowVTop + i];
-            v_cell[j * nx + i] = 0.5 * (v_bot + v_top);
-        }
-    }
-
-    // Now write fields (we already set ORIGIN to centre)
-    fout << "SCALARS pressure float\n";
-    fout << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            fout << p_cell[j * nx + i] << " ";
-        }
-        fout << "\n";
-    }
-    fout << "SCALARS solid int 1\n";
-    fout << "LOOKUP_TABLE default\n";
+    fout
+        << "# vtk DataFile Version 3.0\n"
+        << "CFD Solver\n"
+        << "BINARY\n"
+        << "DATASET STRUCTURED_POINTS\n"
+        << "DIMENSIONS "
+        << nx + 1 << " "
+        << ny + 1 << " 1\n"
+        << "ORIGIN 0 0 0\n"
+        << "SPACING "
+        << dx << " "
+        << dy << " 0\n"
+        << "CELL_DATA "
+        << nx * ny << "\n";
+    auto flushFloatBuffer = [&](){
+        fout.write(
+            reinterpret_cast<char*>(buffer.data()),
+            bufferPos * sizeof(uint32_t));
+        bufferPos = 0;
+    };
+    auto writeFloat = [&](float value){
+        uint32_t x;
+        std::memcpy(&x, &value, sizeof(float));
+        x =
+            ((x & 0x000000FFu) << 24) |
+            ((x & 0x0000FF00u) << 8 ) |
+            ((x & 0x00FF0000u) >> 8 ) |
+            ((x & 0xFF000000u) >> 24);
+        buffer[bufferPos++] = x;
+        if (bufferPos == BUFFER_FLOATS)
+            flushFloatBuffer();
+    };
+    auto writeInt = [&](int value){
+        int32_t x = value;
+        uint32_t y;
+        std::memcpy(&y, &x, sizeof(int32_t));
+        y =
+            ((y & 0x000000FFu) << 24) |
+            ((y & 0x0000FF00u) << 8 ) |
+            ((y & 0x00FF0000u) >> 8 ) |
+            ((y & 0xFF000000u) >> 24);
+        fout.write(reinterpret_cast<char*>(&y), sizeof(y));
+    };
+    fout << "SCALARS pressure float\n" << "LOOKUP_TABLE default\n";
     for (int j = 0; j < ny; ++j){
+        const int row = j * nx;
+
+        for (int i = 0; i < nx; ++i){
+            writeFloat(p[row + i] * cfg.ro);
+        }
+    }
+    flushFloatBuffer();
+    fout << "\n";
+
+    fout << "SCALARS solid int 1\n" << "LOOKUP_TABLE default\n";
+    for (int j = 0; j < ny; ++j){
+        const int row = j * nx;
+
         for (int i = 0; i < nx; ++i)
         {
-            fout << mesh.solid[j*nx+i] << " ";
+            writeInt(mesh.solid[row + i]);
         }
-        fout << "\n";
     }
+    fout << "\n";
     fout << "VECTORS velocity float\n";
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            fout << u_cell[j * nx + i] << " " << v_cell[j * nx + i] << " 0\n";
+    for (int j = 0; j < ny; ++j){
+        const int rowP = j * nx;
+        const int rowU = j * (nx + 1);
+        const int rowV = j * nx;
+        const int rowVTop = (j + 1) * nx;
+        for (int i = 0; i < nx; ++i){
+            float uu =
+                0.5f * (u[rowU + i] + u[rowU + i + 1]);
+            float vv =
+                0.5f * (v[rowV + i] + v[rowVTop + i]);
+            writeFloat(uu);
+            writeFloat(vv);
+            writeFloat(0.0f);
         }
     }
-
+    flushFloatBuffer();
     fout.close();
     std::cout << "Saved " << filename << std::endl;
 }
