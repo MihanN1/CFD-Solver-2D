@@ -74,6 +74,7 @@ void Multigrid::smoothSOR(
 
     for (int iter = 0; iter < iterations; ++iter){
         for (int color = 0; color < 2; ++color){
+            #pragma omp parallel for schedule(static)
             for (int j = 1; j < ny - 1; ++j){
                 const int row = j * nx;
                 const int rowTop = (j + 1) * nx;
@@ -182,7 +183,7 @@ void Multigrid::computeResidual(int level){
     auto& residual = residualLevels[level];
     auto& solid = solidLevels[level];
 
-
+    #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny - 1; ++j){
         const int row = j * nx;
         const int rowTop = (j + 1) * nx;
@@ -296,6 +297,7 @@ float Multigrid::computeResidualNorm() const{
     float sum =
         tmp[0] + tmp[1] + tmp[2] + tmp[3] +
         tmp[4] + tmp[5] + tmp[6] + tmp[7];
+    #pragma omp parallel for schedule(static)
     for (; i < n; ++i)
         sum += ptr[i] * ptr[i];
     return std::sqrt(sum);
@@ -319,7 +321,7 @@ void Multigrid::restrictResidual(int fineLevel){
     auto& coarseSolid = solidLevels[coarseLevel];
 
     std::fill(coarsePressure.begin(), coarsePressure.end(), 0.0f);
-
+    #pragma omp parallel for schedule(static)
     for (int j = 1; j < coarseNy - 1; ++j){
         const int fj = std::min(j * 2, fineNy - 1);
         const int fj0 = std::max(fj - 1, 0);
@@ -384,6 +386,7 @@ void Multigrid::prolongateCorrection(int coarseLevel){
     const auto& fineSolid = solidLevels[fineLevel];
     const auto& coarseSolid = solidLevels[coarseLevel];
 
+    #pragma omp parallel for schedule(static)
     for (int j = 0; j < fineNy; ++j){
         const float y = static_cast<float>(j) * 0.5f;
 
@@ -469,6 +472,7 @@ void Multigrid::prolongateSolution(int coarseLevel){
     const auto& fineSolid = solidLevels[fineLevel];
     const auto& coarseSolid = solidLevels[coarseLevel];
 
+    #pragma omp parallel for schedule(static)
     for (int j = 0; j < fineNy; ++j){
         const float y = static_cast<float>(j) * 0.5f;
 
@@ -610,6 +614,7 @@ void Multigrid::restrictRHS(int fineLevel){
     auto& fineSolid = solidLevels[fineLevel];
     auto& coarseSolid = solidLevels[coarseLevel];
 
+    #pragma omp parallel for schedule(static)
     for (int j = 1; j < coarseNy - 1; j++)
     {
         for (int i = 1; i < coarseNx - 1; i++)

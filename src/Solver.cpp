@@ -160,6 +160,7 @@ void Solver::predictor() {
 
     // Compute u_star for internal fluid cells (i = 1..nx-1, j = 1..ny-2)
     // u is on vertical faces, so we need to compute convection and diffusion at those points
+    #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny-1; ++j) {
         const int rowU = j * (nx + 1);
         const uint8_t* uMask = uFluidMask.data() + rowU;
@@ -348,6 +349,7 @@ void Solver::predictor() {
     }
 
     // Compute v_star similarly
+    #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny; ++j){ // internal horizontal faces
         const int rowV = j * nx;
         const uint8_t* vMask = vFluidMask.data() + rowV;
@@ -565,6 +567,7 @@ void Solver::solvePoisson() {
     const __m256 invDxVec = _mm256_set1_ps(invDx);
     const __m256 invDyVec = _mm256_set1_ps(invDy);
     const __m256 invDtVec = _mm256_set1_ps(1.0f / dt);
+    #pragma omp parallel for schedule(static)
     for (int j = 0; j < ny; ++j) {
         const int row = j * nx;
         const int rowTop = (j + 1) * nx;
@@ -644,6 +647,7 @@ void Solver::corrector() {
     const __m256 dtVec    = _mm256_set1_ps(dt);
 
     // Update u: u_new = u_star - dt * (p(i+1) - p(i)) / dx
+    #pragma omp parallel for schedule(static)
     for (int j = 0; j < ny; ++j) {
         const int row = j * nx;
         int i = 1;
@@ -716,6 +720,7 @@ void Solver::corrector() {
     }
 
     // Update v: v_new = v_star - dt * (p(j+1) - p(j)) / dy
+    #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny; ++j) {
         const int row = j * nx;
         const int rowBot = (j - 1) * nx;
