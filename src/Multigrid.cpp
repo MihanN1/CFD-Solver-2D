@@ -16,7 +16,7 @@ void Multigrid::solve(
     float omega,
     int iterations)
 {
-    #ifdef 0
+    #ifdef USE_CUDA
         solveCuda(pressure, rhs, solid, omega, iterations);
         return;
     #else
