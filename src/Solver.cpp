@@ -559,6 +559,35 @@ void Solver::predictor() {
         vStar[idxV(i, 0)] = 0.0;   // bottom (no vertical flow)
         vStar[idxV(i, ny)] = 0.0;  // top
     }
+    float maxU = 0.0f;
+    float maxV = 0.0f;
+
+    for (float x : u_star)
+    {
+        if (!std::isfinite(x))
+        {
+            std::cout << "NaN in u_star\n";
+            break;
+        }
+
+        maxU = std::max(maxU, std::abs(x));
+    }
+
+    for (float x : v_star)
+    {
+        if (!std::isfinite(x))
+        {
+            std::cout << "NaN in v_star\n";
+            break;
+        }
+
+        maxV = std::max(maxV, std::abs(x));
+    }
+
+    std::cout
+        << "predictor: maxU=" << maxU
+        << " maxV=" << maxV
+        << std::endl;
 }
 
 void Solver::solvePoisson() {
@@ -638,6 +667,19 @@ void Solver::solvePoisson() {
         solidMask,
         omega,
         20);
+    float maxP = 0.0f;
+    for (float x : p)
+    {
+        if (!std::isfinite(x))
+        {
+            std::cout << "NaN in pressure\n";
+            break;
+        }
+
+        maxP = std::max(maxP, std::abs(x));
+    }
+
+    std::cout << "pressure max = " << maxP << std::endl;
     float norm = 0.f;
 
     for(float x : rhs)
@@ -799,6 +841,35 @@ void Solver::corrector() {
                 - dt * (p_top - p_bot) * invDy;
         }
     }
+    float maxU = 0.0f;
+    float maxV = 0.0f;
+
+    for (float x : u)
+    {
+        if (!std::isfinite(x))
+        {
+            std::cout << "NaN in u\n";
+            break;
+        }
+
+        maxU = std::max(maxU, std::abs(x));
+    }
+
+    for (float x : v)
+    {
+        if (!std::isfinite(x))
+        {
+            std::cout << "NaN in v\n";
+            break;
+        }
+
+        maxV = std::max(maxV, std::abs(x));
+    }
+
+    std::cout
+        << "corrector: maxU=" << maxU
+        << " maxV=" << maxV
+        << std::endl;
     // Apply boundary conditions again
     applyBC();
 }
