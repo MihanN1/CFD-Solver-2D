@@ -3,8 +3,6 @@ cmake_minimum_required(VERSION 3.28)
 project(CFD_Solver_2D
     VERSION 0.1.0
     LANGUAGES CXX
-<<<<<<< Updated upstream
-=======
 )
 
 include(GNUInstallDirs)
@@ -23,7 +21,6 @@ option(CFD_ENABLE_SFML "Build and link the bundled SFML visualization dependency
 
 set(CFD_CUDA_ARCHITECTURES "75" CACHE STRING
     "CUDA architectures. 75 targets the NVIDIA GTX 1660 Ti/Turing GPU."
->>>>>>> Stashed changes
 )
 
 set(CMAKE_CXX_STANDARD 17)
@@ -139,6 +136,11 @@ endif()
 set(CFD_SOURCES
     src/main.cpp
     src/tiny_obj_loader_impl.cpp
+    src/Config.cpp
+    src/Mesh.cpp
+    src/Solver.cpp
+    src/Multigrid.cpp
+    src/MultigridCuda.cu
 )
 
 add_executable(cfd_app ${CFD_SOURCES})
@@ -157,13 +159,6 @@ target_include_directories(cfd_app PRIVATE "${CFD_INCLUDE_DIR}")
 
 target_link_libraries(cfd_app
     PRIVATE
-<<<<<<< Updated upstream
-        SFML::Graphics
-        SFML::Window
-        SFML::System
-)
-
-=======
         cfd_tinyobj
         cfd_stl_reader
         CUDA::cudart
@@ -178,7 +173,6 @@ if(CFD_ENABLE_SFML)
     )
 endif()
 
->>>>>>> Stashed changes
 target_compile_definitions(cfd_app
     PRIVATE
         USE_CUDA=1
