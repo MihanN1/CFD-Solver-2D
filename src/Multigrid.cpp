@@ -1,7 +1,4 @@
 #include "Multigrid.hpp"
-#include <iostream>
-#include <fstream>
-#include <iomanip>
 #include <algorithm>
 #include <cmath>
 #include <immintrin.h>
@@ -22,26 +19,13 @@ void Multigrid::solve(
     #ifdef USE_CUDA
         solveCuda(pressure, rhs, solid, omega, iterations);
         return;
-    #else
+    #endif
     if (levels == 0)
         buildHierarchy();
-        for (int l = 0; l < levels; ++l){
-            std::cout
-                << l
-                << " : "
-                << levelNx[l]
-                << " x "
-                << levelNy[l]
-                << std::endl;
-        }
 
     pressureLevels[0] = pressure;
     rhsLevels[0] = rhs;
     solidLevels[0] = solid;
-    std::cout
-    << "levels = "
-    << levels
-    << std::endl;
     std::fill(
         residualLevels[0].begin(),
         residualLevels[0].end(),
@@ -71,64 +55,16 @@ void Multigrid::solve(
     }
 
     fullMultigrid(omega);
-    bool bad = false;
-
-    for (float x : pressureLevels[0]){
-        if (!std::isfinite(x)){
-            bad = true;
-            break;
-        }
-    }
-
-    std::cout << "After FMG bad = " << bad << std::endl;
-    for (float x : pressureLevels[0]){
-        if (!std::isfinite(x)){
-            std::cout << "NaN after FMG\n";
-            break;
-        }
-    }
 
     for (int cycle = 0; cycle < iterations; ++cycle){
         computeResidual(0);
-        bad = false;
-
-        for (float x : residualLevels[0]){
-            if (!std::isfinite(x)){
-                bad = true;
-                break;
-            }
-        }
-
-        std::cout << "Residual bad = " << bad << std::endl;
-        for (float x : residualLevels[0]){
-            if (!std::isfinite(x)){
-                std::cout << "NaN in residual\n";
-                break;
-            }
-        }
 
         if (computeResidualNorm() < tolerance)
             break;
-        std::cout << computeResidualNorm() << std::endl;
-        vCycle(0, omega);
-        bad = false;
-        for (float x : pressureLevels[0]){
-            if (!std::isfinite(x)){
-                bad = true;
-                break;
-            }
-        }
 
-        std::cout << "After VCycle bad = " << bad << std::endl;
-        for (float x : pressureLevels[0]){
-            if (!std::isfinite(x)){
-                std::cout << "NaN after VCycle\n";
-                break;
-            }
-        }
+        vCycle(0, omega);
     }
     pressure = pressureLevels[0];
-    #endif
 }
 void Multigrid::smoothSOR(
     int level,

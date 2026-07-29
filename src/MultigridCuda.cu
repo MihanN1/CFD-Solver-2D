@@ -184,7 +184,7 @@ void Multigrid::smoothSORCuda(
             invDy2,
             omega,
             0);
-        CUDA_CHECK();
+
         smoothSORKernel<<<grid, block>>>(
             nx,
             ny,
@@ -195,7 +195,6 @@ void Multigrid::smoothSORCuda(
             invDy2,
             omega,
             1);
-        CUDA_CHECK();
     }
 }
 
@@ -217,7 +216,6 @@ void Multigrid::computeResidualCuda(int level){
         dSolidLevels[level],
         invDx2,
         invDy2);
-    CUDA_CHECK();
 }
 
 void Multigrid::restrictResidualCuda(int fineLevel){
@@ -249,7 +247,6 @@ void Multigrid::restrictResidualCuda(int fineLevel){
         dRhsLevels[coarseLevel],
         dPressureLevels[coarseLevel],
         dSolidLevels[coarseLevel]);
-    CUDA_CHECK();
 }
 
 void Multigrid::restrictRHSCuda(int fineLevel){
@@ -286,7 +283,6 @@ void Multigrid::restrictRHSCuda(int fineLevel){
         dSolidLevels[fineLevel],
         dRhsLevels[coarseLevel],
         dSolidLevels[coarseLevel]);
-    CUDA_CHECK();
 }
 
 void Multigrid::prolongateCorrectionCuda(int coarseLevel){
@@ -315,7 +311,6 @@ void Multigrid::prolongateCorrectionCuda(int coarseLevel){
         dPressureLevels[coarseLevel],
         dSolidLevels[fineLevel],
         dSolidLevels[coarseLevel]);
-    CUDA_CHECK();
 }
 
 void Multigrid::prolongateSolutionCuda(int coarseLevel)
@@ -351,7 +346,6 @@ void Multigrid::prolongateSolutionCuda(int coarseLevel)
         dPressureLevels[coarseLevel],
         dSolidLevels[fineLevel],
         dSolidLevels[coarseLevel]);
-    CUDA_CHECK();
 }
 
 void Multigrid::vCycleCuda(
@@ -378,11 +372,7 @@ void Multigrid::vCycleCuda(
 
     computeResidualCuda(level);
 
-    CUDA_CHECK();
-
     restrictResidualCuda(level);
-
-    CUDA_CHECK();
 
     cudaMemset(
         dPressureLevels[level + 1],
@@ -392,8 +382,6 @@ void Multigrid::vCycleCuda(
     vCycleCuda(level + 1, omega);
 
     prolongateCorrectionCuda(level + 1);
-
-    CUDA_CHECK();
 
     smoothSORCuda(
         level,
@@ -538,17 +526,6 @@ __global__ void smoothSORKernel(
          rhs[id]) / diagonal;
 
     pressure[id] += omega * (pNew - pressure[id]);
-    if(!isfinite(pressure[id]))
-    {
-        printf(
-            "NaN smooth level cell=(%d,%d)\n"
-            "diag=%e rhs=%e\n"
-            "L=%e R=%e D=%e U=%e\n",
-            i,j,
-            diagonal,
-            rhs[id],
-            pLeft,pRight,pDown,pUp);
-    }
 }
 
 __global__ void computeResidualKernel(
@@ -583,16 +560,6 @@ __global__ void computeResidualKernel(
     if (!solid[(j + 1) * nx + i])
         Ap += (pressure[(j + 1) * nx + i] - pressure[id]) * invDy2;
     residual[id] = rhs[id] - Ap;
-    if(!isfinite(residual[id]))
-    {
-        printf(
-            "Residual NaN (%d,%d)\n"
-            "rhs=%e Ap=%e p=%e\n",
-            i,j,
-            rhs[id],
-            Ap,
-            pressure[id]);
-    }
 }
 
 __global__ void restrictResidualKernel(
@@ -729,13 +696,6 @@ __global__ void restrictResidualKernel(
             fineSolid[fj * fineNx + fi0] &&
             fineSolid[fj0 * fineNx + fi] &&
             fineSolid[fj0 * fineNx + fi0]);
-    if(!isfinite(coarseRhs[coarseId]))
-    {
-        printf(
-            "Restrict NaN (%d,%d)\n"
-            "sum=%e weight=%e\n",
-            i,j,sum,weightSum);
-    }
 }
 
 __global__ void restrictRHSKernel(
@@ -940,13 +900,6 @@ __global__ void prolongateCorrectionKernel(
 
     if(weight > 0.0f)
         finePressure[fineId] += value / weight;
-    if(!isfinite(finePressure[fineId]))
-    {
-        printf(
-            "Prolong NaN (%d,%d)\n"
-            "value=%e weight=%e\n",
-            i,j,value,weight);
-    }
 }
 
 __global__ void prolongateSolutionKernel(
@@ -1017,16 +970,6 @@ __global__ void prolongateSolutionKernel(
 
     if(weight > 0.0f)
         finePressure[fineId] = value / weight;
-}
-
-#define CUDA_CHECK(){                                     \
-    cudaError_t err = cudaGetLastError();                 \
-    if (err != cudaSuccess){                              \
-        printf("CUDA ERROR %s:%d : %s\n",                 \
-               __FILE__, __LINE__,                        \
-               cudaGetErrorString(err));                  \
-    }                                                     \
-    cudaDeviceSynchronize();                              \
 }
 
 #endif

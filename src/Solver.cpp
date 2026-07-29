@@ -60,7 +60,7 @@ void Solver::buildFaceMasks(){
     // u faces
     for (int j = 0; j < ny; ++j){
         for (int i = 1; i < nx; ++i){
-            if (!(mesh.solid[j*nx+i] && mesh.solid[j*nx+i-1])){
+            if (!mesh.solid[j*nx+i] && !mesh.solid[j*nx+i-1]){
                 uFluidMask[idxU(i,j)] = 1;
             }
         }
@@ -69,7 +69,7 @@ void Solver::buildFaceMasks(){
     // v faces
     for (int j = 1; j < ny; ++j){
         for (int i = 0; i < nx; ++i){
-            if (!(mesh.solid[j*nx+i] && mesh.solid[(j-1)*nx+i])){
+            if (!mesh.solid[j*nx+i] && !mesh.solid[(j-1)*nx+i]){
                 vFluidMask[idxV(i,j)] = 1;
             }
         }
@@ -559,35 +559,6 @@ void Solver::predictor() {
         vStar[idxV(i, 0)] = 0.0;   // bottom (no vertical flow)
         vStar[idxV(i, ny)] = 0.0;  // top
     }
-    float maxU = 0.0f;
-    float maxV = 0.0f;
-
-    for (float x : u_star)
-    {
-        if (!std::isfinite(x))
-        {
-            std::cout << "NaN in u_star\n";
-            break;
-        }
-
-        maxU = std::max(maxU, std::abs(x));
-    }
-
-    for (float x : v_star)
-    {
-        if (!std::isfinite(x))
-        {
-            std::cout << "NaN in v_star\n";
-            break;
-        }
-
-        maxV = std::max(maxV, std::abs(x));
-    }
-
-    std::cout
-        << "predictor: maxU=" << maxU
-        << " maxV=" << maxV
-        << std::endl;
 }
 
 void Solver::solvePoisson() {
@@ -667,25 +638,6 @@ void Solver::solvePoisson() {
         solidMask,
         omega,
         2);
-    float maxP = 0.0f;
-    for (float x : p)
-    {
-        if (!std::isfinite(x))
-        {
-            std::cout << "NaN in pressure\n";
-            break;
-        }
-
-        maxP = std::max(maxP, std::abs(x));
-    }
-
-    std::cout << "pressure max = " << maxP << std::endl;
-    float norm = 0.f;
-
-    for(float x : rhs)
-        norm += x*x;
-
-    std::cout<<"rhs "<<sqrt(norm)<<std::endl;
 }
 
 void Solver::corrector() {
@@ -841,35 +793,6 @@ void Solver::corrector() {
                 - dt * (p_top - p_bot) * invDy;
         }
     }
-    float maxU = 0.0f;
-    float maxV = 0.0f;
-
-    for (float x : u)
-    {
-        if (!std::isfinite(x))
-        {
-            std::cout << "NaN in u\n";
-            break;
-        }
-
-        maxU = std::max(maxU, std::abs(x));
-    }
-
-    for (float x : v)
-    {
-        if (!std::isfinite(x))
-        {
-            std::cout << "NaN in v\n";
-            break;
-        }
-
-        maxV = std::max(maxV, std::abs(x));
-    }
-
-    std::cout
-        << "corrector: maxU=" << maxU
-        << " maxV=" << maxV
-        << std::endl;
     // Apply boundary conditions again
     applyBC();
 }
@@ -913,24 +836,6 @@ void Solver::run() {
         predictor();
         solvePoisson();
         corrector();
-        double maxDiv = 0.0;
-
-        for (int j = 0; j < cfg.ny; ++j)
-        {
-            for (int i = 0; i < cfg.nx; ++i)
-            {
-                if (mesh.solid[idxP(i,j)])
-                    continue;
-
-                double div =
-                    (u[idxU(i+1,j)] - u[idxU(i,j)]) / mesh.dx +
-                    (v[idxV(i,j+1)] - v[idxV(i,j)]) / mesh.dy;
-
-                maxDiv = std::max(maxDiv, std::abs(div));
-            }
-        }
-
-        std::cout << "Max divergence = " << maxDiv << std::endl;
 
         currentTime += dt;
         step++;
