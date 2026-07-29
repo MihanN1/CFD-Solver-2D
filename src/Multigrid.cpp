@@ -1,4 +1,7 @@
 #include "Multigrid.hpp"
+#include <iostream>
+#include <fstream>
+#include <iomanip>
 #include <algorithm>
 #include <cmath>
 #include <immintrin.h>
@@ -61,7 +64,7 @@ void Multigrid::solve(
 
         if (computeResidualNorm() < tolerance)
             break;
-
+        std::cout << computeResidualNorm() << std::endl;
         vCycle(0, omega);
     }
     pressure = pressureLevels[0];

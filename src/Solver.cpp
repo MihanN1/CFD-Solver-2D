@@ -637,7 +637,13 @@ void Solver::solvePoisson() {
         rhs,
         solidMask,
         omega,
-        2);
+        20);
+    float norm = 0.f;
+
+    for(float x : rhs)
+        norm += x*x;
+
+    std::cout<<"rhs "<<sqrt(norm)<<std::endl;
 }
 
 void Solver::corrector() {
@@ -836,6 +842,24 @@ void Solver::run() {
         predictor();
         solvePoisson();
         corrector();
+        double maxDiv = 0.0;
+
+        for (int j = 0; j < cfg.ny; ++j)
+        {
+            for (int i = 0; i < cfg.nx; ++i)
+            {
+                if (mesh.solid[idxP(i,j)])
+                    continue;
+
+                double div =
+                    (u[idxU(i+1,j)] - u[idxU(i,j)]) / mesh.dx +
+                    (v[idxV(i,j+1)] - v[idxV(i,j)]) / mesh.dy;
+
+                maxDiv = std::max(maxDiv, std::abs(div));
+            }
+        }
+
+        std::cout << "Max divergence = " << maxDiv << std::endl;
 
         currentTime += dt;
         step++;
