@@ -1,0 +1,43 @@
+{
+  "version": 6,
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 28,
+    "patch": 0
+  },
+  "configurePresets": [
+    {
+      "name": "windows-vs2026",
+      "displayName": "Windows x64 — Visual Studio 2026 + CUDA",
+      "description": "Requires CUDA Toolkit 13.2 or newer with Visual Studio Integration installed.",
+      "generator": "Visual Studio 18 2026",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_INSTALL_PREFIX": "${sourceDir}/install",
+        "CMAKE_CUDA_ARCHITECTURES": "75",
+        "CFD_CUDA_ARCHITECTURES": "75",
+        "CFD_ENABLE_SFML": "ON",
+        "CFD_ENABLE_OPENMP": "ON",
+        "CFD_ENABLE_AVX2": "ON"
+      }
+    }
+  ],
+  "buildPresets": [
+    {
+      "name": "windows-release",
+      "displayName": "Build CUDA Release",
+      "configurePreset": "windows-vs2026",
+      "configuration": "Release"
+    },
+    {
+      "name": "windows-install-release",
+      "displayName": "Build and install CUDA Release",
+      "configurePreset": "windows-vs2026",
+      "configuration": "Release",
+      "targets": [
+        "install"
+      ]
+    }
+  ]
+}

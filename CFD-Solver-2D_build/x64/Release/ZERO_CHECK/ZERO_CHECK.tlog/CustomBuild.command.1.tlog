@@ -1,0 +1,10 @@
+^C:\USERS\ALANS\3D OBJECTS\.GIT\CFD-SOLVER-2D_BUILD\CMAKEFILES\45CF4310E300C3101A311510B6296340\GENERATE.STAMP.RULE
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Users/alans/3D Objects/.git/CFD-Solver-2D" "-BC:/Users/alans/3D Objects/.git/CFD-Solver-2D_build" --check-stamp-list CMakeFiles/generate.stamp.list --vs-solution-file "C:/Users/alans/3D Objects/.git/CFD-Solver-2D_build/CFD_Solver_2D.slnx"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd

@@ -1,0 +1,10 @@
+^C:\USERS\ALANS\3D OBJECTS\.GIT\CFD-SOLVER-2D_BUILD\_DEPS\HARFBUZZ-SRC\CMAKELISTS.TXT
+setlocal
+"C:\Program Files\CMake\bin\cmake.exe" "-SC:/Users/alans/3D Objects/.git/CFD-Solver-2D" "-BC:/Users/alans/3D Objects/.git/CFD-Solver-2D_build" --check-stamp-file "C:/Users/alans/3D Objects/.git/CFD-Solver-2D_build/_deps/harfbuzz-build/CMakeFiles/generate.stamp"
+if %errorlevel% neq 0 goto :cmEnd
+:cmEnd
+endlocal & call :cmErrorLevel %errorlevel% & goto :cmDone
+:cmErrorLevel
+exit /b %1
+:cmDone
+if %errorlevel% neq 0 goto :VCEnd
