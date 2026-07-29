@@ -25,10 +25,23 @@ void Multigrid::solve(
     #else
     if (levels == 0)
         buildHierarchy();
+        for (int l = 0; l < levels; ++l){
+            std::cout
+                << l
+                << " : "
+                << levelNx[l]
+                << " x "
+                << levelNy[l]
+                << std::endl;
+        }
 
     pressureLevels[0] = pressure;
     rhsLevels[0] = rhs;
     solidLevels[0] = solid;
+    std::cout
+    << "levels = "
+    << levels
+    << std::endl;
     std::fill(
         residualLevels[0].begin(),
         residualLevels[0].end(),
@@ -58,9 +71,18 @@ void Multigrid::solve(
     }
 
     fullMultigrid(omega);
+    bool bad = false;
+
     for (float x : pressureLevels[0]){
-        if (!std::isfinite(x))
-        {
+        if (!std::isfinite(x)){
+            bad = true;
+            break;
+        }
+    }
+
+    std::cout << "After FMG bad = " << bad << std::endl;
+    for (float x : pressureLevels[0]){
+        if (!std::isfinite(x)){
             std::cout << "NaN after FMG\n";
             break;
         }
@@ -68,6 +90,16 @@ void Multigrid::solve(
 
     for (int cycle = 0; cycle < iterations; ++cycle){
         computeResidual(0);
+        bad = false;
+
+        for (float x : residualLevels[0]){
+            if (!std::isfinite(x)){
+                bad = true;
+                break;
+            }
+        }
+
+        std::cout << "Residual bad = " << bad << std::endl;
         for (float x : residualLevels[0]){
             if (!std::isfinite(x)){
                 std::cout << "NaN in residual\n";
@@ -79,6 +111,15 @@ void Multigrid::solve(
             break;
         std::cout << computeResidualNorm() << std::endl;
         vCycle(0, omega);
+        bad = false;
+        for (float x : pressureLevels[0]){
+            if (!std::isfinite(x)){
+                bad = true;
+                break;
+            }
+        }
+
+        std::cout << "After VCycle bad = " << bad << std::endl;
         for (float x : pressureLevels[0]){
             if (!std::isfinite(x)){
                 std::cout << "NaN after VCycle\n";
