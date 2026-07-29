@@ -58,14 +58,33 @@ void Multigrid::solve(
     }
 
     fullMultigrid(omega);
+    for (float x : pressureLevels[0]){
+        if (!std::isfinite(x))
+        {
+            std::cout << "NaN after FMG\n";
+            break;
+        }
+    }
 
     for (int cycle = 0; cycle < iterations; ++cycle){
         computeResidual(0);
+        for (float x : residualLevels[0]){
+            if (!std::isfinite(x)){
+                std::cout << "NaN in residual\n";
+                break;
+            }
+        }
 
         if (computeResidualNorm() < tolerance)
             break;
         std::cout << computeResidualNorm() << std::endl;
         vCycle(0, omega);
+        for (float x : pressureLevels[0]){
+            if (!std::isfinite(x)){
+                std::cout << "NaN after VCycle\n";
+                break;
+            }
+        }
     }
     pressure = pressureLevels[0];
     #endif

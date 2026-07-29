@@ -666,7 +666,7 @@ void Solver::solvePoisson() {
         rhs,
         solidMask,
         omega,
-        20);
+        2);
     float maxP = 0.0f;
     for (float x : p)
     {
