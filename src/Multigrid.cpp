@@ -16,10 +16,10 @@ void Multigrid::solve(
     float omega,
     int iterations)
 {
-    #ifdef USE_CUDA
+    #ifdef 0
         solveCuda(pressure, rhs, solid, omega, iterations);
         return;
-    #endif
+    #else
     if (levels == 0)
         buildHierarchy();
 
@@ -65,6 +65,7 @@ void Multigrid::solve(
         vCycle(0, omega);
     }
     pressure = pressureLevels[0];
+    #endif
 }
 void Multigrid::smoothSOR(
     int level,
