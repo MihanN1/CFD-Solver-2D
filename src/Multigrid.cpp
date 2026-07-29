@@ -304,7 +304,6 @@ float Multigrid::computeResidualNorm() const{
     float sum =
         tmp[0] + tmp[1] + tmp[2] + tmp[3] +
         tmp[4] + tmp[5] + tmp[6] + tmp[7];
-    #pragma omp parallel for schedule(static)
     for (; i < n; ++i)
         sum += ptr[i] * ptr[i];
     return std::sqrt(sum);
