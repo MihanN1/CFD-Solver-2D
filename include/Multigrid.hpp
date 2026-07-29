@@ -95,10 +95,5 @@ private:
         void fullMultigridCuda(float omega);
 
         size_t sizeBytes(int level) const;
-
-        std::vector<float*> dPressureLevels;
-        std::vector<float*> dRhsLevels;
-        std::vector<float*> dResidualLevels;
-        std::vector<uint8_t*> dSolidLevels;
     #endif
 };
