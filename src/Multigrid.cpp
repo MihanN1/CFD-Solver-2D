@@ -513,9 +513,33 @@ void Multigrid::prolongateCorrection(int coarseLevel){
                 weight += w11;
             }
 
-            if (weight > 0.0f)
-                finePressure[fineId] += value / weight;
+            if (weight > 0.0f){
+                float corr = value / weight;
+                if (!std::isfinite(corr))
+                {
+                    printf("\nBad correction\n");
+                    printf("level=%d\n", coarseLevel);
 
+                    printf("value=%e\n", value);
+                    printf("weight=%e\n", weight);
+
+                    fflush(stdout);
+                    while (true) {}
+                }
+
+                finePressure[fineId] += corr;
+
+                if (!std::isfinite(finePressure[fineId]))
+                {
+                    printf("\nPressure exploded in prolongation\n");
+
+                    printf("old=%e\n", finePressure[fineId] - corr);
+                    printf("corr=%e\n", corr);
+
+                    fflush(stdout);
+                    while (true) {}
+                }
+            }
         }
     }
     if (coarseLevel == 1){
@@ -638,6 +662,23 @@ void Multigrid::vCycle(
         return;
     }
 
+    {
+        float maxP = 0.0f;
+
+        for (float v : pressureLevels[level])
+        {
+            if (!std::isfinite(v))
+            {
+                printf("\nPressure NaN BEFORE smooth level=%d\n", level);
+                fflush(stdout);
+                while (true) {}
+            }
+
+            maxP = std::max(maxP, std::fabs(v));
+        }
+
+        printf("[BEFORE SMOOTH L%d] maxP=%e\n", level, maxP);
+    }
     // Pre-smoothing
     smoothSOR(
         level,
@@ -670,6 +711,23 @@ void Multigrid::vCycle(
     // Recursive call
     vCycle(level + 1, omega);
 
+    {
+        float maxP = 0.0f;
+
+        for (float v : pressureLevels[level])
+        {
+            if (!std::isfinite(v))
+            {
+                printf("\nPressure NaN AFTER prolongation level=%d\n", level);
+                fflush(stdout);
+                while (true) {}
+            }
+
+            maxP = std::max(maxP, std::fabs(v));
+        }
+
+        printf("[AFTER PROLONG L%d] maxP=%e\n", level, maxP);
+    }
     // Prolongation
     prolongateCorrection(level + 1);
     if(level==0){
