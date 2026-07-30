@@ -128,38 +128,45 @@ void Multigrid::smoothSOR(
                         ((pLeft + pRight) * invDx2 +
                         (pDown + pUp) * invDy2 -
                         rhs[id]) / diagonal;
-                    if (!std::isfinite(self) ||
-                        !std::isfinite(pLeft) ||
-                        !std::isfinite(pRight) ||
-                        !std::isfinite(pUp) ||
-                        !std::isfinite(pDown)){
-                        printf(
-                            "Bad neighbour level=%d i=%d j=%d\n",
-                            level,
-                            i,
-                            j);
+                        if (!std::isfinite(self) ||
+                            !std::isfinite(pLeft) ||
+                            !std::isfinite(pRight) ||
+                            !std::isfinite(pUp) ||
+                            !std::isfinite(pDown)){
+                            printf(
+                                "\nBad neighbour level=%d i=%d j=%d\n",
+                                level, i, j);
 
-                        abort();
-                    }
+                            printf("self=%e\n", self);
+                            printf("left=%e\n", pLeft);
+                            printf("right=%e\n", pRight);
+                            printf("up=%e\n", pUp);
+                            printf("down=%e\n", pDown);
+
+                            fflush(stdout);
+
+                            while (true) {}
+                        }
                     const float oldP = pressure[id];
                     pressure[id] = oldP + omega * (pNew - oldP);
                     if (!std::isfinite(pressure[id])){
                         printf(
-                            "NaN at level=%d iter=%d color=%d i=%d j=%d\n",
-                            level,
-                            iter,
-                            color,
-                            i,
-                            j);
+                            "\nNaN at level=%d iter=%d color=%d i=%d j=%d\n",
+                            level, iter, color, i, j);
 
-                        printf(
-                            "old=%e new=%e rhs=%e diag=%e\n",
-                            oldP,
-                            pNew,
-                            rhs[id],
-                            diagonal);
+                        printf("old=%e\n", oldP);
+                        printf("pNew=%e\n", pNew);
+                        printf("rhs=%e\n", rhs[id]);
+                        printf("diag=%e\n", diagonal);
 
-                        abort();
+                        printf("left=%e\n", pLeft);
+                        printf("right=%e\n", pRight);
+                        printf("up=%e\n", pUp);
+                        printf("down=%e\n", pDown);
+
+                        fflush(stdout);
+
+                        while (true) {}
                     }
                 }
             }
