@@ -128,46 +128,8 @@ void Multigrid::smoothSOR(
                         ((pLeft + pRight) * invDx2 +
                         (pDown + pUp) * invDy2 -
                         rhs[id]) / diagonal;
-                        if (!std::isfinite(self) ||
-                            !std::isfinite(pLeft) ||
-                            !std::isfinite(pRight) ||
-                            !std::isfinite(pUp) ||
-                            !std::isfinite(pDown)){
-                            printf(
-                                "\nBad neighbour level=%d i=%d j=%d\n",
-                                level, i, j);
-
-                            printf("self=%e\n", self);
-                            printf("left=%e\n", pLeft);
-                            printf("right=%e\n", pRight);
-                            printf("up=%e\n", pUp);
-                            printf("down=%e\n", pDown);
-
-                            fflush(stdout);
-
-                            while (true) {}
-                        }
                     const float oldP = pressure[id];
                     pressure[id] = oldP + omega * (pNew - oldP);
-                    if (!std::isfinite(pressure[id])){
-                        printf(
-                            "\nNaN at level=%d iter=%d color=%d i=%d j=%d\n",
-                            level, iter, color, i, j);
-
-                        printf("old=%e\n", oldP);
-                        printf("pNew=%e\n", pNew);
-                        printf("rhs=%e\n", rhs[id]);
-                        printf("diag=%e\n", diagonal);
-
-                        printf("left=%e\n", pLeft);
-                        printf("right=%e\n", pRight);
-                        printf("up=%e\n", pUp);
-                        printf("down=%e\n", pDown);
-
-                        fflush(stdout);
-
-                        while (true) {}
-                    }
                 }
             }
         }
@@ -265,6 +227,18 @@ void Multigrid::computeResidual(int level){
                         Ap += (p[rowTop + ii] - p[id]) * invDy2;
 
                     residual[id] = rhs[id] - Ap;
+                    if (!std::isfinite(residual[id]) || fabs(residual[id]) > 1e20f){
+                        printf("\nResidual exploded\n");
+
+                        printf("level=%d\n", level);
+                        printf("i=%d j=%d\n", i, j);
+
+                        printf("rhs=%e\n", rhs[id]);
+                        printf("Ap=%e\n", Ap);
+                        printf("res=%e\n", residual[id]);
+
+                        fflush(stdout);
+                    }
                 }
                 continue;
             }
@@ -320,6 +294,18 @@ void Multigrid::computeResidual(int level){
                 Ap += (p[rowTop + i] - p[id]) * invDy2;
 
             residual[id] = rhs[id] - Ap;
+            if (!std::isfinite(residual[id]) || fabs(residual[id]) > 1e20f){
+                printf("\nResidual exploded\n");
+
+                printf("level=%d\n", level);
+                printf("i=%d j=%d\n", i, j);
+
+                printf("rhs=%e\n", rhs[id]);
+                printf("Ap=%e\n", Ap);
+                printf("res=%e\n", residual[id]);
+
+                fflush(stdout);
+            }
         }
     }
 }
@@ -524,10 +510,17 @@ void Multigrid::prolongateCorrection(int coarseLevel){
                     printf("weight=%e\n", weight);
 
                     fflush(stdout);
-                    while (true) {}
                 }
 
                 finePressure[fineId] += corr;
+                if (fabs(corr) > 1e10f){
+                    printf("\nHUGE CORRECTION\n");
+                    printf("coarseLevel=%d\n", coarseLevel);
+                    printf("fineId=%d\n", fineId);
+                    printf("corr=%e\n", corr);
+
+                    fflush(stdout);
+                }
 
                 if (!std::isfinite(finePressure[fineId]))
                 {
@@ -537,7 +530,6 @@ void Multigrid::prolongateCorrection(int coarseLevel){
                     printf("corr=%e\n", corr);
 
                     fflush(stdout);
-                    while (true) {}
                 }
             }
         }
@@ -671,7 +663,6 @@ void Multigrid::vCycle(
             {
                 printf("\nPressure NaN BEFORE smooth level=%d\n", level);
                 fflush(stdout);
-                while (true) {}
             }
 
             maxP = std::max(maxP, std::fabs(v));
@@ -690,13 +681,20 @@ void Multigrid::vCycle(
 
     // Residual
     computeResidual(level);
+
+    
     if(level==0){
-        float sum=0;
+    float sum = 0.0f;
+    float maxr = 0.0f;
 
-        for(float r: residualLevels[0])
-            sum+=fabs(r);
+    for (float r : residualLevels[0]){
+        sum += fabs(r);
 
-        printf("[VCYCLE residual] %e\n",sum);
+        if (fabs(r) > maxr)
+            maxr = fabs(r);
+    }
+
+    printf("[VCYCLE residual] sum=%e max=%e\n", sum, maxr);
     }
 
     // Restriction
@@ -720,7 +718,6 @@ void Multigrid::vCycle(
             {
                 printf("\nPressure NaN AFTER prolongation level=%d\n", level);
                 fflush(stdout);
-                while (true) {}
             }
 
             maxP = std::max(maxP, std::fabs(v));
