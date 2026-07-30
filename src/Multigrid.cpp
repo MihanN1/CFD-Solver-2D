@@ -243,6 +243,19 @@ void Multigrid::computeResidual(int level){
             }
             __m256 pCenter =
                 _mm256_loadu_ps(p.data() + row + i);
+
+            alignas(32) float check[8];
+            _mm256_store_ps(check, pCenter);
+
+            for (int k = 0; k < 8; ++k)
+            {
+                if (!std::isfinite(check[k]))
+                {
+                    printf("Pressure NaN before residual level=%d i=%d j=%d\n",
+                        level, i + k, j);
+                    fflush(stdout);
+                }
+            }
             __m256 pLeft =
                 _mm256_loadu_ps(p.data() + row + i - 1);
             __m256 pRight =
@@ -515,16 +528,6 @@ void Multigrid::prolongateCorrection(int coarseLevel){
                     printf("old=%e\n", finePressure[fineId] - corr);
                     printf("corr=%e\n", corr);
                     printf("new=%e\n", finePressure[fineId]);
-                    fflush(stdout);
-                }
-
-                if (!std::isfinite(finePressure[fineId]))
-                {
-                    printf("\nPressure exploded in prolongation\n");
-
-                    printf("old=%e\n", finePressure[fineId] - corr);
-                    printf("corr=%e\n", corr);
-
                     fflush(stdout);
                 }
             }
