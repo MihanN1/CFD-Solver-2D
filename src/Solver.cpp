@@ -60,7 +60,7 @@ void Solver::buildFaceMasks(){
     // u faces
     for (int j = 0; j < ny; ++j){
         for (int i = 1; i < nx; ++i){
-            if (!(mesh.solid[j*nx+i] && mesh.solid[j*nx+i-1])){
+            if (!mesh.solid[j*nx+i] && !mesh.solid[j*nx+i-1]){
                 uFluidMask[idxU(i,j)] = 1;
             }
         }
@@ -69,7 +69,7 @@ void Solver::buildFaceMasks(){
     // v faces
     for (int j = 1; j < ny; ++j){
         for (int i = 0; i < nx; ++i){
-            if (!(mesh.solid[j*nx+i] && mesh.solid[(j-1)*nx+i])){
+            if (!mesh.solid[j*nx+i] && !mesh.solid[(j-1)*nx+i]){
                 vFluidMask[idxV(i,j)] = 1;
             }
         }

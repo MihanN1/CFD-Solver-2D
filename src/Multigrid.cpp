@@ -16,10 +16,10 @@ void Multigrid::solve(
     float omega,
     int iterations)
 {
-    #if 0
+    #ifdef USE_CUDA
         solveCuda(pressure, rhs, solid, omega, iterations);
         return;
-    #else
+    #endif
     if (levels == 0)
         buildHierarchy();
 
@@ -65,7 +65,6 @@ void Multigrid::solve(
         vCycle(0, omega);
     }
     pressure = pressureLevels[0];
-    #endif
 }
 void Multigrid::smoothSOR(
     int level,
@@ -128,19 +127,9 @@ void Multigrid::smoothSOR(
                         ((pLeft + pRight) * invDx2 +
                         (pDown + pUp) * invDy2 -
                         rhs[id]) / diagonal;
+
                     const float oldP = pressure[id];
                     pressure[id] = oldP + omega * (pNew - oldP);
-                    if (!std::isfinite(pressure[id]))
-                    {
-                        printf("\nPressure NaN in smoothSOR\n");
-                        printf("level=%d\n", level);
-                        printf("i=%d j=%d\n", i, j);
-                        printf("old=%e\n", oldP);
-                        printf("pNew=%e\n", pNew);
-                        printf("diag=%e\n", diagonal);
-                        printf("rhs=%e\n", rhs[id]);
-                        fflush(stdout);
-                    }
                 }
             }
         }
@@ -243,19 +232,6 @@ void Multigrid::computeResidual(int level){
             }
             __m256 pCenter =
                 _mm256_loadu_ps(p.data() + row + i);
-
-            alignas(32) float check[8];
-            _mm256_store_ps(check, pCenter);
-
-            for (int k = 0; k < 8; ++k)
-            {
-                if (!std::isfinite(check[k]))
-                {
-                    printf("Pressure NaN before residual level=%d i=%d j=%d\n",
-                        level, i + k, j);
-                    fflush(stdout);
-                }
-            }
             __m256 pLeft =
                 _mm256_loadu_ps(p.data() + row + i - 1);
             __m256 pRight =
@@ -288,12 +264,6 @@ void Multigrid::computeResidual(int level){
         }
         for (; i < nx - 1; ++i){
             const int id = row + i;
-            if (!std::isfinite(p[id]))
-            {
-                printf("\nPressure already NaN before residual\n");
-                printf("level=%d i=%d j=%d\n", level, i, j);
-                fflush(stdout);
-            }
             if (solid[id]){
                 residual[id] = 0.0f;
                 continue;
@@ -342,18 +312,6 @@ void Multigrid::restrictResidual(int fineLevel){
     if (fineLevel + 1 >= levels)
         return;
     const int coarseLevel = fineLevel + 1;
-
-    if (fineLevel == 0){
-        float sum = 0.0f;
-        float maxv = 0.0f;
-
-        for (float r : residualLevels[0]){
-            sum += std::abs(r);
-            maxv = std::max(maxv, std::abs(r));
-        }
-
-        printf("[RES BEFORE RESTRICT] sum=%e max=%e\n", sum, maxv);
-    }
 
     const int fineNx = levelNx[fineLevel];
     const int fineNy = levelNy[fineLevel];
@@ -415,17 +373,6 @@ void Multigrid::restrictResidual(int fineLevel){
                 fineSolid[fj0 * fineNx + fi0]
             );
         }
-    }
-    if (fineLevel == 0){
-        float sum = 0.0f;
-        float maxv = 0.0f;
-
-        for (float r : rhsLevels[1]){
-            sum += std::abs(r);
-            maxv = std::max(maxv, std::abs(r));
-        }
-
-        printf("[COARSE RHS] sum=%e max=%e\n", sum, maxv);
     }
 }
 void Multigrid::prolongateCorrection(int coarseLevel){
@@ -505,44 +452,10 @@ void Multigrid::prolongateCorrection(int coarseLevel){
                 weight += w11;
             }
 
-            if (weight > 0.0f){
-                float corr = value / weight;
-                if (!std::isfinite(corr))
-                {
-                    printf("\nBad correction\n");
-                    printf("level=%d\n", coarseLevel);
+            if (weight > 0.0f)
+                finePressure[fineId] += value / weight;
 
-                    printf("value=%e\n", value);
-                    printf("weight=%e\n", weight);
-
-                    fflush(stdout);
-                }
-
-                finePressure[fineId] += corr;
-                if (!std::isfinite(finePressure[fineId]))
-                {
-                    printf("\nPressure became NaN\n");
-                    printf("coarseLevel=%d\n", coarseLevel);
-                    printf("fineLevel=%d\n", fineLevel);
-                    printf("fineId=%d\n", fineId);
-                    printf("old=%e\n", finePressure[fineId] - corr);
-                    printf("corr=%e\n", corr);
-                    printf("new=%e\n", finePressure[fineId]);
-                    fflush(stdout);
-                }
-            }
         }
-    }
-    if (coarseLevel == 1){
-        float sum = 0.0f;
-        float maxv = 0.0f;
-
-        for (float p : pressureLevels[0]){
-            sum += std::abs(p);
-            maxv = std::max(maxv, std::abs(p));
-        }
-
-        printf("[AFTER PROLONG] sum=%e max=%e\n", sum, maxv);
     }
 }
 void Multigrid::prolongateSolution(int coarseLevel){
@@ -653,22 +566,6 @@ void Multigrid::vCycle(
         return;
     }
 
-    {
-        float maxP = 0.0f;
-
-        for (float v : pressureLevels[level])
-        {
-            if (!std::isfinite(v))
-            {
-                printf("\nPressure NaN BEFORE smooth level=%d\n", level);
-                fflush(stdout);
-            }
-
-            maxP = std::max(maxP, std::fabs(v));
-        }
-
-        printf("[BEFORE SMOOTH L%d] maxP=%e\n", level, maxP);
-    }
     // Pre-smoothing
     smoothSOR(
         level,
@@ -681,21 +578,6 @@ void Multigrid::vCycle(
     // Residual
     computeResidual(level);
 
-    
-    if(level==0){
-    float sum = 0.0f;
-    float maxr = 0.0f;
-
-    for (float r : residualLevels[0]){
-        sum += fabs(r);
-
-        if (fabs(r) > maxr)
-            maxr = fabs(r);
-    }
-
-    printf("[VCYCLE residual] sum=%e max=%e\n", sum, maxr);
-    }
-
     // Restriction
     restrictResidual(level);
 
@@ -707,32 +589,9 @@ void Multigrid::vCycle(
 
     // Recursive call
     vCycle(level + 1, omega);
+
     // Prolongation
     prolongateCorrection(level + 1);
-    {
-        float maxP = 0.0f;
-
-        for (float v : pressureLevels[level])
-        {
-            if (!std::isfinite(v))
-            {
-                printf("\nPressure NaN AFTER prolongation level=%d\n", level);
-                fflush(stdout);
-            }
-
-            maxP = std::max(maxP, std::fabs(v));
-        }
-
-        printf("[AFTER PROLONG L%d] maxP=%e\n", level, maxP);
-    }
-    if(level==0){
-        float sum=0;
-
-        for(float p: pressureLevels[0])
-            sum+=fabs(p);
-
-        printf("[VCYCLE pressure] %e\n",sum);
-    }
 
     // Post-smoothing
     smoothSOR(
@@ -814,14 +673,9 @@ void Multigrid::restrictRHS(int fineLevel){
 void Multigrid::fullMultigrid(float omega){
     int coarsest = levels - 1;
 
-    for (int level = 0; level < coarsest; ++level){
+    for (int level = 0; level < coarsest; ++level)
         restrictRHS(level);
-        float sum = 0.0f;
-        for(float r : rhsLevels[level+1])
-            sum += fabs(r);
 
-        printf("[FMG RHS L%d] %e\n", level+1, sum);
-    }
     std::fill(
         pressureLevels[coarsest].begin(),
         pressureLevels[coarsest].end(),
