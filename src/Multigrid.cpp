@@ -94,28 +94,25 @@ void Multigrid::smoothSOR(
                     if (solid[id])
                         continue;
 
-                    const float self = pressure[id];
-
                     const float leftMask  = solid[id - 1] ? 0.0f : 1.0f;
                     const float rightMask = solid[id + 1] ? 0.0f : 1.0f;
                     const float downMask  = solid[rowBottom + i] ? 0.0f : 1.0f;
                     const float upMask    = solid[rowTop + i] ? 0.0f : 1.0f;
 
-                    const float pLeft =
-                        leftMask * pressure[id - 1] +
-                        (1.0f - leftMask) * self;
-
-                    const float pRight =
-                        rightMask * pressure[id + 1] +
-                        (1.0f - rightMask) * self;
-
-                    const float pDown =
-                        downMask * pressure[rowBottom + i] +
-                        (1.0f - downMask) * self;
-
-                    const float pUp =
-                        upMask * pressure[rowTop + i] +
-                        (1.0f - upMask) * self;
+                    // FIX: a masked-out (solid) neighbour must contribute 0 to BOTH
+                    // the numerator and the denominator. The old code mirrored the
+                    // cell's own value into pLeft/pRight/pDown/pUp for solid neighbours
+                    // (a ghost-cell trick) but then excluded that same neighbour from
+                    // `diagonal`. That mismatch injected an extra +self*invD2 term into
+                    // the numerator with nothing to balance it in the denominator, so
+                    // every SOR sweep multiplied the value of any solid-adjacent cell
+                    // by a factor > 1 -- unconditionally, even for an already-converged
+                    // field. That is the source of the pressure blow-up around solid
+                    // bodies. Bruh im dyin -_-
+                    const float pLeft  = leftMask  * pressure[id - 1];
+                    const float pRight = rightMask * pressure[id + 1];
+                    const float pDown  = downMask  * pressure[rowBottom + i];
+                    const float pUp    = upMask    * pressure[rowTop + i];
 
                     const float diagonal =
                         (leftMask + rightMask) * invDx2 +

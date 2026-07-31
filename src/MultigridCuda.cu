@@ -490,28 +490,19 @@ __global__ void smoothSORKernel(
     if(solid[id])
         return;
 
-    const float self = pressure[id];
-
     const float leftMask  = solid[id - 1] ? 0.0f : 1.0f;
     const float rightMask = solid[id + 1] ? 0.0f : 1.0f;
     const float downMask  = solid[(j - 1) * nx + i] ? 0.0f : 1.0f;
     const float upMask    = solid[(j + 1) * nx + i] ? 0.0f : 1.0f;
 
-    const float pLeft =
-        leftMask * pressure[id - 1] +
-        (1.0f - leftMask) * self;
-
-    const float pRight =
-        rightMask * pressure[id + 1] +
-        (1.0f - rightMask) * self;
-
-    const float pDown =
-        downMask * pressure[(j - 1) * nx + i] +
-        (1.0f - downMask) * self;
-
-    const float pUp =
-        upMask * pressure[(j + 1) * nx + i] +
-        (1.0f - upMask) * self;
+    // FIX: same masking bug as the CPU smoothSOR (see Multigrid.cpp) -- a solid
+    // neighbour must be excluded from both the numerator and the denominator,
+    // not mirrored into the numerator while excluded from the denominator.
+    // SON -_-
+    const float pLeft  = leftMask  * pressure[id - 1];
+    const float pRight = rightMask * pressure[id + 1];
+    const float pDown  = downMask  * pressure[(j - 1) * nx + i];
+    const float pUp    = upMask    * pressure[(j + 1) * nx + i];
 
     const float diagonal =
         (leftMask + rightMask) * invDx2 +
