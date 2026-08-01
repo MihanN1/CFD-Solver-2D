@@ -672,22 +672,33 @@ __global__ void restrictResidualKernel(
         }
     }
     coarseRhs[j * coarseNx + i] =
-        (weightSum > 0.0f) ? (sum / 16.0f) : 0.0f;
+        (weightSum > 0.0f) ? (sum / weightSum) : 0.0f;
 
     coarsePressure[j * coarseNx + i] = 0.0f;
+    const int fx = i * 2;
+    const int fy = j * 2;
+
     bool solidFlag = false;
-    for (int yy = y - 1; yy <= y + 1; ++yy) {
-        for (int xx = x - 1; xx <= x + 1; ++xx) {
-            if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy) {
-                if (fineSolid[yy * fineNx + xx]) {
-                    solidFlag = true;
-                    break;
-                }
+
+    for(int dy=0; dy<2; ++dy)
+    {
+        for(int dx=0; dx<2; ++dx)
+        {
+            int sx=min(fx+dx,fineNx-1);
+            int sy=min(fy+dy,fineNy-1);
+
+            if(fineSolid[sy*fineNx+sx])
+            {
+                solidFlag=true;
+                break;
             }
         }
-        if (solidFlag) break;
+
+        if(solidFlag)
+            break;
     }
-    coarseSolid[j * coarseNx + i] = solidFlag ? 1 : 0;
+
+    coarseSolid[j*coarseNx+i]=solidFlag;
 }
 
 __global__ void restrictRHSKernel(
@@ -808,21 +819,32 @@ __global__ void restrictRHSKernel(
     }
 
     coarseRhs[j * coarseNx + i] =
-        (wsum > 0.0f) ? sum / 16.0f : 0.0f;
+        (wsum > 0.0f) ? sum / wsum : 0.0f;
+
+    const int fx = i * 2;
+    const int fy = j * 2;
 
     bool solidFlag = false;
-    for (int yy = y - 1; yy <= y + 1; ++yy) {
-        for (int xx = x - 1; xx <= x + 1; ++xx) {
-            if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy) {
-                if (fineSolid[yy * fineNx + xx]) {
-                    solidFlag = true;
-                    break;
-                }
+
+    for(int dy=0; dy<2; ++dy)
+    {
+        for(int dx=0; dx<2; ++dx)
+        {
+            int sx=min(fx+dx,fineNx-1);
+            int sy=min(fy+dy,fineNy-1);
+
+            if(fineSolid[sy*fineNx+sx])
+            {
+                solidFlag=true;
+                break;
             }
         }
-        if (solidFlag) break;
+
+        if(solidFlag)
+            break;
     }
-    coarseSolid[j * coarseNx + i] = solidFlag ? 1 : 0;
+
+    coarseSolid[j*coarseNx+i]=solidFlag;
 }
 
 __global__ void prolongateCorrectionKernel(
@@ -846,53 +868,41 @@ __global__ void prolongateCorrectionKernel(
     if(fineSolid[fineId])
         return;
 
-    const float x = static_cast<float>(i) * 0.5f;
-    const float y = static_cast<float>(j) * 0.5f;
-
-    const int ic0 = static_cast<int>(x);
-    const int jc0 = static_cast<int>(y);
-
-    const int ic1 = min(ic0 + 1, coarseNx - 1);
-    const int jc1 = min(jc0 + 1, coarseNy - 1);
-
-    const float tx = x - ic0;
-    const float ty = y - jc0;
-
-    const int id00 = jc0 * coarseNx + ic0;
-    const int id10 = jc0 * coarseNx + ic1;
-    const int id01 = jc1 * coarseNx + ic0;
-    const int id11 = jc1 * coarseNx + ic1;
-
+    int ic0 = i >> 1;
+    int jc0 = j >> 1;
+    int ic1 = min(ic0 + 1, coarseNx - 1);
+    int jc1 = min(jc0 + 1, coarseNy - 1);
     float value = 0.0f;
     float weight = 0.0f;
+    auto add = [&](int cx,int cy){
+        int id = cy * coarseNx + cx;
 
-    const float w00 = (1.0f - tx) * (1.0f - ty);
-    const float w10 = tx * (1.0f - ty);
-    const float w01 = (1.0f - tx) * ty;
-    const float w11 = tx * ty;
+        if(!coarseSolid[id])
+        {
+            value += coarsePressure[id];
+            weight += 1.0f;
+        }
+    };
 
-    if(!coarseSolid[id00]){
-        value += w00 * coarsePressure[id00];
-        weight += w00;
+    if((i & 1)==0 && (j & 1)==0){
+        add(ic0,jc0);
     }
-
-    if(!coarseSolid[id10]){
-        value += w10 * coarsePressure[id10];
-        weight += w10;
+    else if((i & 1)==1 && (j & 1)==0){
+        add(ic0,jc0);
+        add(ic1,jc0);
     }
-
-    if(!coarseSolid[id01]){
-        value += w01 * coarsePressure[id01];
-        weight += w01;
+    else if((i & 1)==0 && (j & 1)==1){
+        add(ic0,jc0);
+        add(ic0,jc1);
     }
-
-    if(!coarseSolid[id11]){
-        value += w11 * coarsePressure[id11];
-        weight += w11;
+    else{
+        add(ic0,jc0);
+        add(ic1,jc0);
+        add(ic0,jc1);
+        add(ic1,jc1);
     }
-
-    if(weight > 0.0f)
-        finePressure[fineId] += value;
+    if(weight>0.0f)
+        finePressure[fineId]+=value/weight;
 }
 
 __global__ void prolongateSolutionKernel(
@@ -916,53 +926,41 @@ __global__ void prolongateSolutionKernel(
     if(fineSolid[fineId])
         return;
 
-    const float x = static_cast<float>(i) * 0.5f;
-    const float y = static_cast<float>(j) * 0.5f;
-
-    const int ic0 = static_cast<int>(x);
-    const int jc0 = static_cast<int>(y);
-
-    const int ic1 = min(ic0 + 1, coarseNx - 1);
-    const int jc1 = min(jc0 + 1, coarseNy - 1);
-
-    const float tx = x - ic0;
-    const float ty = y - jc0;
-
-    const int id00 = jc0 * coarseNx + ic0;
-    const int id10 = jc0 * coarseNx + ic1;
-    const int id01 = jc1 * coarseNx + ic0;
-    const int id11 = jc1 * coarseNx + ic1;
-
+    int ic0 = i >> 1;
+    int jc0 = j >> 1;
+    int ic1 = min(ic0 + 1, coarseNx - 1);
+    int jc1 = min(jc0 + 1, coarseNy - 1);
     float value = 0.0f;
     float weight = 0.0f;
+    auto add = [&](int cx,int cy){
+        int id = cy * coarseNx + cx;
 
-    const float w00 = (1.0f - tx) * (1.0f - ty);
-    const float w10 = tx * (1.0f - ty);
-    const float w01 = (1.0f - tx) * ty;
-    const float w11 = tx * ty;
+        if(!coarseSolid[id])
+        {
+            value += coarsePressure[id];
+            weight += 1.0f;
+        }
+    };
 
-    if(!coarseSolid[id00]){
-        value += w00 * coarsePressure[id00];
-        weight += w00;
+    if((i & 1)==0 && (j & 1)==0){
+        add(ic0,jc0);
     }
-
-    if(!coarseSolid[id10]){
-        value += w10 * coarsePressure[id10];
-        weight += w10;
+    else if((i & 1)==1 && (j & 1)==0){
+        add(ic0,jc0);
+        add(ic1,jc0);
     }
-
-    if(!coarseSolid[id01]){
-        value += w01 * coarsePressure[id01];
-        weight += w01;
+    else if((i & 1)==0 && (j & 1)==1){
+        add(ic0,jc0);
+        add(ic0,jc1);
     }
-
-    if(!coarseSolid[id11]){
-        value += w11 * coarsePressure[id11];
-        weight += w11;
+    else{
+        add(ic0,jc0);
+        add(ic1,jc0);
+        add(ic0,jc1);
+        add(ic1,jc1);
     }
-
-    if(weight > 0.0f)
-        finePressure[fineId] = value;
+    if(weight>0.0f)
+        finePressure[fineId]=value/weight;
 }
 
 #endif

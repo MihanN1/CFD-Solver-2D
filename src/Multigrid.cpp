@@ -358,20 +358,31 @@ void Multigrid::restrictResidual(int fineLevel){
             add(x - 1, y + 1, 1.0f);
             add(x    , y + 1, 2.0f);
             add(x + 1, y + 1, 1.0f);
-            coarseRhs[j * coarseNx + i] = (weightSum > 0.0f) ? sum / 16.0f : 0.0f;
+            coarseRhs[j * coarseNx + i] = (weightSum > 0.0f) ? sum / weightSum : 0.0f;
+            const int fx = i * 2;
+            const int fy = j * 2;
+
             bool solidFlag = false;
-            for (int yy = y - 1; yy <= y + 1; ++yy) {
-                for (int xx = x - 1; xx <= x + 1; ++xx) {
-                    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy) {
-                        if (fineSolid[yy * fineNx + xx]) {
-                            solidFlag = true;
-                            break;
-                        }
+
+            for (int dy = 0; dy < 2; ++dy)
+            {
+                for (int dx = 0; dx < 2; ++dx)
+                {
+                    int xx = std::min(fx + dx, fineNx - 1);
+                    int yy = std::min(fy + dy, fineNy - 1);
+
+                    if (fineSolid[yy * fineNx + xx])
+                    {
+                        solidFlag = true;
+                        break;
                     }
                 }
-                if (solidFlag) break;
+
+                if (solidFlag)
+                    break;
             }
-            coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(solidFlag ? 1 : 0);
+
+            coarseSolid[j * coarseNx + i] = solidFlag;
         }
     }
 }
@@ -408,52 +419,44 @@ void Multigrid::prolongateCorrection(int coarseLevel){
             if (fineSolid[fineId])
                 continue;
 
-            const float x = static_cast<float>(i) * 0.5f;
+            int ic0 = i >> 1;
+            int jc0 = j >> 1;
 
-            int ic0 = static_cast<int>(x);
             int ic1 = std::min(ic0 + 1, coarseNx - 1);
-
-            float tx = x - ic0;
-
-            const int id00 = jc0 * coarseNx + ic0;
-            const int id10 = jc0 * coarseNx + ic1;
-            const int id01 = jc1 * coarseNx + ic0;
-            const int id11 = jc1 * coarseNx + ic1;
+            int jc1 = std::min(jc0 + 1, coarseNy - 1);
 
             float value = 0.0f;
             float weight = 0.0f;
 
-            const float w00 = (1.0f - tx) * (1.0f - ty);
-            const float w10 = tx * (1.0f - ty);
-            const float w01 = (1.0f - tx) * ty;
-            const float w11 = tx * ty;
+            auto add = [&](int cx,int cy){
+                int id = cy * coarseNx + cx;
 
-            if (!coarseSolid[id00])
-            {
-                value += w00 * coarsePressure[id00];
-                weight += w00;
+                if(!coarseSolid[id])
+                {
+                    value += coarsePressure[id];
+                    weight += 1.0f;
+                }
+            };
+
+            if((i & 1)==0 && (j & 1)==0){
+                add(ic0,jc0);
             }
-
-            if (!coarseSolid[id10])
-            {
-                value += w10 * coarsePressure[id10];
-                weight += w10;
+            else if((i & 1)==1 && (j & 1)==0){
+                add(ic0,jc0);
+                add(ic1,jc0);
             }
-
-            if (!coarseSolid[id01])
-            {
-                value += w01 * coarsePressure[id01];
-                weight += w01;
+            else if((i & 1)==0 && (j & 1)==1){
+                add(ic0,jc0);
+                add(ic0,jc1);
             }
-
-            if (!coarseSolid[id11])
-            {
-                value += w11 * coarsePressure[id11];
-                weight += w11;
+            else{
+                add(ic0,jc0);
+                add(ic1,jc0);
+                add(ic0,jc1);
+                add(ic1,jc1);
             }
-
-            if (weight > 0.0f)
-                finePressure[fineId] += value;
+            if(weight>0.0f)
+                finePressure[fineId]+=value/weight;
 
         }
     }
@@ -494,52 +497,44 @@ void Multigrid::prolongateSolution(int coarseLevel){
             if (fineSolid[fineId])
                 continue;
 
-            const float x = static_cast<float>(i) * 0.5f;
+            int ic0 = i >> 1;
+            int jc0 = j >> 1;
 
-            int ic0 = static_cast<int>(x);
             int ic1 = std::min(ic0 + 1, coarseNx - 1);
-
-            float tx = x - ic0;
-
-            const int id00 = jc0 * coarseNx + ic0;
-            const int id10 = jc0 * coarseNx + ic1;
-            const int id01 = jc1 * coarseNx + ic0;
-            const int id11 = jc1 * coarseNx + ic1;
+            int jc1 = std::min(jc0 + 1, coarseNy - 1);
 
             float value = 0.0f;
             float weight = 0.0f;
 
-            const float w00 = (1.0f - tx) * (1.0f - ty);
-            const float w10 = tx * (1.0f - ty);
-            const float w01 = (1.0f - tx) * ty;
-            const float w11 = tx * ty;
+            auto add = [&](int cx,int cy){
+                int id = cy * coarseNx + cx;
 
-            if (!coarseSolid[id00])
-            {
-                value += w00 * coarsePressure[id00];
-                weight += w00;
+                if(!coarseSolid[id])
+                {
+                    value += coarsePressure[id];
+                    weight += 1.0f;
+                }
+            };
+
+            if((i & 1)==0 && (j & 1)==0){
+                add(ic0,jc0);
             }
-
-            if (!coarseSolid[id10])
-            {
-                value += w10 * coarsePressure[id10];
-                weight += w10;
+            else if((i & 1)==1 && (j & 1)==0){
+                add(ic0,jc0);
+                add(ic1,jc0);
             }
-
-            if (!coarseSolid[id01])
-            {
-                value += w01 * coarsePressure[id01];
-                weight += w01;
+            else if((i & 1)==0 && (j & 1)==1){
+                add(ic0,jc0);
+                add(ic0,jc1);
             }
-
-            if (!coarseSolid[id11])
-            {
-                value += w11 * coarsePressure[id11];
-                weight += w11;
+            else{
+                add(ic0,jc0);
+                add(ic1,jc0);
+                add(ic0,jc1);
+                add(ic1,jc1);
             }
-
-            if (weight > 0.0f)
-                finePressure[fineId] = value;
+            if(weight>0.0f)
+                finePressure[fineId]+=value/weight;
 
         }
     }
@@ -654,20 +649,31 @@ void Multigrid::restrictRHS(int fineLevel){
             add(x  ,y+1,2);
             add(x+1,y+1,1);
 
-            coarseRhs[j*coarseNx+i]=(wsum>0)?sum/16.0f:0.0f;
+            coarseRhs[j*coarseNx+i]=(wsum>0)?sum/wsum:0.0f;
+            const int fx = i * 2;
+            const int fy = j * 2;
+
             bool solidFlag = false;
-            for (int yy = y - 1; yy <= y + 1; ++yy) {
-                for (int xx = x - 1; xx <= x + 1; ++xx) {
-                    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy) {
-                        if (fineSolid[yy * fineNx + xx]) {
-                            solidFlag = true;
-                            break;
-                        }
+
+            for (int dy = 0; dy < 2; ++dy)
+            {
+                for (int dx = 0; dx < 2; ++dx)
+                {
+                    int xx = std::min(fx + dx, fineNx - 1);
+                    int yy = std::min(fy + dy, fineNy - 1);
+
+                    if (fineSolid[yy * fineNx + xx])
+                    {
+                        solidFlag = true;
+                        break;
                     }
                 }
-                if (solidFlag) break;
+
+                if (solidFlag)
+                    break;
             }
-            coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(solidFlag ? 1 : 0);
+
+            coarseSolid[j * coarseNx + i] = solidFlag;
         }
     }
 }
