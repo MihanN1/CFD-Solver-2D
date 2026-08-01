@@ -453,7 +453,7 @@ void Multigrid::prolongateCorrection(int coarseLevel){
             }
 
             if (weight > 0.0f)
-                finePressure[fineId] += value / weight;
+                finePressure[fineId] += value;
 
         }
     }
@@ -539,7 +539,7 @@ void Multigrid::prolongateSolution(int coarseLevel){
             }
 
             if (weight > 0.0f)
-                finePressure[fineId] = value / weight;
+                finePressure[fineId] = value;
 
         }
     }

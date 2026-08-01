@@ -892,7 +892,7 @@ __global__ void prolongateCorrectionKernel(
     }
 
     if(weight > 0.0f)
-        finePressure[fineId] += value / weight;
+        finePressure[fineId] += value;
 }
 
 __global__ void prolongateSolutionKernel(
@@ -962,7 +962,7 @@ __global__ void prolongateSolutionKernel(
     }
 
     if(weight > 0.0f)
-        finePressure[fineId] = value / weight;
+        finePressure[fineId] = value;
 }
 
 #endif
