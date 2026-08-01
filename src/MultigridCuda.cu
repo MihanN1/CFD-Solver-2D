@@ -573,8 +573,6 @@ __global__ void restrictResidualKernel(
     if (j <= 0 || j >= coarseNy - 1)
         return;
 
-    const int fi = min(i * 2, fineNx - 1);
-    const int fj = min(j * 2, fineNy - 1);
     const int x = min(i * 2, fineNx - 2);
     const int y = min(j * 2, fineNy - 2);
 
@@ -673,23 +671,18 @@ __global__ void restrictResidualKernel(
             weightSum += 1.0f;
         }
     }
-
-    const int coarseId = j * coarseNx + i;
-    coarseRhs[coarseId] =
+    coarseRhs[j * coarseNx + i] =
         (weightSum > 0.0f) ? (sum / weightSum) : 0.0f;
 
-    coarsePressure[coarseId] = 0.0f;
-    int x0 = i * 2;
-    int x1 = min(i * 2 + 1, fineNx - 1);
-    int y0 = j * 2;
-    int y1 = min(j * 2 + 1, fineNy - 1);
-
+    coarsePressure[j * coarseNx + i] = 0.0f;
     bool solidFlag = false;
-    for (int yy = y0; yy <= y1; ++yy) {
-        for (int xx = x0; xx <= x1; ++xx) {
-            if (fineSolid[yy * fineNx + xx]) {
-                solidFlag = true;
-                break;
+    for (int yy = y - 1; yy <= y + 1; ++yy) {
+        for (int xx = x - 1; xx <= x + 1; ++xx) {
+            if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy) {
+                if (fineSolid[yy * fineNx + xx]) {
+                    solidFlag = true;
+                    break;
+                }
             }
         }
         if (solidFlag) break;
@@ -716,11 +709,8 @@ __global__ void restrictRHSKernel(
     if(j <= 0 || j >= coarseNy - 1)
         return;
 
-    const int fi = min(i * 2, fineNx - 1);
-    const int fj = min(j * 2, fineNy - 1);
-
-    const int x = fi;
-    const int y = fj;
+    int x = min(i * 2, fineNx - 2);
+    int y = min(j * 2, fineNy - 2);
 
     float sum = 0.0f;
     float wsum = 0.0f;
@@ -820,17 +810,14 @@ __global__ void restrictRHSKernel(
     coarseRhs[j * coarseNx + i] =
         (wsum > 0.0f) ? sum / wsum : 0.0f;
 
-    int x0 = i * 2;
-    int x1 = min(i * 2 + 1, fineNx - 1);
-    int y0 = j * 2;
-    int y1 = min(j * 2 + 1, fineNy - 1);
-
     bool solidFlag = false;
-    for (int yy = y0; yy <= y1; ++yy) {
-        for (int xx = x0; xx <= x1; ++xx) {
-            if (fineSolid[yy * fineNx + xx]) {
-                solidFlag = true;
-                break;
+    for (int yy = y - 1; yy <= y + 1; ++yy) {
+        for (int xx = x - 1; xx <= x + 1; ++xx) {
+            if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy) {
+                if (fineSolid[yy * fineNx + xx]) {
+                    solidFlag = true;
+                    break;
+                }
             }
         }
         if (solidFlag) break;

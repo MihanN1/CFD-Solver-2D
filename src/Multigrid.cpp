@@ -327,9 +327,7 @@ void Multigrid::restrictResidual(int fineLevel){
     std::fill(coarsePressure.begin(), coarsePressure.end(), 0.0f);
     #pragma omp parallel for schedule(static)
     for (int j = 1; j < coarseNy - 1; ++j){
-        const int fj = std::min(j * 2, fineNy - 1);
         for (int i = 1; i < coarseNx - 1; ++i){
-            const int fi = std::min(i * 2, fineNx - 1);
 
             const int x = std::min(i * 2, fineNx - 2);
             const int y = std::min(j * 2, fineNy - 2);
@@ -361,17 +359,14 @@ void Multigrid::restrictResidual(int fineLevel){
             add(x    , y + 1, 2.0f);
             add(x + 1, y + 1, 1.0f);
             coarseRhs[j * coarseNx + i] = weightSum > 0.0f ? sum / weightSum : 0.0f;
-            int x0 = i * 2;
-            int x1 = std::min(i * 2 + 1, fineNx - 1);
-            int y0 = j * 2;
-            int y1 = std::min(j * 2 + 1, fineNy - 1);
-
             bool solidFlag = false;
-            for (int yy = y0; yy <= y1; ++yy) {
-                for (int xx = x0; xx <= x1; ++xx) {
-                    if (fineSolid[yy * fineNx + xx]) {
-                        solidFlag = true;
-                        break;
+            for (int yy = y - 1; yy <= y + 1; ++yy) {
+                for (int xx = x - 1; xx <= x + 1; ++xx) {
+                    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy) {
+                        if (fineSolid[yy * fineNx + xx]) {
+                            solidFlag = true;
+                            break;
+                        }
                     }
                 }
                 if (solidFlag) break;
@@ -630,12 +625,10 @@ void Multigrid::restrictRHS(int fineLevel){
     {
         for (int i = 1; i < coarseNx - 1; i++)
         {
-            int fi = std::min(i * 2, fineNx - 1);
-            int fj = std::min(j * 2, fineNy - 1);
-
+            int x = std::min(i * 2, fineNx - 2);
+            int y = std::min(j * 2, fineNy - 2);
             float sum = 0.0f;
             float wsum = 0.0f;
-
             auto add = [&](int x,int y,float w)
             {
                 if(x<0||x>=fineNx||y<0||y>=fineNy)
@@ -649,31 +642,27 @@ void Multigrid::restrictRHS(int fineLevel){
                     wsum+=w;
                 }
             };
+            add(x-1,y-1,1);
+            add(x  ,y-1,2);
+            add(x+1,y-1,1);
 
-            add(fi-1,fj-1,1);
-            add(fi  ,fj-1,2);
-            add(fi+1,fj-1,1);
+            add(x-1,y  ,2);
+            add(x  ,y  ,4);
+            add(x+1,y  ,2);
 
-            add(fi-1,fj  ,2);
-            add(fi  ,fj  ,4);
-            add(fi+1,fj  ,2);
-
-            add(fi-1,fj+1,1);
-            add(fi  ,fj+1,2);
-            add(fi+1,fj+1,1);
+            add(x-1,y+1,1);
+            add(x  ,y+1,2);
+            add(x+1,y+1,1);
 
             coarseRhs[j*coarseNx+i]=(wsum>0)?sum/wsum:0;
-            int x0 = i * 2;
-            int x1 = std::min(i * 2 + 1, fineNx - 1);
-            int y0 = j * 2;
-            int y1 = std::min(j * 2 + 1, fineNy - 1);
-
             bool solidFlag = false;
-            for (int yy = y0; yy <= y1; ++yy) {
-                for (int xx = x0; xx <= x1; ++xx) {
-                    if (fineSolid[yy * fineNx + xx]) {
-                        solidFlag = true;
-                        break;
+            for (int yy = y - 1; yy <= y + 1; ++yy) {
+                for (int xx = x - 1; xx <= x + 1; ++xx) {
+                    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy) {
+                        if (fineSolid[yy * fineNx + xx]) {
+                            solidFlag = true;
+                            break;
+                        }
                     }
                 }
                 if (solidFlag) break;
