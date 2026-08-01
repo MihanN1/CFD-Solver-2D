@@ -672,7 +672,7 @@ __global__ void restrictResidualKernel(
         }
     }
     coarseRhs[j * coarseNx + i] =
-        (weightSum > 0.0f) ? (sum / weightSum) : 0.0f;
+        (weightSum > 0.0f) ? (sum / 16.0f) : 0.0f;
 
     coarsePressure[j * coarseNx + i] = 0.0f;
     bool solidFlag = false;
@@ -808,7 +808,7 @@ __global__ void restrictRHSKernel(
     }
 
     coarseRhs[j * coarseNx + i] =
-        (wsum > 0.0f) ? sum / wsum : 0.0f;
+        (wsum > 0.0f) ? sum / 16.0f : 0.0f;
 
     bool solidFlag = false;
     for (int yy = y - 1; yy <= y + 1; ++yy) {

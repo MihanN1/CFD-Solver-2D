@@ -358,7 +358,7 @@ void Multigrid::restrictResidual(int fineLevel){
             add(x - 1, y + 1, 1.0f);
             add(x    , y + 1, 2.0f);
             add(x + 1, y + 1, 1.0f);
-            coarseRhs[j * coarseNx + i] = weightSum > 0.0f ? sum / weightSum : 0.0f;
+            coarseRhs[j * coarseNx + i] = (weightSum > 0.0f) ? sum / 16.0f : 0.0f;
             bool solidFlag = false;
             for (int yy = y - 1; yy <= y + 1; ++yy) {
                 for (int xx = x - 1; xx <= x + 1; ++xx) {
@@ -654,7 +654,7 @@ void Multigrid::restrictRHS(int fineLevel){
             add(x  ,y+1,2);
             add(x+1,y+1,1);
 
-            coarseRhs[j*coarseNx+i]=(wsum>0)?sum/wsum:0;
+            coarseRhs[j*coarseNx+i]=(wsum>0)?sum/16.0f:0.0f;
             bool solidFlag = false;
             for (int yy = y - 1; yy <= y + 1; ++yy) {
                 for (int xx = x - 1; xx <= x + 1; ++xx) {
