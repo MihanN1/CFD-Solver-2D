@@ -354,7 +354,7 @@ void Multigrid::vCycleCuda(
 {
     constexpr int preSmooth = 2;
     constexpr int postSmooth = 2;
-    constexpr int coarseSmooth = 20;
+    constexpr int coarseSmooth = 50;
 
     if(level == levels - 1){
         smoothSORCuda(
@@ -403,7 +403,7 @@ void Multigrid::fullMultigridCuda(float omega){
     smoothSORCuda(
         coarsest,
         omega,
-        12);
+        50);
 
     for(int level=coarsest; level>0; --level){
         prolongateSolutionCuda(level);

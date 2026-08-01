@@ -166,7 +166,7 @@ void Multigrid::buildHierarchy(){
         residualLevels.emplace_back(size, 0.0f);
         solidLevels.emplace_back(size, static_cast<uint8_t>(0));
 
-        if (currentNx <= 2 || currentNy <= 2)
+        if (currentNx <= 4 || currentNy <= 4)
             break;
 
         currentNx = std::max(2, (currentNx + 1) / 2);
@@ -551,7 +551,7 @@ void Multigrid::vCycle(
 {
     const int preSmooth = 2;
     const int postSmooth = 2;
-    const int coarseSmooth = 20;
+    const int coarseSmooth = 50;
     // Coarsest grid
     if (level == levels - 1)
     {
@@ -688,7 +688,7 @@ void Multigrid::fullMultigrid(float omega){
         rhsLevels[coarsest],
         solidLevels[coarsest],
         omega,
-        12);
+        50);
 
     for (int level = coarsest; level > 0; --level)
     {
