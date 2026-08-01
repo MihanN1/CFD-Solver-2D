@@ -684,11 +684,17 @@ __global__ void restrictResidualKernel(
     int y0 = j * 2;
     int y1 = min(j * 2 + 1, fineNy - 1);
 
-    coarseSolid[j * coarseNx + i] =
-        fineSolid[y0 * fineNx + x0] &&
-        fineSolid[y0 * fineNx + x1] &&
-        fineSolid[y1 * fineNx + x0] &&
-        fineSolid[y1 * fineNx + x1];
+    bool solidFlag = false;
+    for (int yy = y0; yy <= y1; ++yy) {
+        for (int xx = x0; xx <= x1; ++xx) {
+            if (fineSolid[yy * fineNx + xx]) {
+                solidFlag = true;
+                break;
+            }
+        }
+        if (solidFlag) break;
+    }
+    coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(solidFlag ? 1 : 0);
 }
 
 __global__ void restrictRHSKernel(
@@ -819,11 +825,17 @@ __global__ void restrictRHSKernel(
     int y0 = j * 2;
     int y1 = min(j * 2 + 1, fineNy - 1);
 
-    coarseSolid[j * coarseNx + i] =
-        fineSolid[y0 * fineNx + x0] &&
-        fineSolid[y0 * fineNx + x1] &&
-        fineSolid[y1 * fineNx + x0] &&
-        fineSolid[y1 * fineNx + x1];
+    bool solidFlag = false;
+    for (int yy = y0; yy <= y1; ++yy) {
+        for (int xx = x0; xx <= x1; ++xx) {
+            if (fineSolid[yy * fineNx + xx]) {
+                solidFlag = true;
+                break;
+            }
+        }
+        if (solidFlag) break;
+    }
+    coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(solidFlag ? 1 : 0);
 }
 
 __global__ void prolongateCorrectionKernel(
