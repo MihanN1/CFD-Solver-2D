@@ -328,10 +328,8 @@ void Multigrid::restrictResidual(int fineLevel){
     #pragma omp parallel for schedule(static)
     for (int j = 1; j < coarseNy - 1; ++j){
         const int fj = std::min(j * 2, fineNy - 1);
-        const int fj0 = std::max(fj - 1, 0);
         for (int i = 1; i < coarseNx - 1; ++i){
             const int fi = std::min(i * 2, fineNx - 1);
-            const int fi0 = std::max(fi - 1, 0);
 
             const int x = std::min(i * 2, fineNx - 2);
             const int y = std::min(j * 2, fineNy - 2);
@@ -363,13 +361,16 @@ void Multigrid::restrictResidual(int fineLevel){
             add(x    , y + 1, 2.0f);
             add(x + 1, y + 1, 1.0f);
             coarseRhs[j * coarseNx + i] = weightSum > 0.0f ? sum / weightSum : 0.0f;
+            int x0 = i * 2;
+            int x1 = std::min(i * 2 + 1, fineNx - 1);
+            int y0 = j * 2;
+            int y1 = std::min(j * 2 + 1, fineNy - 1);
 
-            coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(
-                fineSolid[fj * fineNx + fi] &&
-                fineSolid[fj * fineNx + fi0] &&
-                fineSolid[fj0 * fineNx + fi] &&
-                fineSolid[fj0 * fineNx + fi0]
-            );
+            coarseSolid[j * coarseNx + i] =
+                fineSolid[y0 * fineNx + x0] &&
+                fineSolid[y0 * fineNx + x1] &&
+                fineSolid[y1 * fineNx + x0] &&
+                fineSolid[y1 * fineNx + x1];
         }
     }
 }
@@ -656,15 +657,22 @@ void Multigrid::restrictRHS(int fineLevel){
             add(fi+1,fj+1,1);
 
             coarseRhs[j*coarseNx+i]=(wsum>0)?sum/wsum:0;
-            int fj0 = std::max(fj - 1, 0);
-            int fi0 = std::max(fi - 1, 0);
+            int x0 = i * 2;
+            int x1 = std::min(i * 2 + 1, fineNx - 1);
+            int y0 = j * 2;
+            int y1 = std::min(j * 2 + 1, fineNy - 1);
 
-            coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(
-                fineSolid[fj * fineNx + fi] &&
-                fineSolid[fj * fineNx + fi0] &&
-                fineSolid[fj0 * fineNx + fi] &&
-                fineSolid[fj0 * fineNx + fi0]
-            );
+            bool solidFlag = false;
+            for (int yy = y0; yy <= y1; ++yy) {
+                for (int xx = x0; xx <= x1; ++xx) {
+                    if (fineSolid[yy * fineNx + xx]) {
+                        solidFlag = true;
+                        break;
+                    }
+                }
+                if (solidFlag) break;
+            }
+            coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(solidFlag ? 1 : 0);
         }
     }
 }

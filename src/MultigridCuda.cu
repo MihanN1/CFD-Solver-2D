@@ -575,8 +575,6 @@ __global__ void restrictResidualKernel(
 
     const int fi = min(i * 2, fineNx - 1);
     const int fj = min(j * 2, fineNy - 1);
-    const int fi0 = max(fi - 1, 0);
-    const int fj0 = max(fj - 1, 0);
     const int x = min(i * 2, fineNx - 2);
     const int y = min(j * 2, fineNy - 2);
 
@@ -681,12 +679,22 @@ __global__ void restrictResidualKernel(
         (weightSum > 0.0f) ? (sum / weightSum) : 0.0f;
 
     coarsePressure[coarseId] = 0.0f;
-    coarseSolid[coarseId] =
-        static_cast<uint8_t>(
-            fineSolid[fj * fineNx + fi] &&
-            fineSolid[fj * fineNx + fi0] &&
-            fineSolid[fj0 * fineNx + fi] &&
-            fineSolid[fj0 * fineNx + fi0]);
+    int x0 = i * 2;
+    int x1 = min(i * 2 + 1, fineNx - 1);
+    int y0 = j * 2;
+    int y1 = min(j * 2 + 1, fineNy - 1);
+
+    bool solidFlag = false;
+    for (int yy = y0; yy <= y1; ++yy) {
+        for (int xx = x0; xx <= x1; ++xx) {
+            if (fineSolid[yy * fineNx + xx]) {
+                solidFlag = true;
+                break;
+            }
+        }
+        if (solidFlag) break;
+    }
+    coarseSolid[j * coarseNx + i] = solidFlag ? 1 : 0;
 }
 
 __global__ void restrictRHSKernel(
@@ -812,15 +820,16 @@ __global__ void restrictRHSKernel(
     coarseRhs[j * coarseNx + i] =
         (wsum > 0.0f) ? sum / wsum : 0.0f;
 
-    const int fj0 = max(fj - 1, 0);
-    const int fi0 = max(fi - 1, 0);
+    int x0 = i * 2;
+    int x1 = min(i * 2 + 1, fineNx - 1);
+    int y0 = j * 2;
+    int y1 = min(j * 2 + 1, fineNy - 1);
 
     coarseSolid[j * coarseNx + i] =
-        static_cast<uint8_t>(
-            fineSolid[fj * fineNx + fi] &&
-            fineSolid[fj * fineNx + fi0] &&
-            fineSolid[fj0 * fineNx + fi] &&
-            fineSolid[fj0 * fineNx + fi0]);
+        fineSolid[y0 * fineNx + x0] &&
+        fineSolid[y0 * fineNx + x1] &&
+        fineSolid[y1 * fineNx + x0] &&
+        fineSolid[y1 * fineNx + x1];
 }
 
 __global__ void prolongateCorrectionKernel(
