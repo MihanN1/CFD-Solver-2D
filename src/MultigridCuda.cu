@@ -694,7 +694,7 @@ __global__ void restrictResidualKernel(
         }
         if (solidFlag) break;
     }
-    coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(solidFlag ? 1 : 0);
+    coarseSolid[j * coarseNx + i] = solidFlag ? 1 : 0;
 }
 
 __global__ void restrictRHSKernel(
@@ -835,7 +835,7 @@ __global__ void restrictRHSKernel(
         }
         if (solidFlag) break;
     }
-    coarseSolid[j * coarseNx + i] = static_cast<uint8_t>(solidFlag ? 1 : 0);
+    coarseSolid[j * coarseNx + i] = solidFlag ? 1 : 0;
 }
 
 __global__ void prolongateCorrectionKernel(
