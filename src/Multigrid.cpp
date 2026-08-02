@@ -197,7 +197,8 @@ void Multigrid::computeResidual(int level){
         for (; i <= nx - 9; i += 8){
             bool skip = false;
             for (int k = 0; k < 8; ++k){
-                if (solid[row + i + k])
+                const int id = row + i + k;
+                if (solid[id] || solid[id - 1] || solid[id + 1] || solid[id - nx] || solid[id + nx])
                 {
                     skip = true;
                     break;
