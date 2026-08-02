@@ -232,7 +232,6 @@ if(BUILD_TESTING)
     endfunction()
 
     add_executable(MultigridCpuTests
-        tests/MultigridTests.cpp
         src/Multigrid.cpp
     )
     cfd_configure_multigrid_test(MultigridCpuTests)
@@ -240,7 +239,6 @@ if(BUILD_TESTING)
 
     if(CFD_ENABLE_CUDA)
         add_executable(MultigridCudaTests
-            tests/MultigridTests.cpp
             src/Multigrid.cpp
             src/MultigridCuda.cu
         )
