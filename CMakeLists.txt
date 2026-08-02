@@ -11,13 +11,13 @@ include(CheckLanguage)
 
 option(CFD_ENABLE_OPENMP "Enable OpenMP parallel loops when available" ON)
 option(CFD_ENABLE_AVX2 "Compile CPU C++ sources with AVX2 support" ON)
+option(CFD_ENABLE_CUDA "Enable the CUDA multigrid backend" ON)
 
-if(WIN32)
-    set(CFD_ENABLE_SFML_DEFAULT ON)
-else()
-    set(CFD_ENABLE_SFML_DEFAULT OFF)
-endif()
-option(CFD_ENABLE_SFML "Build and link the bundled SFML visualization dependency" ${CFD_ENABLE_SFML_DEFAULT})
+set(
+    CFD_RUNTIME_OUTPUT_DIRECTORY
+    "${CMAKE_BINARY_DIR}/bin"
+    CACHE PATH "Root directory for the generated cfd_app executable"
+)
 
 set(CFD_CUDA_ARCHITECTURES "75" CACHE STRING
     "CUDA architectures. 75 targets the NVIDIA GTX 1660 Ti/Turing GPU."
@@ -28,54 +28,54 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-# CUDA is required. Enabling it after project() allows a clear diagnostic when
-# the toolkit or Visual Studio CUDA integration is missing.
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-    set(CMAKE_CUDA_ARCHITECTURES "${CFD_CUDA_ARCHITECTURES}" CACHE STRING
-        "CUDA architectures used by all CUDA targets."
-    )
-endif()
+if(CFD_ENABLE_CUDA)
+    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+        set(CMAKE_CUDA_ARCHITECTURES "${CFD_CUDA_ARCHITECTURES}" CACHE STRING
+            "CUDA architectures used by all CUDA targets."
+        )
+    endif()
 
-check_language(CUDA)
-if(NOT CMAKE_CUDA_COMPILER)
-    message(FATAL_ERROR
-        "CUDA compiler detection failed. This project requires CUDA.\n"
-        "For Visual Studio 2026, install CUDA Toolkit 13.2 or newer and select "
-        "the Visual Studio Integration component.\n"
-        "Then delete the build directory and configure again.\n"
-        "CUDA_PATH='$ENV{CUDA_PATH}'"
-    )
-endif()
+    check_language(CUDA)
+    if(NOT CMAKE_CUDA_COMPILER)
+        message(FATAL_ERROR
+            "CUDA compiler detection failed while CFD_ENABLE_CUDA=ON.\n"
+            "For Visual Studio 2026, install CUDA Toolkit 13.2 or newer and select "
+            "the Visual Studio Integration component.\n"
+            "Then use a fresh build directory, or configure "
+            "-DCFD_ENABLE_CUDA=OFF for the CPU backend.\n"
+            "CUDA_PATH='$ENV{CUDA_PATH}'"
+        )
+    endif()
 
-enable_language(CUDA)
-find_package(CUDAToolkit 13.2 REQUIRED)
+    enable_language(CUDA)
+    find_package(CUDAToolkit 13.2 REQUIRED)
 
-set(CMAKE_CUDA_STANDARD 17)
-set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-set(CMAKE_CUDA_EXTENSIONS OFF)
+    set(CMAKE_CUDA_STANDARD 17)
+    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
+    set(CMAKE_CUDA_EXTENSIONS OFF)
 
-if(MSVC AND MSVC_VERSION GREATER_EQUAL 1950 AND CUDAToolkit_VERSION VERSION_LESS 13.2)
-    message(FATAL_ERROR
-        "Visual Studio 2026 requires CUDA Toolkit 13.2 or newer. "
-        "Detected CUDA ${CUDAToolkit_VERSION}."
-    )
+    if(MSVC AND MSVC_VERSION GREATER_EQUAL 1950 AND CUDAToolkit_VERSION VERSION_LESS 13.2)
+        message(FATAL_ERROR
+            "Visual Studio 2026 requires CUDA Toolkit 13.2 or newer. "
+            "Detected CUDA ${CUDAToolkit_VERSION}."
+        )
+    endif()
 endif()
 
 set(CFD_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
 set(CFD_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
 set(CFD_MODELS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models")
-set(CFD_SFML_DIR "${CFD_LIB_DIR}/sfml")
 set(CFD_STL_READER_DIR "${CFD_LIB_DIR}/stl_reader")
 set(CFD_TINYOBJ_HEADER "${CFD_INCLUDE_DIR}/tiny_obj_loader.h")
 
 # Keep generated files outside the source tree.
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/bin")
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CFD_RUNTIME_OUTPUT_DIRECTORY}")
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
 
 foreach(config Debug Release RelWithDebInfo MinSizeRel)
     string(TOUPPER "${config}" config_upper)
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/bin/${config}")
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${config_upper} "${CFD_RUNTIME_OUTPUT_DIRECTORY}/${config}")
     set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/lib/${config}")
     set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/lib/${config}")
 endforeach()
@@ -105,34 +105,6 @@ else()
     add_library(cfd_stl_reader ALIAS stl_reader)
 endif()
 
-# Build only the SFML modules used by the project. Prefer the included source copy.
-if(CFD_ENABLE_SFML)
-    set(BUILD_SHARED_LIBS OFF CACHE BOOL "Build static dependencies" FORCE)
-    set(SFML_BUILD_AUDIO OFF CACHE BOOL "" FORCE)
-    set(SFML_BUILD_NETWORK OFF CACHE BOOL "" FORCE)
-    set(SFML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-    set(SFML_BUILD_DOC OFF CACHE BOOL "" FORCE)
-    set(SFML_BUILD_TEST_SUITE OFF CACHE BOOL "" FORCE)
-    set(SFML_CONFIGURE_EXTRAS OFF CACHE BOOL "" FORCE)
-    set(SFML_INSTALL_PKGCONFIG_FILES OFF CACHE BOOL "" FORCE)
-    set(SFML_USE_SYSTEM_DEPS OFF CACHE BOOL "" FORCE)
-
-    if(EXISTS "${CFD_SFML_DIR}/CMakeLists.txt")
-        add_subdirectory(
-            "${CFD_SFML_DIR}"
-            "${CMAKE_BINARY_DIR}/_deps/sfml-build"
-            EXCLUDE_FROM_ALL
-        )
-    else()
-        FetchContent_Declare(
-            SFML
-            URL https://github.com/SFML/SFML/archive/refs/tags/3.1.0.zip
-            DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-        )
-        FetchContent_MakeAvailable(SFML)
-    endif()
-endif()
-
 set(CFD_SOURCES
     src/main.cpp
     src/tiny_obj_loader_impl.cpp
@@ -140,20 +112,36 @@ set(CFD_SOURCES
     src/Mesh.cpp
     src/Solver.cpp
     src/Multigrid.cpp
-    src/MultigridCuda.cu
 )
 
+if(CFD_ENABLE_CUDA)
+    list(APPEND CFD_SOURCES src/MultigridCuda.cu)
+endif()
+
 add_executable(cfd_app ${CFD_SOURCES})
+
+add_custom_command(
+    TARGET cfd_app
+    POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E echo
+        "Built executable: $<TARGET_FILE:cfd_app>"
+    VERBATIM
+)
 
 set_target_properties(cfd_app PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
-    CUDA_STANDARD 17
-    CUDA_STANDARD_REQUIRED ON
-    CUDA_EXTENSIONS OFF
-    CUDA_ARCHITECTURES "${CFD_CUDA_ARCHITECTURES}"
 )
+
+if(CFD_ENABLE_CUDA)
+    set_target_properties(cfd_app PROPERTIES
+        CUDA_STANDARD 17
+        CUDA_STANDARD_REQUIRED ON
+        CUDA_EXTENSIONS OFF
+        CUDA_ARCHITECTURES "${CFD_CUDA_ARCHITECTURES}"
+    )
+endif()
 
 target_include_directories(cfd_app PRIVATE "${CFD_INCLUDE_DIR}")
 
@@ -161,24 +149,21 @@ target_link_libraries(cfd_app
     PRIVATE
         cfd_tinyobj
         cfd_stl_reader
-        CUDA::cudart
 )
 
-if(CFD_ENABLE_SFML)
-    target_link_libraries(cfd_app
-        PRIVATE
-            SFML::Graphics
-            SFML::Window
-            SFML::System
-    )
+if(CFD_ENABLE_CUDA)
+    target_link_libraries(cfd_app PRIVATE CUDA::cudart)
 endif()
 
 target_compile_definitions(cfd_app
     PRIVATE
-        USE_CUDA=1
         CFD_MODELS_DIR="${CFD_MODELS_DIR}"
         NOMINMAX
 )
+
+if(CFD_ENABLE_CUDA)
+    target_compile_definitions(cfd_app PRIVATE USE_CUDA=1)
+endif()
 
 # CUDA 13.x CCCL requires MSVC's standards-conforming preprocessor.
 # For .cu files, nvcc must forward the option to its MSVC host compiler.
@@ -186,8 +171,13 @@ if(MSVC)
     target_compile_options(cfd_app
         PRIVATE
             $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
-            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
     )
+    if(CFD_ENABLE_CUDA)
+        target_compile_options(cfd_app
+            PRIVATE
+                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+        )
+    endif()
 endif()
 
 if(CFD_ENABLE_OPENMP)
@@ -207,6 +197,66 @@ if(CFD_ENABLE_AVX2)
         target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
     else()
         message(WARNING "AVX2 flags are not configured for ${CMAKE_CXX_COMPILER_ID}")
+    endif()
+endif()
+
+include(CTest)
+
+if(BUILD_TESTING)
+    function(cfd_configure_multigrid_test target)
+        target_include_directories(${target} PRIVATE "${CFD_INCLUDE_DIR}")
+        target_compile_features(${target} PRIVATE cxx_std_17)
+        target_compile_definitions(${target} PRIVATE NOMINMAX)
+
+        if(OpenMP_CXX_FOUND)
+            target_link_libraries(${target} PRIVATE OpenMP::OpenMP_CXX)
+        endif()
+
+        if(CFD_ENABLE_AVX2)
+            if(MSVC)
+                target_compile_options(${target} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>
+                )
+            elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+                target_compile_options(${target} PRIVATE
+                    $<$<COMPILE_LANGUAGE:CXX>:-mavx2>
+                )
+            endif()
+        endif()
+
+        if(MSVC)
+            target_compile_options(${target} PRIVATE
+                $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
+            )
+        endif()
+    endfunction()
+
+    add_executable(MultigridCpuTests
+        tests/MultigridTests.cpp
+        src/Multigrid.cpp
+    )
+    cfd_configure_multigrid_test(MultigridCpuTests)
+    add_test(NAME MultigridCpuTests COMMAND MultigridCpuTests)
+
+    if(CFD_ENABLE_CUDA)
+        add_executable(MultigridCudaTests
+            tests/MultigridTests.cpp
+            src/Multigrid.cpp
+            src/MultigridCuda.cu
+        )
+        cfd_configure_multigrid_test(MultigridCudaTests)
+        target_compile_definitions(MultigridCudaTests PRIVATE USE_CUDA=1)
+        target_link_libraries(MultigridCudaTests PRIVATE CUDA::cudart)
+        target_compile_options(MultigridCudaTests PRIVATE
+            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
+        )
+        set_target_properties(MultigridCudaTests PROPERTIES
+            CUDA_STANDARD 17
+            CUDA_STANDARD_REQUIRED ON
+            CUDA_EXTENSIONS OFF
+            CUDA_ARCHITECTURES "${CFD_CUDA_ARCHITECTURES}"
+        )
+        add_test(NAME MultigridCudaTests COMMAND MultigridCudaTests)
     endif()
 endif()
 
@@ -233,10 +283,11 @@ install(
 )
 
 message(STATUS "CFD Solver configuration")
-message(STATUS "  CUDA:         required")
-message(STATUS "  CUDA toolkit: ${CUDAToolkit_VERSION}")
-message(STATUS "  CUDA arch:    ${CFD_CUDA_ARCHITECTURES}")
-message(STATUS "  SFML:         ${CFD_ENABLE_SFML}")
+message(STATUS "  CUDA:         ${CFD_ENABLE_CUDA}")
+if(CFD_ENABLE_CUDA)
+    message(STATUS "  CUDA toolkit: ${CUDAToolkit_VERSION}")
+    message(STATUS "  CUDA arch:    ${CFD_CUDA_ARCHITECTURES}")
+endif()
 message(STATUS "  OpenMP:       ${CFD_ENABLE_OPENMP}")
 message(STATUS "  AVX2:         ${CFD_ENABLE_AVX2}")
 message(STATUS "  Build dir:    ${CMAKE_BINARY_DIR}")
