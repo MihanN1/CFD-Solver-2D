@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <immintrin.h>
+#include <iomanip>
+#include <iostream>
 #ifdef USE_CUDA
 #include "MultigridCuda.cuh"
 #endif
@@ -307,83 +309,48 @@ float Multigrid::computeResidualNorm() const{
         sum += ptr[i] * ptr[i];
     return std::sqrt(sum);
 }
-void Multigrid::restrictResidual(int fineLevel){
-    if (fineLevel + 1 >= levels)
-        return;
-    const int coarseLevel = fineLevel + 1;
-
-    const int fineNx = levelNx[fineLevel];
-    const int fineNy = levelNy[fineLevel];
-
-    const int coarseNx = levelNx[coarseLevel];
-    const int coarseNy = levelNy[coarseLevel];
-
+void Multigrid::restrictResidual(int fineLevel) {
+    if (fineLevel + 1 >= levels) return;
+    int coarseLevel = fineLevel + 1;
     auto& fineResidual = residualLevels[fineLevel];
     const auto& fineSolid = solidLevels[fineLevel];
-
     auto& coarseRhs = rhsLevels[coarseLevel];
     auto& coarsePressure = pressureLevels[coarseLevel];
     auto& coarseSolid = solidLevels[coarseLevel];
 
+    int fineNx = levelNx[fineLevel], fineNy = levelNy[fineLevel];
+    int coarseNx = levelNx[coarseLevel], coarseNy = levelNy[coarseLevel];
+
     std::fill(coarsePressure.begin(), coarsePressure.end(), 0.0f);
+
     #pragma omp parallel for schedule(static)
-    for (int j = 1; j < coarseNy - 1; ++j){
-        for (int i = 1; i < coarseNx - 1; ++i){
+    for (int j = 0; j < coarseNy; ++j) {
+        for (int i = 0; i < coarseNx; ++i) {
+            int i0 = i * 2;
+            int i1 = std::min(i0 + 1, fineNx - 1);
+            int j0 = j * 2;
+            int j1 = std::min(j0 + 1, fineNy - 1);
 
-            const int x = std::min(i * 2, fineNx - 2);
-            const int y = std::min(j * 2, fineNy - 2);
             float sum = 0.0f;
-            float weightSum = 0.0f;
-
-            auto add = [&](int xx, int yy, float w)
-            {
-                if (xx < 0 || xx >= fineNx || yy < 0 || yy >= fineNy)
-                    return;
-
-                int id = yy * fineNx + xx;
-
-                if (!fineSolid[id])
-                {
-                    sum += w * fineResidual[id];
-                    weightSum += w;
-                }
-            };
-            add(x - 1, y - 1, 1.0f);
-            add(x    , y - 1, 2.0f);
-            add(x + 1, y - 1, 1.0f);
-
-            add(x - 1, y    , 2.0f);
-            add(x    , y    , 4.0f);
-            add(x + 1, y    , 2.0f);
-
-            add(x - 1, y + 1, 1.0f);
-            add(x    , y + 1, 2.0f);
-            add(x + 1, y + 1, 1.0f);
-            coarseRhs[j * coarseNx + i] = (weightSum > 0.0f) ? sum / weightSum : 0.0f;
-            const int fx = i * 2;
-            const int fy = j * 2;
-
+            float wsum = 0.0f;
             bool solidFlag = false;
 
-            for (int dy = 0; dy < 2; ++dy)
-            {
-                for (int dx = 0; dx < 2; ++dx)
-                {
-                    int xx = std::min(fx + dx, fineNx - 1);
-                    int yy = std::min(fy + dy, fineNy - 1);
-
-                    if (fineSolid[yy * fineNx + xx])
-                    {
+            for (int jj = j0; jj <= j1; ++jj) {
+                for (int ii = i0; ii <= i1; ++ii) {
+                    int id = jj * fineNx + ii;
+                    if (!fineSolid[id]) {
+                        sum += fineResidual[id];
+                        wsum += 1.0f;
+                    } else {
                         solidFlag = true;
-                        break;
                     }
                 }
-
-                if (solidFlag)
-                    break;
             }
 
-            coarseSolid[j * coarseNx + i] = solidFlag;
+            int coarseId = j * coarseNx + i;
+            coarseRhs[coarseId] = (wsum > 0.0f) ? (sum / wsum) : 0.0f;
+            coarseSolid[coarseId] = solidFlag ? 1 : 0;
+            if (coarseSolid[coarseId]) coarseRhs[coarseId] = 0.0f;
         }
     }
 }
@@ -558,6 +525,8 @@ void Multigrid::vCycle(
             solidLevels[level],
             omega,
             coarseSmooth);
+        zeroSolidPressure(level);
+        applyBC(level);
 
         return;
     }
@@ -570,6 +539,8 @@ void Multigrid::vCycle(
         solidLevels[level],
         omega,
         preSmooth);
+    zeroSolidPressure(level);
+    applyBC(level);
 
     // Residual
     computeResidual(level);
@@ -588,7 +559,7 @@ void Multigrid::vCycle(
 
     // Prolongation
     prolongateCorrection(level + 1);
-
+    zeroSolidPressure(level);
     // Post-smoothing
     smoothSOR(
         level,
@@ -597,84 +568,47 @@ void Multigrid::vCycle(
         solidLevels[level],
         omega,
         postSmooth);
+    zeroSolidPressure(level);
+    applyBC(level);
 }
-void Multigrid::restrictRHS(int fineLevel){
-    if (fineLevel + 1 >= levels)
-        return;
-
+void Multigrid::restrictRHS(int fineLevel) {
+    if (fineLevel + 1 >= levels) return;
     int coarseLevel = fineLevel + 1;
-
     auto& fineRhs = rhsLevels[fineLevel];
     auto& coarseRhs = rhsLevels[coarseLevel];
-
-    int fineNx = levelNx[fineLevel];
-    int fineNy = levelNy[fineLevel];
-
-    int coarseNx = levelNx[coarseLevel];
-    int coarseNy = levelNy[coarseLevel];
-
+    int fineNx = levelNx[fineLevel], fineNy = levelNy[fineLevel];
+    int coarseNx = levelNx[coarseLevel], coarseNy = levelNy[coarseLevel];
     auto& fineSolid = solidLevels[fineLevel];
     auto& coarseSolid = solidLevels[coarseLevel];
 
     #pragma omp parallel for schedule(static)
-    for (int j = 1; j < coarseNy - 1; j++)
-    {
-        for (int i = 1; i < coarseNx - 1; i++)
-        {
-            int x = std::min(i * 2, fineNx - 2);
-            int y = std::min(j * 2, fineNy - 2);
+    for (int j = 0; j < coarseNy; ++j) {
+        for (int i = 0; i < coarseNx; ++i) {
+            int i0 = i * 2;
+            int i1 = std::min(i0 + 1, fineNx - 1);
+            int j0 = j * 2;
+            int j1 = std::min(j0 + 1, fineNy - 1);
+
             float sum = 0.0f;
             float wsum = 0.0f;
-            auto add = [&](int x,int y,float w)
-            {
-                if(x<0||x>=fineNx||y<0||y>=fineNy)
-                    return;
-
-                int id=y*fineNx+x;
-
-                if(!fineSolid[id])
-                {
-                    sum+=w*fineRhs[id];
-                    wsum+=w;
-                }
-            };
-            add(x-1,y-1,1);
-            add(x  ,y-1,2);
-            add(x+1,y-1,1);
-
-            add(x-1,y  ,2);
-            add(x  ,y  ,4);
-            add(x+1,y  ,2);
-
-            add(x-1,y+1,1);
-            add(x  ,y+1,2);
-            add(x+1,y+1,1);
-
-            coarseRhs[j*coarseNx+i]=(wsum>0)?sum/wsum:0.0f;
-            const int fx = i * 2;
-            const int fy = j * 2;
-
             bool solidFlag = false;
 
-            for (int dy = 0; dy < 2; ++dy)
-            {
-                for (int dx = 0; dx < 2; ++dx)
-                {
-                    int xx = std::min(fx + dx, fineNx - 1);
-                    int yy = std::min(fy + dy, fineNy - 1);
-
-                    if (fineSolid[yy * fineNx + xx])
-                    {
+            for (int jj = j0; jj <= j1; ++jj) {
+                for (int ii = i0; ii <= i1; ++ii) {
+                    int id = jj * fineNx + ii;
+                    if (!fineSolid[id]) {
+                        sum += fineRhs[id];
+                        wsum += 1.0f;
+                    } else {
                         solidFlag = true;
-                        break;
                     }
                 }
-
-                if (solidFlag)
-                    break;
             }
 
-            coarseSolid[j * coarseNx + i] = solidFlag;
+            int coarseId = j * coarseNx + i;
+            coarseRhs[coarseId] = (wsum > 0.0f) ? (sum / wsum) : 0.0f;
+            coarseSolid[coarseId] = solidFlag ? 1 : 0;
+            if (coarseSolid[coarseId]) coarseRhs[coarseId] = 0.0f;
         }
     }
 }
@@ -683,7 +617,6 @@ void Multigrid::fullMultigrid(float omega){
 
     for (int level = 0; level < coarsest; ++level)
         restrictRHS(level);
-
     std::fill(
         pressureLevels[coarsest].begin(),
         pressureLevels[coarsest].end(),
@@ -696,11 +629,47 @@ void Multigrid::fullMultigrid(float omega){
         solidLevels[coarsest],
         omega,
         50);
+    zeroSolidPressure(coarsest);
+    applyBC(coarsest);
 
     for (int level = coarsest; level > 0; --level)
     {
         prolongateSolution(level);
 
         vCycle(level - 1, omega);
+    }
+}
+void Multigrid::applyBC(int level) {
+    const int nx = levelNx[level];
+    const int ny = levelNy[level];
+    auto& p = pressureLevels[level];
+    const auto& solid = solidLevels[level];
+
+    // Left: dp/dx = 0
+    for (int j = 0; j < ny; ++j) {
+        int id = j * nx;
+        if (!solid[id]) p[id] = p[id + 1];
+    }
+    // Right: p = 0
+    for (int j = 0; j < ny; ++j) {
+        int id = j * nx + (nx - 1);
+        if (!solid[id]) p[id] = 0.0f;
+    }
+    // Bottom: dp/dy = 0
+    for (int i = 0; i < nx; ++i) {
+        int id = i;
+        if (!solid[id]) p[id] = p[id + nx];
+    }
+    // Top: dp/dy = 0
+    for (int i = 0; i < nx; ++i) {
+        int id = (ny - 1) * nx + i;
+        if (!solid[id]) p[id] = p[id - nx];
+    }
+}
+void Multigrid::zeroSolidPressure(int level) {
+    auto& p = pressureLevels[level];
+    const auto& solid = solidLevels[level];
+    for (size_t i = 0; i < p.size(); ++i) {
+        if (solid[i]) p[i] = 0.0f;
     }
 }

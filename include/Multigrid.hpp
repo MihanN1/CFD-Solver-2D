@@ -61,6 +61,8 @@ private:
 
     void prolongateCorrection(int coarseLevel);
     void prolongateSolution(int coarseLevel);
+    void applyBC(int level);
+    void zeroSolidPressure(int level);
     #ifdef USE_CUDA
     public:
         void solveCuda(
@@ -95,5 +97,9 @@ private:
         void fullMultigridCuda(float omega);
 
         size_t sizeBytes(int level) const;
+
+        void applyBCCuda(int level);
+        
+        void zeroSolidPressureCuda(int level);
     #endif
 };

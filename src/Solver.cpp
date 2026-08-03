@@ -102,8 +102,6 @@ void Solver::computeDt(){
             maxUVec = _mm256_max_ps(maxUVec, uVec);
             maxVVec = _mm256_max_ps(maxVVec, vVec);
         }
-
-        // хвост обязателен
         for (; i < nx; ++i)
         {
             maxU = std::max(maxU, std::fabs(u[rowU + i]));
@@ -113,7 +111,6 @@ void Solver::computeDt(){
         maxU = std::max(maxU, std::fabs(u[rowU + nx]));
     }
 
-    // горизонтальная редукция ОДИН раз
     alignas(32) float tmpU[8], tmpV[8];
     _mm256_store_ps(tmpU, maxUVec);
     _mm256_store_ps(tmpV, maxVVec);
@@ -550,6 +547,9 @@ void Solver::predictor() {
     for (int j = 0; j < ny; ++j) {
         uStar[idxU(nx, j)] = uStar[idxU(nx-1, j)];
     }
+    for (int j = 0; j <= ny; ++j) {
+        vStar[idxV(nx-1, j)] = 0.0f;
+    }
     // Top/Bottom: slip or free-slip (we use zero gradient for u, v=0)
     for (int i = 0; i <= nx; ++i) {
         uStar[idxU(i, 0)] = uStar[idxU(i, 1)];
@@ -638,6 +638,26 @@ void Solver::solvePoisson() {
         solidMask,
         omega,
         2);
+    for (int j = 0; j < ny; ++j) {
+        if (!mesh.solid[idxP(0, j)]) {
+            p[idxP(0, j)] = p[idxP(1, j)];
+        }
+    }
+    for (int j = 0; j < ny; ++j) {
+        if (!mesh.solid[idxP(nx-1, j)]) {
+            p[idxP(nx-1, j)] = 0.0f;
+        }
+    }
+    for (int i = 0; i < nx; ++i) {
+        if (!mesh.solid[idxP(i, 0)]) {
+            p[idxP(i, 0)] = p[idxP(i, 1)];
+        }
+    }
+    for (int i = 0; i < nx; ++i) {
+        if (!mesh.solid[idxP(i, ny-1)]) {
+            p[idxP(i, ny-1)] = p[idxP(i, ny-2)];
+        }
+    }
 }
 
 void Solver::corrector() {
@@ -807,6 +827,10 @@ void Solver::applyBC() {
     // Outlet: zero gradient
     for (int j = 0; j < ny; ++j) {
         u[idxU(nx, j)] = u[idxU(nx-1, j)];
+    }
+    for (int j = 0; j <= ny; ++j){
+        v[idxV(0, j)] = 0.0f;
+        v[idxV(nx-1, j)] = 0.0f;
     }
     // Top/Bottom: free slip (u gradient zero, v=0)
     for (int i = 0; i <= nx; ++i) {

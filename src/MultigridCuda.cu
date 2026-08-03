@@ -1,4 +1,6 @@
 #include "Multigrid.hpp"
+#include <iomanip>
+#include <iostream>
 #ifdef USE_CUDA
 #include "MultigridCuda.cuh"
 #include <algorithm>
@@ -361,7 +363,8 @@ void Multigrid::vCycleCuda(
             level,
             omega,
             coarseSmooth);
-
+        zeroSolidPressureCuda(level);
+        applyBCCuda(level);
         return;
     }
 
@@ -369,7 +372,8 @@ void Multigrid::vCycleCuda(
         level,
         omega,
         preSmooth);
-
+    zeroSolidPressureCuda(level);
+    applyBCCuda(level);
     computeResidualCuda(level);
 
     restrictResidualCuda(level);
@@ -382,11 +386,14 @@ void Multigrid::vCycleCuda(
     vCycleCuda(level + 1, omega);
 
     prolongateCorrectionCuda(level + 1);
+    zeroSolidPressureCuda(level);
 
     smoothSORCuda(
         level,
         omega,
         postSmooth);
+    zeroSolidPressureCuda(level);
+    applyBCCuda(level);
 }
 
 void Multigrid::fullMultigridCuda(float omega){
@@ -394,7 +401,6 @@ void Multigrid::fullMultigridCuda(float omega){
 
     for(int level=0; level<coarsest; ++level)
         restrictRHSCuda(level);
-
     cudaMemset(
         dPressureLevels[coarsest],
         0,
@@ -404,6 +410,8 @@ void Multigrid::fullMultigridCuda(float omega){
         coarsest,
         omega,
         50);
+    zeroSolidPressureCuda(coarsest);
+    applyBCCuda(coarsest);
 
     for(int level=coarsest; level>0; --level){
         prolongateSolutionCuda(level);
@@ -459,6 +467,27 @@ inline size_t Multigrid::sizeBytes(int level) const{
     return static_cast<size_t>(levelNx[level]) *
            levelNy[level] *
            sizeof(float);
+}
+
+void Multigrid::applyBCCuda(int level) {
+    int nx = levelNx[level];
+    int ny = levelNy[level];
+    int maxDim = std::max(nx, ny);
+    int blockSize = 256;
+    int gridSize = (maxDim + blockSize - 1) / blockSize;
+    applyBCKernel<<<gridSize, blockSize>>>(
+        nx, ny, 
+        dPressureLevels[level], 
+        dSolidLevels[level]
+    );
+}
+
+void Multigrid::zeroSolidPressureCuda(int level) {
+    int nx = levelNx[level], ny = levelNy[level];
+    int total = nx * ny;
+    int blockSize = 256;
+    int gridSize = (total + blockSize - 1) / blockSize;
+    zeroSolidPressureKernel<<<gridSize, blockSize>>>(nx, ny, dPressureLevels[level], dSolidLevels[level]);
 }
 
 __global__ void smoothSORKernel(
@@ -564,141 +593,40 @@ __global__ void restrictResidualKernel(
     float* coarsePressure,
     uint8_t* coarseSolid)
 {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (i <= 0 || i >= coarseNx - 1)
+    if (i >= coarseNx || j >= coarseNy)
         return;
 
-    if (j <= 0 || j >= coarseNy - 1)
-        return;
-
-    const int x = min(i * 2, fineNx - 2);
-    const int y = min(j * 2, fineNy - 2);
+    int i0 = i * 2;
+    int i1 = min(i0 + 1, fineNx - 1);
+    int j0 = j * 2;
+    int j1 = min(j0 + 1, fineNy - 1);
 
     float sum = 0.0f;
     float weightSum = 0.0f;
-
-    int xx, yy, id;
-
-    // (-1,-1)
-    xx = x - 1;
-    yy = y - 1;
-    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if (!fineSolid[id]){
-            sum += fineResidual[id];
-            weightSum += 1.0f;
-        }
-    }
-    // (0,-1)
-    xx = x;
-    yy = y - 1;
-    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if (!fineSolid[id]){
-            sum += 2.0f * fineResidual[id];
-            weightSum += 2.0f;
-        }
-    }
-    // (+1,-1)
-    xx = x + 1;
-    yy = y - 1;
-    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if (!fineSolid[id]){
-            sum += fineResidual[id];
-            weightSum += 1.0f;
-        }
-    }
-    // (-1,0)
-    xx = x - 1;
-    yy = y;
-    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if (!fineSolid[id]){
-            sum += 2.0f * fineResidual[id];
-            weightSum += 2.0f;
-        }
-    }
-    // (0,0)
-    xx = x;
-    yy = y;
-    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if (!fineSolid[id]){
-            sum += 4.0f * fineResidual[id];
-            weightSum += 4.0f;
-        }
-    }
-    // (+1,0)
-    xx = x + 1;
-    yy = y;
-    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if (!fineSolid[id]){
-            sum += 2.0f * fineResidual[id];
-            weightSum += 2.0f;
-        }
-    }
-    // (-1,+1)
-    xx = x - 1;
-    yy = y + 1;
-    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if (!fineSolid[id]){
-            sum += fineResidual[id];
-            weightSum += 1.0f;
-        }
-    }
-    // (0,+1)
-    xx = x;
-    yy = y + 1;
-    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if (!fineSolid[id]){
-            sum += 2.0f * fineResidual[id];
-            weightSum += 2.0f;
-        }
-    }
-    // (+1,+1)
-    xx = x + 1;
-    yy = y + 1;
-    if (xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if (!fineSolid[id]){
-            sum += fineResidual[id];
-            weightSum += 1.0f;
-        }
-    }
-    coarseRhs[j * coarseNx + i] =
-        (weightSum > 0.0f) ? (sum / weightSum) : 0.0f;
-
-    coarsePressure[j * coarseNx + i] = 0.0f;
-    const int fx = i * 2;
-    const int fy = j * 2;
-
     bool solidFlag = false;
 
-    for(int dy=0; dy<2; ++dy)
-    {
-        for(int dx=0; dx<2; ++dx)
-        {
-            int sx=min(fx+dx,fineNx-1);
-            int sy=min(fy+dy,fineNy-1);
-
-            if(fineSolid[sy*fineNx+sx])
-            {
-                solidFlag=true;
-                break;
+    for (int jj = j0; jj <= j1; ++jj) {
+        for (int ii = i0; ii <= i1; ++ii) {
+            int fineId = jj * fineNx + ii;
+            if (!fineSolid[fineId]) {
+                sum += fineResidual[fineId];
+                weightSum += 1.0f;
+            } else {
+                solidFlag = true;
             }
         }
-
-        if(solidFlag)
-            break;
     }
 
-    coarseSolid[j*coarseNx+i]=solidFlag;
+    int coarseId = j * coarseNx + i;
+    coarseRhs[coarseId] = (weightSum > 0.0f) ? (sum / weightSum) : 0.0f;
+    coarseSolid[coarseId] = solidFlag ? 1 : 0;
+    if (coarseSolid[coarseId]) {
+        coarseRhs[coarseId] = 0.0f;
+    }
+    coarsePressure[coarseId] = 0.0f;
 }
 
 __global__ void restrictRHSKernel(
@@ -711,140 +639,35 @@ __global__ void restrictRHSKernel(
     float* coarseRhs,
     uint8_t* coarseSolid)
 {
-    const int i = blockIdx.x * blockDim.x + threadIdx.x;
-    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= coarseNx || j >= coarseNy) return;
 
-    if(i <= 0 || i >= coarseNx - 1)
-        return;
-
-    if(j <= 0 || j >= coarseNy - 1)
-        return;
-
-    int x = min(i * 2, fineNx - 2);
-    int y = min(j * 2, fineNy - 2);
+    int i0 = i * 2;
+    int i1 = min(i0 + 1, fineNx - 1);
+    int j0 = j * 2;
+    int j1 = min(j0 + 1, fineNy - 1);
 
     float sum = 0.0f;
     float wsum = 0.0f;
-
-    int xx, yy, id;
-
-    xx = x - 1;
-    yy = y - 1;
-    if(xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if(!fineSolid[id]){
-            sum += fineRhs[id];
-            wsum += 1.0f;
-        }
-    }
-
-    xx = x;
-    yy = y - 1;
-    if(xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if(!fineSolid[id]){
-            sum += 2.0f * fineRhs[id];
-            wsum += 2.0f;
-        }
-    }
-
-    xx = x + 1;
-    yy = y - 1;
-    if(xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if(!fineSolid[id]){
-            sum += fineRhs[id];
-            wsum += 1.0f;
-        }
-    }
-
-    xx = x - 1;
-    yy = y;
-    if(xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if(!fineSolid[id]){
-            sum += 2.0f * fineRhs[id];
-            wsum += 2.0f;
-        }
-    }
-
-    xx = x;
-    yy = y;
-    if(xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if(!fineSolid[id]){
-            sum += 4.0f * fineRhs[id];
-            wsum += 4.0f;
-        }
-    }
-
-    xx = x + 1;
-    yy = y;
-    if(xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if(!fineSolid[id]){
-            sum += 2.0f * fineRhs[id];
-            wsum += 2.0f;
-        }
-    }
-
-    xx = x - 1;
-    yy = y + 1;
-    if(xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if(!fineSolid[id]){
-            sum += fineRhs[id];
-            wsum += 1.0f;
-        }
-    }
-
-    xx = x;
-    yy = y + 1;
-    if(xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if(!fineSolid[id]){
-            sum += 2.0f * fineRhs[id];
-            wsum += 2.0f;
-        }
-    }
-
-    xx = x + 1;
-    yy = y + 1;
-    if(xx >= 0 && xx < fineNx && yy >= 0 && yy < fineNy){
-        id = yy * fineNx + xx;
-        if(!fineSolid[id]){
-            sum += fineRhs[id];
-            wsum += 1.0f;
-        }
-    }
-
-    coarseRhs[j * coarseNx + i] =
-        (wsum > 0.0f) ? sum / wsum : 0.0f;
-
-    const int fx = i * 2;
-    const int fy = j * 2;
-
     bool solidFlag = false;
 
-    for(int dy=0; dy<2; ++dy)
-    {
-        for(int dx=0; dx<2; ++dx)
-        {
-            int sx=min(fx+dx,fineNx-1);
-            int sy=min(fy+dy,fineNy-1);
-
-            if(fineSolid[sy*fineNx+sx])
-            {
-                solidFlag=true;
-                break;
+    for (int jj = j0; jj <= j1; ++jj) {
+        for (int ii = i0; ii <= i1; ++ii) {
+            int id = jj * fineNx + ii;
+            if (!fineSolid[id]) {
+                sum += fineRhs[id];
+                wsum += 1.0f;
+            } else {
+                solidFlag = true;
             }
         }
-
-        if(solidFlag)
-            break;
     }
 
-    coarseSolid[j*coarseNx+i]=solidFlag;
+    int coarseId = j * coarseNx + i;
+    coarseRhs[coarseId] = (wsum > 0.0f) ? (sum / wsum) : 0.0f;
+    coarseSolid[coarseId] = solidFlag ? 1 : 0;
+    if (coarseSolid[coarseId]) coarseRhs[coarseId] = 0.0f;
 }
 
 __global__ void prolongateCorrectionKernel(
@@ -961,6 +784,30 @@ __global__ void prolongateSolutionKernel(
     }
     if(weight>0.0f)
         finePressure[fineId]=value/weight;
+}
+
+__global__ void applyBCKernel(int nx, int ny, float* p, const uint8_t* solid) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Left and right boundaries (i=0 and i=nx-1)
+    if (idx < ny) {
+        int idLeft = idx * nx;
+        int idRight = idx * nx + (nx - 1);
+        if (!solid[idLeft]) p[idLeft] = p[idLeft + 1];
+        if (!solid[idRight]) p[idRight] = 0.0f;
+    }
+    // Bottom and top boundaries (j=0 and j=ny-1)
+    if (idx < nx) {
+        int idBottom = idx;
+        int idTop = (ny - 1) * nx + idx;
+        if (!solid[idBottom]) p[idBottom] = p[idBottom + nx];
+        if (!solid[idTop]) p[idTop] = p[idTop - nx];
+    }
+}
+
+__global__ void zeroSolidPressureKernel(int nx, int ny, float* p, const uint8_t* solid) {
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    if (idx >= nx * ny) return;
+    if (solid[idx]) p[idx] = 0.0f;
 }
 
 #endif

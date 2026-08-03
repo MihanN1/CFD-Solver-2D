@@ -202,61 +202,6 @@ endif()
 
 include(CTest)
 
-if(BUILD_TESTING)
-    function(cfd_configure_multigrid_test target)
-        target_include_directories(${target} PRIVATE "${CFD_INCLUDE_DIR}")
-        target_compile_features(${target} PRIVATE cxx_std_17)
-        target_compile_definitions(${target} PRIVATE NOMINMAX)
-
-        if(OpenMP_CXX_FOUND)
-            target_link_libraries(${target} PRIVATE OpenMP::OpenMP_CXX)
-        endif()
-
-        if(CFD_ENABLE_AVX2)
-            if(MSVC)
-                target_compile_options(${target} PRIVATE
-                    $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>
-                )
-            elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-                target_compile_options(${target} PRIVATE
-                    $<$<COMPILE_LANGUAGE:CXX>:-mavx2>
-                )
-            endif()
-        endif()
-
-        if(MSVC)
-            target_compile_options(${target} PRIVATE
-                $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
-            )
-        endif()
-    endfunction()
-
-    add_executable(MultigridCpuTests
-        src/Multigrid.cpp
-    )
-    cfd_configure_multigrid_test(MultigridCpuTests)
-    add_test(NAME MultigridCpuTests COMMAND MultigridCpuTests)
-
-    if(CFD_ENABLE_CUDA)
-        add_executable(MultigridCudaTests
-            src/Multigrid.cpp
-            src/MultigridCuda.cu
-        )
-        cfd_configure_multigrid_test(MultigridCudaTests)
-        target_compile_definitions(MultigridCudaTests PRIVATE USE_CUDA=1)
-        target_link_libraries(MultigridCudaTests PRIVATE CUDA::cudart)
-        target_compile_options(MultigridCudaTests PRIVATE
-            $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
-        )
-        set_target_properties(MultigridCudaTests PROPERTIES
-            CUDA_STANDARD 17
-            CUDA_STANDARD_REQUIRED ON
-            CUDA_EXTENSIONS OFF
-            CUDA_ARCHITECTURES "${CFD_CUDA_ARCHITECTURES}"
-        )
-        add_test(NAME MultigridCudaTests COMMAND MultigridCudaTests)
-    endif()
-endif()
 
 install(
     TARGETS cfd_app

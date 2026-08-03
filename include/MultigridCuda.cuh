@@ -67,4 +67,14 @@ __global__ void prolongateSolutionKernel(
     const uint8_t* fineSolid,
     const uint8_t* coarseSolid);
 
+__global__ void applyBCKernel(
+    int nx,
+    int ny,
+    float* p,
+    const uint8_t* solid);
+__global__ void zeroSolidPressureKernel(
+    int nx, 
+    int ny, 
+    float* p, 
+    const uint8_t* solid);
 #endif
