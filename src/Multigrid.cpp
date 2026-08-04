@@ -168,7 +168,7 @@ void Multigrid::buildHierarchy(){
         residualLevels.emplace_back(size, 0.0f);
         solidLevels.emplace_back(size, static_cast<uint8_t>(0));
 
-        if (currentNx <= 4 || currentNy <= 4)
+        if (currentNx <= 32 || currentNy <= 32)
             break;
 
         currentNx = std::max(2, (currentNx + 1) / 2);
@@ -349,7 +349,7 @@ void Multigrid::restrictResidual(int fineLevel) {
 
             int coarseId = j * coarseNx + i;
             coarseRhs[coarseId] = (wsum > 0.0f) ? (sum / wsum) : 0.0f;
-            coarseSolid[coarseId] = solidFlag ? 1 : 0;
+            coarseSolid[coarseId] = (wsum == 0.0f) ? 1 : 0;
             if (coarseSolid[coarseId]) coarseRhs[coarseId] = 0.0f;
         }
     }
@@ -373,13 +373,6 @@ void Multigrid::prolongateCorrection(int coarseLevel){
 
     #pragma omp parallel for schedule(static)
     for (int j = 0; j < fineNy; ++j){
-        const float y = static_cast<float>(j) * 0.5f;
-
-        int jc0 = static_cast<int>(y);
-        int jc1 = std::min(jc0 + 1, coarseNy - 1);
-        
-        float ty = y - jc0;
-
         for (int i = 0; i < fineNx; ++i){
 
             const int fineId = j * fineNx + i;
@@ -387,42 +380,31 @@ void Multigrid::prolongateCorrection(int coarseLevel){
             if (fineSolid[fineId])
                 continue;
 
-            int ic0 = i >> 1;
-            int jc0 = j >> 1;
-
-            int ic1 = std::min(ic0 + 1, coarseNx - 1);
-            int jc1 = std::min(jc0 + 1, coarseNy - 1);
+            const int ic0 = i >> 1;
+            const int jc0 = j >> 1;
+            const int icN = ((i & 1) == 0) ? std::max(ic0 - 1, 0)
+                                            : std::min(ic0 + 1, coarseNx - 1);
+            const int jcN = ((j & 1) == 0) ? std::max(jc0 - 1, 0)
+                                            : std::min(jc0 + 1, coarseNy - 1);
 
             float value = 0.0f;
             float weight = 0.0f;
 
-            auto add = [&](int cx,int cy){
+            auto add = [&](int cx,int cy, float w){
                 int id = cy * coarseNx + cx;
 
                 if(!coarseSolid[id])
                 {
-                    value += coarsePressure[id];
-                    weight += 1.0f;
+                    value += w * coarsePressure[id];
+                    weight += w;
                 }
             };
 
-            if((i & 1)==0 && (j & 1)==0){
-                add(ic0,jc0);
-            }
-            else if((i & 1)==1 && (j & 1)==0){
-                add(ic0,jc0);
-                add(ic1,jc0);
-            }
-            else if((i & 1)==0 && (j & 1)==1){
-                add(ic0,jc0);
-                add(ic0,jc1);
-            }
-            else{
-                add(ic0,jc0);
-                add(ic1,jc0);
-                add(ic0,jc1);
-                add(ic1,jc1);
-            }
+            add(ic0, jc0, 0.75f * 0.75f);
+            add(icN, jc0, 0.25f * 0.75f);
+            add(ic0, jcN, 0.75f * 0.25f);
+            add(icN, jcN, 0.25f * 0.25f);
+
             if(weight>0.0f)
                 finePressure[fineId]+=value/weight;
 
@@ -451,13 +433,6 @@ void Multigrid::prolongateSolution(int coarseLevel){
 
     #pragma omp parallel for schedule(static)
     for (int j = 0; j < fineNy; ++j){
-        const float y = static_cast<float>(j) * 0.5f;
-
-        int jc0 = static_cast<int>(y);
-        int jc1 = std::min(jc0 + 1, coarseNy - 1);
-        
-        float ty = y - jc0;
-
         for (int i = 0; i < fineNx; ++i){
 
             const int fineId = j * fineNx + i;
@@ -465,42 +440,32 @@ void Multigrid::prolongateSolution(int coarseLevel){
             if (fineSolid[fineId])
                 continue;
 
-            int ic0 = i >> 1;
-            int jc0 = j >> 1;
+            const int ic0 = i >> 1;
+            const int jc0 = j >> 1;
 
-            int ic1 = std::min(ic0 + 1, coarseNx - 1);
-            int jc1 = std::min(jc0 + 1, coarseNy - 1);
+            const int icN = ((i & 1) == 0) ? std::max(ic0 - 1, 0)
+                                            : std::min(ic0 + 1, coarseNx - 1);
+            const int jcN = ((j & 1) == 0) ? std::max(jc0 - 1, 0)
+                                            : std::min(jc0 + 1, coarseNy - 1);
 
             float value = 0.0f;
             float weight = 0.0f;
 
-            auto add = [&](int cx,int cy){
+            auto add = [&](int cx,int cy, float w){
                 int id = cy * coarseNx + cx;
 
                 if(!coarseSolid[id])
                 {
-                    value += coarsePressure[id];
-                    weight += 1.0f;
+                    value += w * coarsePressure[id];
+                    weight += w;
                 }
             };
 
-            if((i & 1)==0 && (j & 1)==0){
-                add(ic0,jc0);
-            }
-            else if((i & 1)==1 && (j & 1)==0){
-                add(ic0,jc0);
-                add(ic1,jc0);
-            }
-            else if((i & 1)==0 && (j & 1)==1){
-                add(ic0,jc0);
-                add(ic0,jc1);
-            }
-            else{
-                add(ic0,jc0);
-                add(ic1,jc0);
-                add(ic0,jc1);
-                add(ic1,jc1);
-            }
+            add(ic0, jc0, 0.75f * 0.75f);
+            add(icN, jc0, 0.25f * 0.75f);
+            add(ic0, jcN, 0.75f * 0.25f);
+            add(icN, jcN, 0.25f * 0.25f);
+
             if(weight>0.0f)
                 finePressure[fineId]+=value/weight;
 
@@ -607,7 +572,7 @@ void Multigrid::restrictRHS(int fineLevel) {
 
             int coarseId = j * coarseNx + i;
             coarseRhs[coarseId] = (wsum > 0.0f) ? (sum / wsum) : 0.0f;
-            coarseSolid[coarseId] = solidFlag ? 1 : 0;
+            coarseSolid[coarseId] = (wsum == 0.0f) ? 1 : 0;
             if (coarseSolid[coarseId]) coarseRhs[coarseId] = 0.0f;
         }
     }

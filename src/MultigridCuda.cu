@@ -622,7 +622,7 @@ __global__ void restrictResidualKernel(
 
     int coarseId = j * coarseNx + i;
     coarseRhs[coarseId] = (weightSum > 0.0f) ? (sum / weightSum) : 0.0f;
-    coarseSolid[coarseId] = solidFlag ? 1 : 0;
+    coarseSolid[coarseId] = (weightSum == 0.0f) ? 1 : 0;
     if (coarseSolid[coarseId]) {
         coarseRhs[coarseId] = 0.0f;
     }
@@ -666,7 +666,7 @@ __global__ void restrictRHSKernel(
 
     int coarseId = j * coarseNx + i;
     coarseRhs[coarseId] = (wsum > 0.0f) ? (sum / wsum) : 0.0f;
-    coarseSolid[coarseId] = solidFlag ? 1 : 0;
+    coarseSolid[coarseId] = (wsum == 0.0f) ? 1 : 0;
     if (coarseSolid[coarseId]) coarseRhs[coarseId] = 0.0f;
 }
 
@@ -691,39 +691,28 @@ __global__ void prolongateCorrectionKernel(
     if(fineSolid[fineId])
         return;
 
-    int ic0 = i >> 1;
-    int jc0 = j >> 1;
-    int ic1 = min(ic0 + 1, coarseNx - 1);
-    int jc1 = min(jc0 + 1, coarseNy - 1);
+    const int ic0 = i >> 1;
+    const int jc0 = j >> 1;
+    const int icN = ((i & 1) == 0) ? max(ic0 - 1, 0) : min(ic0 + 1, coarseNx - 1);
+    const int jcN = ((j & 1) == 0) ? max(jc0 - 1, 0) : min(jc0 + 1, coarseNy - 1);
+
     float value = 0.0f;
     float weight = 0.0f;
-    auto add = [&](int cx,int cy){
+    auto add = [&](int cx,int cy, float w){
         int id = cy * coarseNx + cx;
 
         if(!coarseSolid[id])
         {
-            value += coarsePressure[id];
-            weight += 1.0f;
+            value += w * coarsePressure[id];
+            weight += w;
         }
     };
 
-    if((i & 1)==0 && (j & 1)==0){
-        add(ic0,jc0);
-    }
-    else if((i & 1)==1 && (j & 1)==0){
-        add(ic0,jc0);
-        add(ic1,jc0);
-    }
-    else if((i & 1)==0 && (j & 1)==1){
-        add(ic0,jc0);
-        add(ic0,jc1);
-    }
-    else{
-        add(ic0,jc0);
-        add(ic1,jc0);
-        add(ic0,jc1);
-        add(ic1,jc1);
-    }
+    add(ic0, jc0, 0.75f * 0.75f);
+    add(icN, jc0, 0.25f * 0.75f);
+    add(ic0, jcN, 0.75f * 0.25f);
+    add(icN, jcN, 0.25f * 0.25f);
+
     if(weight>0.0f)
         finePressure[fineId]+=value/weight;
 }
@@ -749,39 +738,29 @@ __global__ void prolongateSolutionKernel(
     if(fineSolid[fineId])
         return;
 
-    int ic0 = i >> 1;
-    int jc0 = j >> 1;
-    int ic1 = min(ic0 + 1, coarseNx - 1);
-    int jc1 = min(jc0 + 1, coarseNy - 1);
+    const int ic0 = i >> 1;
+    const int jc0 = j >> 1;
+
+    const int icN = ((i & 1) == 0) ? max(ic0 - 1, 0) : min(ic0 + 1, coarseNx - 1);
+    const int jcN = ((j & 1) == 0) ? max(jc0 - 1, 0) : min(jc0 + 1, coarseNy - 1);
+
     float value = 0.0f;
     float weight = 0.0f;
-    auto add = [&](int cx,int cy){
+    auto add = [&](int cx,int cy, float w){
         int id = cy * coarseNx + cx;
 
         if(!coarseSolid[id])
         {
-            value += coarsePressure[id];
-            weight += 1.0f;
+            value += w * coarsePressure[id];
+            weight += w;
         }
     };
 
-    if((i & 1)==0 && (j & 1)==0){
-        add(ic0,jc0);
-    }
-    else if((i & 1)==1 && (j & 1)==0){
-        add(ic0,jc0);
-        add(ic1,jc0);
-    }
-    else if((i & 1)==0 && (j & 1)==1){
-        add(ic0,jc0);
-        add(ic0,jc1);
-    }
-    else{
-        add(ic0,jc0);
-        add(ic1,jc0);
-        add(ic0,jc1);
-        add(ic1,jc1);
-    }
+    add(ic0, jc0, 0.75f * 0.75f);
+    add(icN, jc0, 0.25f * 0.75f);
+    add(ic0, jcN, 0.75f * 0.25f);
+    add(icN, jcN, 0.25f * 0.25f);
+
     if(weight>0.0f)
         finePressure[fineId]=value/weight;
 }
