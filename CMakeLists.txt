@@ -12,6 +12,7 @@ include(CheckLanguage)
 option(CFD_ENABLE_OPENMP "Enable OpenMP parallel loops when available" ON)
 option(CFD_ENABLE_AVX2 "Compile CPU C++ sources with AVX2 support" ON)
 option(CFD_ENABLE_CUDA "Enable the CUDA multigrid backend" ON)
+option(CFD_ENABLE_CUDA_EXPLICIT "Treat a missing CUDA toolkit as a hard error" OFF)
 
 set(
     CFD_RUNTIME_OUTPUT_DIRECTORY
@@ -37,18 +38,28 @@ if(CFD_ENABLE_CUDA)
 
     check_language(CUDA)
     if(NOT CMAKE_CUDA_COMPILER)
-        message(FATAL_ERROR
-            "CUDA compiler detection failed while CFD_ENABLE_CUDA=ON.\n"
-            "For Visual Studio 2026, install CUDA Toolkit 13.2 or newer and select "
-            "the Visual Studio Integration component.\n"
-            "Then use a fresh build directory, or configure "
-            "-DCFD_ENABLE_CUDA=OFF for the CPU backend.\n"
-            "CUDA_PATH='$ENV{CUDA_PATH}'"
+        # CFD_ENABLE_CUDA defaults to ON, so a machine without a toolkit used to
+        # fail to configure at all. Fall back to the CPU backend instead and say
+        # so; only an explicit request is treated as an error.
+        if(CFD_ENABLE_CUDA_EXPLICIT)
+            message(FATAL_ERROR
+                "CUDA compiler detection failed while CFD_ENABLE_CUDA=ON.\n"
+                "CUDA_PATH='$ENV{CUDA_PATH}'"
+            )
+        endif()
+        message(WARNING
+            "No CUDA compiler found; building the CPU backend only. "
+            "Install the CUDA Toolkit (with the Visual Studio Integration "
+            "component on Windows) and reconfigure in a fresh build directory "
+            "to enable the GPU path. CUDA_PATH='$ENV{CUDA_PATH}'"
         )
+        set(CFD_ENABLE_CUDA OFF)
     endif()
+endif()
 
+if(CFD_ENABLE_CUDA)
     enable_language(CUDA)
-    find_package(CUDAToolkit 13.2 REQUIRED)
+    find_package(CUDAToolkit REQUIRED)
 
     set(CMAKE_CUDA_STANDARD 17)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)

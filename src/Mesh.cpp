@@ -54,9 +54,8 @@ double squaredDistance(const Mesh::Vertex& first, const Mesh::Vertex& second) {
     return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
 }
 }
-
 Mesh::Mesh(const Config& cfg)
-    : cfg(cfg), nx(cfg.nx), ny(cfg.ny)
+    : nx(cfg.nx), ny(cfg.ny), cfg(cfg)
 {
     solid.resize(nx * ny, 0);
     createGrid();

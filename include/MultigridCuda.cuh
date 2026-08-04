@@ -1,80 +1,55 @@
 #pragma once
-
 #ifdef USE_CUDA
-
+#include <cstdint>
 #include <cuda_runtime.h>
-class Multigrid;
 
-__global__ void smoothSORKernel(
-    int nx,
-    int ny,
-    float* pressure,
-    const float* rhs,
-    const uint8_t* solid,
-    float invDx2,
-    float invDy2,
-    float omega,
-    int color);
+__global__ void mgSmoothKernel(int nx, int ny,
+                               float* __restrict__ p,
+                               const float* __restrict__ rhs,
+                               const float* __restrict__ cW,
+                               const float* __restrict__ cE,
+                               const float* __restrict__ cS,
+                               const float* __restrict__ cN,
+                               const float* __restrict__ invDiag,
+                               float omega,
+                               int color);
 
-__global__ void computeResidualKernel(
-    int nx,
-    int ny,
-    const float* pressure,
-    const float* rhs,
-    float* residual,
-    const uint8_t* solid,
-    float invDx2,
-    float invDy2);
+__global__ void mgResidualKernel(int nx, int ny,
+                                 const float* __restrict__ p,
+                                 const float* __restrict__ rhs,
+                                 const float* __restrict__ cW,
+                                 const float* __restrict__ cE,
+                                 const float* __restrict__ cS,
+                                 const float* __restrict__ cN,
+                                 const float* __restrict__ diag,
+                                 float* __restrict__ res);
 
-__global__ void restrictResidualKernel(
-    int fineNx,
-    int fineNy,
-    int coarseNx,
-    int coarseNy,
-    const float* fineResidual,
-    const uint8_t* fineSolid,
-    float* coarseRhs,
-    float* coarsePressure,
-    uint8_t* coarseSolid);
+__global__ void mgRestrictKernel(int fineNx, int fineNy,
+                                 int coarseNx, int coarseNy,
+                                 int refX, int refY,
+                                 const float* __restrict__ fineSrc,
+                                 const float* __restrict__ finePWeight,
+                                 const uint8_t* __restrict__ coarseSolid,
+                                 const float* __restrict__ coarseDiag,
+                                 float* __restrict__ coarseRhs);
 
-__global__ void restrictRHSKernel(
-    int fineNx,
-    int fineNy,
-    int coarseNx,
-    int coarseNy,
-    const float* fineRhs,
-    const uint8_t* fineSolid,
-    float* coarseRhs,
-    uint8_t* coarseSolid);
+__global__ void mgProlongateKernel(int fineNx, int fineNy,
+                                   int coarseNx, int coarseNy,
+                                   int refX, int refY,
+                                   float* __restrict__ fineP,
+                                   const float* __restrict__ coarseP,
+                                   const float* __restrict__ finePWeight,
+                                   const uint8_t* __restrict__ coarseSolid,
+                                   int addMode);
 
-__global__ void prolongateCorrectionKernel(
-    int fineNx,
-    int fineNy,
-    int coarseNx,
-    int coarseNy,
-    float* finePressure,
-    const float* coarsePressure,
-    const uint8_t* fineSolid,
-    const uint8_t* coarseSolid);
+__global__ void mgMaskKernel(int n,
+                             float* __restrict__ p,
+                             float* __restrict__ rhs,
+                             const float* __restrict__ invDiag);
 
-__global__ void prolongateSolutionKernel(
-    int fineNx,
-    int fineNy,
-    int coarseNx,
-    int coarseNy,
-    float* finePressure,
-    const float* coarsePressure,
-    const uint8_t* fineSolid,
-    const uint8_t* coarseSolid);
+// Partial sums of squares, one value per block.
+__global__ void mgNormKernel(int n,
+                             const float* __restrict__ v,
+                             float* __restrict__ partial);
 
-__global__ void applyBCKernel(
-    int nx,
-    int ny,
-    float* p,
-    const uint8_t* solid);
-__global__ void zeroSolidPressureKernel(
-    int nx, 
-    int ny, 
-    float* p, 
-    const uint8_t* solid);
 #endif

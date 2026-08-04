@@ -2,13 +2,41 @@
 #include "Config.hpp"
 #include "Mesh.hpp"
 #include "Multigrid.hpp"
-#include <vector>
+#include <cstdint>
 #include <string>
+#include <vector>
+
+// ---------------------------------------------------------------------------
+// Projection (fractional step) solver on a staggered MAC grid.
+//
+//   u*      = u^n + dt * ( -(u.grad)u + nu * lap u )      predictor
+//   lap p   = div u* / dt                                 pressure Poisson
+//   u^{n+1} = u* - dt * grad p                            corrector
+//
+// The three steps share one discrete divergence and one discrete gradient; see
+// Multigrid.hpp for why that matters and how the boundary conditions are folded
+// into the Poisson stencil instead of being patched on afterwards.
+//
+// Face bookkeeping
+// ----------------
+//   u lives on vertical faces,   index i = 0..nx, j = 0..ny-1
+//   v lives on horizontal faces, index i = 0..nx-1, j = 0..ny
+//
+//   i = 0    inlet    u = U0        prescribed, not corrected
+//   i = nx   outlet   p = 0 on the face, u IS corrected through the ghost
+//   j = 0    wall     v = 0         prescribed, u free slip
+//   j = ny   wall     v = 0         prescribed, u free slip
+//
+// uOpen / vOpen mark the faces the corrector owns: interior faces with fluid on
+// both sides. Velocities on every other face are held at their prescribed value
+// (0 for solid faces and walls, U0 at the inlet), which is what lets the hot
+// loops run completely branch free - a stencil can only ever read a legitimate
+// zero, never uninitialised data.
+// ---------------------------------------------------------------------------
 
 class Solver {
 public:
     Solver(const Config& cfg, const Mesh& mesh);
-    // Main loop: run simulation until totalTime
     void run();
 
 private:
@@ -16,42 +44,38 @@ private:
     const Mesh& mesh;
     Multigrid multigrid;
 
-    // Fields on staggered grid
-    // Pressure (cell centres): size nx * ny
     std::vector<float> p;
-    // Right-hand side of Poisson equation
     std::vector<float> rhs;
-    // u on vertical faces: size (nx+1) * ny
     std::vector<float> u, u_star;
-    // v on horizontal faces: size nx * (ny+1)
     std::vector<float> v, v_star;
 
     double currentTime = 0.0;
-    int step = 0;
-    double dt = 0.0;  // current time step
-    std::vector<uint8_t> uFluidMask;
-    std::vector<uint8_t> vFluidMask;
+    int    step = 0;
+    float  dt = 0.0f;
+    float  lastResidual = 0.0f;
+
+    std::vector<uint8_t> uOpen, vOpen;
+    std::vector<float>   uOpenF, vOpenF;
     std::vector<uint8_t> solidMask;
 
-    // Helper methods
+    float dx = 0.0f, dy = 0.0f;
+    float invDx = 0.0f, invDy = 0.0f;
+    float invDx2 = 0.0f, invDy2 = 0.0f;
+
     void initFields();
+    void buildFaceMasks();
     void computeDt();
     void predictor();
     void solvePoisson();
     void corrector();
     void applyBC();
-    void buildFaceMasks(); // build masks for u and v to identify fluid faces
 
-    // VTK output
+    float maxDivergence() const;
+    float maxVelocity() const;
+
     void saveVTK(int stepNum) const;
 
-    // Interpolation helpers for VTK (to get values at nodes)
-    double interpU(int i, int j) const; // u at node (i,j)
-    double interpV(int i, int j) const;
-    double interpP(int i, int j) const;
-
-    // Inline index helpers (for readability)
     inline int idxP(int i, int j) const { return j * cfg.nx + i; }
     inline int idxU(int i, int j) const { return j * (cfg.nx + 1) + i; }
-    inline int idxV(int i, int j) const { return j * cfg.nx + i; } // v has nx columns
+    inline int idxV(int i, int j) const { return j * cfg.nx + i; }
 };
