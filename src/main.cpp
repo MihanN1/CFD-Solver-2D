@@ -1,42 +1,92 @@
 #include "Config.hpp"
 #include "Mesh.hpp"
 #include "Solver.hpp"
+#include <chrono>
 #include <iostream>
+#include <string>
+#include <vector>
 
-//for now no other libs are needed, so i deleted everything else from main.cpp, but we will need to add more later. for now these are used and none more
-//to perform tests faster.
+namespace {
 
-int main() {
+void printUsage(const char* exe) {
+    std::cout <<
+        "Usage:\n"
+        "  " << exe << "                       interactive configuration\n"
+        "  " << exe << " key=value [key=value] non-interactive run\n"
+        "\n"
+        "Keys: Lx Ly nx ny U0 nu Re CFL totalTime dtUpdateInterval dtSafety\n"
+        "      omega smootherOmega mgIterations mgTolerance mgMinCoarseSize\n"
+        "      saveInterval outputDir geometryFile sliceAngleX sliceAngleZ\n"
+        "      sliceRotation invertSection ro\n"
+        "\n"
+        "Example:\n"
+        "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "
+                       "totalTime=2 saveInterval=25\n";
+}
+
+}
+
+int main(int argc, char** argv) {
     std::cout << "=== CFD-Solver-2D ===\n\n";
 
     Config cfg;
-    cfg.readFromConsole();
+    if (argc > 1) {
+        for (int a = 1; a < argc; ++a) {
+            const std::string arg = argv[a];
+            if (arg == "-h" || arg == "--help") {
+                printUsage(argv[0]);
+                return 0;
+            }
+            const size_t eq = arg.find('=');
+            if (eq == std::string::npos || eq == 0) {
+                std::cerr << "Malformed argument: " << arg << "\n";
+                printUsage(argv[0]);
+                return 1;
+            }
+            if (!cfg.setParam(arg.substr(0, eq), arg.substr(eq + 1))) {
+                std::cerr << "Unknown parameter: " << arg.substr(0, eq) << "\n";
+                printUsage(argv[0]);
+                return 1;
+            }
+        }
+        cfg.print();
+    } else {
+        cfg.readFromConsole();
 
-    // Confirmation loop
-    while (!cfg.confirm()) {
-        // loop will repeat until user presses Enter without text
+        while (!cfg.confirm()) {
+            // loop will repeat until user presses Enter without text
+        }
+
+        std::cout << "\n--- Final Configuration ---\n";
+        cfg.print();
+
+        std::cout << "\nNote: This version supports STL and OBJ models.\n";
+        std::cout << "      The mask is generated from a central plane section of the model.\n";
+        std::cout << "      Slice angles, in-plane rotation, and optional mirroring are applied.\n";
+        std::cout << "      Enter 'none' to use the circle verification geometry.\n";
+        std::cout << "      Total simulation time: " << cfg.totalTime << " s.\n";
     }
 
-    // Final confirmation output
-    std::cout << "\n--- Final Configuration ---\n";
-    cfg.print();
+    if (cfg.nx < 8 || cfg.ny < 8) {
+        std::cerr << "nx and ny must be at least 8.\n";
+        return 1;
+    }
 
-    // Instruction about geometry import
-    std::cout << "\nNote: This version supports STL and OBJ models.\n";
-    std::cout << "      The mask is generated from a central plane section of the model.\n";
-    std::cout << "      Slice angles, in-plane rotation, and optional mirroring are applied.\n";
-    std::cout << "      Enter 'none' to use the circle verification geometry.\n";
-
-    std::cout << "      Total simulation time: " << cfg.totalTime << " s.\n";
-    std::cout << "      (Time‑stepping will stop when current time reaches this. You will be able to go forwards and backwards in time.)\n";
-
-    // Create mesh (circle)
     Mesh mesh(cfg);
     mesh.printInfo();
 
     Solver solver(cfg, mesh);
+    const auto t0 = std::chrono::steady_clock::now();
     solver.run();
-    std::cout << "\nSimulation complete. Press Enter to exit...";
-    std::cin.get();
+    const auto t1 = std::chrono::steady_clock::now();
+
+    const double seconds =
+        std::chrono::duration<double>(t1 - t0).count();
+    std::cout << "Wall clock: " << seconds << " s\n";
+
+    if (argc <= 1) {
+        std::cout << "\nSimulation complete. Press Enter to exit...";
+        std::cin.get();
+    }
     return 0;
 }

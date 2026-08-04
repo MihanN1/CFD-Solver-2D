@@ -1,5 +1,71 @@
 # Changelog
 
+## 2026-08-05 — MAJOR! Revert to the last working solver, re-implement all 15 optimizations
+
+Status:
+- Written
+- Built (CPU path; CUDA path syntax-checked and verified through a host emulator, not nvcc)
+- Launched
+- Tested
+- Verified
+
+Decision:
+- The merged optimization branch was not debuggable. Its bugs were structural, not local.
+- Went back to the old `double` solver, took its mathematics as ground truth, and rewrote
+  `Solver` / `Multigrid` / `MultigridCuda` from scratch with all 15 optimizations
+  re-implemented on top of correct math. Kept the ideas from the optimized branch, kept
+  none of its code.
+
+Changed:
+- `src/Solver.cpp`, `include/Solver.hpp` — rewritten. Fixed the `u_star` row stride in
+  `solvePoisson` (`j*nx` → `j*(nx+1)`), stopped treating the outer ring of real fluid cells
+  as ghost cells, moved the boundary conditions into the Poisson operator coefficients,
+  corrected the outlet through a half-cell Dirichlet ghost, moved free slip into the
+  predictor's diffusion stencil, branch-free AVX2 predictor/corrector, local CFL,
+  direct-to-buffer binary VTK.
+- `src/Multigrid.cpp`, `include/Multigrid.hpp` — rewritten. Restriction is now the exact
+  transpose of the prolongation, even-only coarsening (no truncated coarse blocks),
+  semi-coarsening for anisotropic grids, precomputed per-level stencil with `invDiag`,
+  red/black SOR with AVX2 masked stores, halo-padded arrays, FMG on the first solve then
+  warm start, relative convergence tolerance.
+- `src/MultigridCuda.cu`, `include/MultigridCuda.cuh` — rewritten. Device memory allocated
+  once instead of per time step, pressure resident on the GPU between steps, stencil
+  uploaded once, Thrust dropped, error checking added, `applyBCKernel` and
+  `zeroSolidPressureKernel` deleted.
+- `include/Config.hpp`, `src/Config.cpp` — added `saveInterval`, `outputDir`, `mgTolerance`,
+  `smootherOmega`, `dtUpdateInterval`, `dtSafety`, `mgMinCoarseSize`, `useCuda`, and
+  `setParam()` for non-interactive configuration.
+- `src/main.cpp` — non-interactive `key=value` command line mode, wall-clock timing.
+- `src/Mesh.cpp` — constructor initialiser list reordered to match declaration order.
+- `CMakeLists.txt` — a missing CUDA toolkit warns and falls back to CPU instead of failing
+  configuration outright.
+
+Cause:
+- `u_star` was indexed with the pressure row stride, shearing the velocity field by one
+  element per row inside the divergence computation.
+- The smoother swept only `i=1..nx-2, j=1..ny-2` and `applyBC()` overwrote the rest, but
+  those cells are real fluid cells, so a one-cell band along every wall and around the body
+  never received a pressure correction. `Solver::applyBC` then ran *after* the corrector and
+  overwrote two rows of `u`, destroying the projection it had just computed.
+- Multigrid restriction (2×2 average) was not the transpose of the prolongation (bilinear),
+  so the coarse-grid correction was not an energy-norm projection. On some grid sizes the
+  two-grid operator had spectral radius > 1 and each V-cycle amplified the error — 128×128
+  converged, 100×100 diverged.
+- `cudaMalloc`/`cudaFree` ran for every level on every pressure solve.
+
+Effect:
+- `div(u) = div(u*) − dt·L·p` now holds exactly, face by face, so the projection projects.
+- Mass balance measured at 0.00000 % on a cylinder-in-channel case.
+- Grids that previously diverged (100×100, 64×128) or stalled (512×17) converge to float
+  precision.
+- Multigrid convergence factor 0.06–0.13 per V-cycle, verified against an independent
+  double-precision reference implementation of the operator.
+- CPU and CUDA paths produce bit-identical results under emulation.
+- ~41× faster per step than the old solver (1.64 ms vs 67.6 ms at 200×100, single thread),
+  before counting the removal of the per-step VTK write.
+
+
+
 ## 2026-07-18 18:08 — Implement STL/OBJ section-to-mask pipeline
 
 Status:

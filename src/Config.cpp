@@ -1,5 +1,6 @@
 #include "Config.hpp"
 #include <cctype>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 
@@ -15,6 +16,14 @@ std::string readGeometryPath() {
     }
 
     return path;
+}
+
+std::string toLower(const std::string& s) {
+    std::string out = s;
+    for (char& c : out) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return out;
 }
 }
 
@@ -32,18 +41,28 @@ void Config::readFromConsole() {
     std::cin >> U0;
     std::cout << "Enter kinematic viscosity nu (m^2/s): ";
     std::cin >> nu;
+    std::cout << "Enter density ro. Make sure that the gas/liquid is incompressible(meaning for air speed its less than 0.3M)(kg/m^3): ";
+    std::cin >> ro;
     std::cout << "Enter Reynolds number (0 to auto-compute later): ";
     std::cin >> Re;
     std::cout << "Enter CFL number (recommended 0.3-0.5): ";
     std::cin >> CFL;
     std::cout << "Enter total simulation time(seconds): ";
     std::cin >> totalTime;
+    std::cout << "Enter steps between dt recomputations (recommended 5): ";
+    std::cin >> dtUpdateInterval;
     std::cout << "Enter SOR relaxation parameter omega (1.6-1.85): ";
     std::cin >> omega;
-    std::cout << "Enter SOR tolerance (e.g., 1e-5): ";
-    std::cin >> tol;
-    std::cout << "Enter max SOR iterations: ";
-    std::cin >> maxIterSOR;
+    std::cout << "Enter SOR relaxation parameter smootherOmega (for the coarsest multigrid level, 1.0-1.3 recommended): ";
+    std::cin >> smootherOmega;
+    std::cout << "Enter multigrid V-cycles per step (2 by default, 3-5 MAX recommended): ";
+    std::cin >> mgIterations;
+    std::cout << "Enter multigrid relative residual tolerance (1e-4 HEAVILY recommended): ";
+    std::cin >> mgTolerance;
+    std::cout << "Enter minimum coarse grid size (8 recommended): ";
+    std::cin >> mgMinCoarseSize;
+    std::cout << "Enter VTK save interval in steps (1 = every step, 20 recommended): ";
+    std::cin >> saveInterval;
     std::cout << "Enter path to 3D model (or 'none' for circle): ";
     geometryFile = readGeometryPath();
     std::cout << "Enter around the axis going towards the observer (degrees, default 0): ";
@@ -55,38 +74,74 @@ void Config::readFromConsole() {
     std::cout << "Mirror the section? (0 = no, 1 = yes): ";
     std::cin >> invertSection;
     std::cout << "Configuration read.\n";
-    std::cout << "Enter density ro. Make sure that the gas/liquid is incompressible(meaning for air speed its less than 0.3M)(kg/m^3): ";
-    std::cin >> ro;
+    std::cout << "Use cuda? (0 = no, 1 = yes, ignored on a CPU-only build): ";
+    std::cin >> useCuda;
     std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-
 }
 void Config::print() const {
     std::cout << "\n--- Current Configuration ---\n";
-    std::cout << "  Lx            = " << Lx << " m\n";
-    std::cout << "  Ly            = " << Ly << " m\n";
-    std::cout << "  nx            = " << nx << "\n";
-    std::cout << "  ny            = " << ny << "\n";
-    std::cout << "  U0            = " << U0 << " m/s\n";
-    std::cout << "  nu            = " << nu << " m^2/s\n";
-    std::cout << "  Re            = " << Re << "\n";
-    std::cout << "  CFL           = " << CFL << "\n";
-    std::cout << "  totalTime        = " << totalTime << "\n";
-    std::cout << "  omega         = " << omega << "\n";
-    std::cout << "  tol           = " << tol << "\n";
-    std::cout << "  maxIterSOR    = " << maxIterSOR << "\n";
+    std::cout << "  Lx               = " << Lx << " m\n";
+    std::cout << "  Ly               = " << Ly << " m\n";
+    std::cout << "  nx               = " << nx << "\n";
+    std::cout << "  ny               = " << ny << "\n";
+    std::cout << "  U0               = " << U0 << " m/s\n";
+    std::cout << "  nu               = " << nu << " m^2/s\n";
+    std::cout << "  ro               = " << ro << " kg/m^3\n";
+    std::cout << "  Re               = " << Re << "\n";
+    std::cout << "  CFL              = " << CFL << "\n";
+    std::cout << "  totalTime        = " << totalTime << " s\n";
+    std::cout << "  dtUpdateInterval = " << dtUpdateInterval << " steps\n";
+    std::cout << "  omega            = " << omega << " (coarsest level)\n";
+    std::cout << "  smootherOmega    = " << smootherOmega << " (V-cycle smoother)\n";
+    std::cout << "  mgIterations     = " << mgIterations << " V-cycles/step\n";
+    std::cout << "  mgTolerance      = " << mgTolerance << " (relative)\n";
+    std::cout << "  mgMinCoarseSize  = " << mgMinCoarseSize << " cells/axis\n";
+    std::cout << "  saveInterval     = " << saveInterval << " steps\n";
+    std::cout << "  outputDir        = " << outputDir << "\n";
     std::cout << "  geometryFile     = " << geometryFile << "\n";
-    std::cout << "  sliceAngleX    = " << sliceAngleX << " deg\n";
-    std::cout << "  sliceAngleZ    = " << sliceAngleZ << " deg\n";
-    std::cout << "  invertSection  = " << invertSection << "\n";
+    std::cout << "  sliceAngleX      = " << sliceAngleX << " deg\n";
+    std::cout << "  sliceAngleZ      = " << sliceAngleZ << " deg\n";
+    std::cout << "  invertSection    = " << invertSection << "\n";
     std::cout << "  sliceRotation    = " << sliceRotation << " deg\n";
-    std::cout << "  ro            = " << ro << "kg/m^3\n"; 
+    std::cout << " CUDA? Yes/No:       " << (useCuda ? "Yes" : "No") << "\n";
     std::cout << "--------------------------------\n";
 }
+
+bool Config::setParam(const std::string& key, const std::string& value) {
+    const std::string lower = toLower(key);
+
+    if (lower == "lx")                    Lx = std::strtof(value.c_str(), nullptr);
+    else if (lower == "ly")               Ly = std::strtof(value.c_str(), nullptr);
+    else if (lower == "nx")               nx = std::atoi(value.c_str());
+    else if (lower == "ny")               ny = std::atoi(value.c_str());
+    else if (lower == "u0")               U0 = std::strtof(value.c_str(), nullptr);
+    else if (lower == "nu")               nu = std::strtof(value.c_str(), nullptr);
+    else if (lower == "re")               Re = std::strtod(value.c_str(), nullptr);
+    else if (lower == "cfl")              CFL = std::strtof(value.c_str(), nullptr);
+    else if (lower == "totaltime")        totalTime = std::strtod(value.c_str(), nullptr);
+    else if (lower == "dtupdateinterval") dtUpdateInterval = std::atoi(value.c_str());
+    else if (lower == "dtsafety")         dtSafety = std::strtof(value.c_str(), nullptr);
+    else if (lower == "omega")            omega = std::strtof(value.c_str(), nullptr);
+    else if (lower == "smootheromega")    smootherOmega = std::strtof(value.c_str(), nullptr);
+    else if (lower == "mgiterations")     mgIterations = std::atoi(value.c_str());
+    else if (lower == "mgtolerance")      mgTolerance = std::strtof(value.c_str(), nullptr);
+    else if (lower == "mgmincoarsesize")  mgMinCoarseSize = std::atoi(value.c_str());
+    else if (lower == "saveinterval")     saveInterval = std::atoi(value.c_str());
+    else if (lower == "outputdir")        outputDir = value;
+    else if (lower == "geometryfile")     geometryFile = value;
+    else if (lower == "sliceanglex")      sliceAngleX = std::strtof(value.c_str(), nullptr);
+    else if (lower == "sliceanglez")      sliceAngleZ = std::strtof(value.c_str(), nullptr);
+    else if (lower == "slicerotation")    sliceRotation = std::strtof(value.c_str(), nullptr);
+    else if (lower == "invertsection")    invertSection = (std::atoi(value.c_str()) != 0);
+    else if (lower == "ro")               ro = std::strtof(value.c_str(), nullptr);
+    else if (lower == "usecuda")          useCuda = (std::atoi(value.c_str()) != 0);
+    else return false;
+
+    return true;
+}
+
 bool Config::modifyParam(const std::string& name) {
-    std::string lower = name;
-    for (char& c : lower) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
+    const std::string lower = toLower(name);
     bool usedFormattedInput = true;
 
     if (lower == "lx") {
@@ -116,15 +171,34 @@ bool Config::modifyParam(const std::string& name) {
     } else if (lower == "totaltime") {
         std::cout << "New totalTime: ";
         std::cin >> totalTime;
+    } else if (lower == "dtupdateinterval") {
+        std::cout << "New dtUpdateInterval (steps between dt recomputations): ";
+        std::cin >> dtUpdateInterval;
+    } else if (lower == "dtsafety") {
+        std::cout << "New dtSafety (0..1): ";
+        std::cin >> dtSafety;
     } else if (lower == "omega") {
         std::cout << "New omega: ";
         std::cin >> omega;
-    } else if (lower == "tol") {
-        std::cout << "New tol: ";
-        std::cin >> tol;
-    } else if (lower == "maxitersor") {
-        std::cout << "New maxIterSOR: ";
-        std::cin >> maxIterSOR;
+    } else if (lower == "smootheromega") {
+        std::cout << "New smootherOmega (1.0-1.3 recommended): ";
+        std::cin >> smootherOmega;
+    } else if (lower == "mgiterations") {
+        std::cout << "New mgIterations: ";
+        std::cin >> mgIterations;
+    } else if (lower == "mgtolerance") {
+        std::cout << "New mgTolerance (relative residual): ";
+        std::cin >> mgTolerance;
+    } else if (lower == "mgmincoarsesize") {
+        std::cout << "New mgMinCoarseSize: ";
+        std::cin >> mgMinCoarseSize;
+    } else if (lower == "saveinterval") {
+        std::cout << "New saveInterval (steps): ";
+        std::cin >> saveInterval;
+    } else if (lower == "outputdir") {
+        std::cout << "New outputDir: ";
+        outputDir = readGeometryPath();
+        usedFormattedInput = false;
     } else if (lower == "geometryfile") {
         std::cout << "New geometryFile: ";
         geometryFile = readGeometryPath();
@@ -132,10 +206,10 @@ bool Config::modifyParam(const std::string& name) {
     } else if (lower == "sliceanglex") {
         std::cout << "New sliceAngleX (deg): ";
         std::cin >> sliceAngleX;
-    }else if (lower == "sliceanglez") {
+    } else if (lower == "sliceanglez") {
         std::cout << "New sliceAngleZ (deg): ";
         std::cin >> sliceAngleZ;
-    }else if (lower == "invertsection") {
+    } else if (lower == "invertsection") {
         std::cout << "New invertSection: ";
         std::cin >> invertSection;
     } else if (lower == "slicerotation") {
