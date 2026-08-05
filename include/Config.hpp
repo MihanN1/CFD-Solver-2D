@@ -10,7 +10,6 @@ struct Config {
     // Flow
     float U0 = 1.0;
     float nu = 0.01;
-    double Re = 0.0;   // 0 means compute from U0, D, nu later
 
     // Density
     float ro = 1.225;   // kg/m^3

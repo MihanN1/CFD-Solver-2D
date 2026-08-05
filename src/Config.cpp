@@ -43,8 +43,31 @@ void Config::readFromConsole() {
     std::cin >> nu;
     std::cout << "Enter density ro. Make sure that the gas/liquid is incompressible(meaning for air speed its less than 0.3M)(kg/m^3): ";
     std::cin >> ro;
-    std::cout << "Enter Reynolds number (0 to auto-compute later): ";
-    std::cin >> Re;
+    // Reynolds number is intentionally NOT asked for and NOT stored.
+    // The solver is dimensional: it integrates the momentum equations using nu
+    // directly (Solver.cpp, diffusion term and the dtDiff limit in computeDt()).
+    // Re is therefore not an input but a consequence of the other inputs:
+    //
+    //     Re = U0 * D / nu
+    //
+    // where D is the obstacle diameter, which is fixed by the domain size:
+    //
+    //     D = OBSTACLE_DOMAIN_FRACTION * min(Lx, Ly) = 0.2 * min(Lx, Ly)
+    //
+    // See Mesh.cpp: OBSTACLE_DOMAIN_FRACTION (anonymous namespace) is used in
+    // buildSection() to scale imported STL/OBJ geometry to that span, and the
+    // fallback verification circle in the Mesh constructor uses
+    // radius = 0.1 * min(Lx, Ly), i.e. the same diameter.
+    //
+    // Example: U0 = 5, nu = 0.01, Lx = Ly = 1  ->  D = 0.2, Re = 100.
+    //
+    // The old prompt asked for Re with "0 to auto-compute later", but nothing
+    // ever consumed the value or computed it - the field was only echoed back
+    // by print(). It was removed to avoid implying that typing a Re would
+    // change the simulation. To drive a run by Re instead of nu, convert on the
+    // way in: nu = U0 * D / Re.
+    // So basically we arent stupid and avoid asking for a parameter that is not used anywhere in the code,
+    // My bad for forgetting about it completely, ahahaha
     std::cout << "Enter CFL number (recommended 0.3-0.5): ";
     std::cin >> CFL;
     std::cout << "Enter total simulation time(seconds): ";
@@ -87,7 +110,6 @@ void Config::print() const {
     std::cout << "  U0               = " << U0 << " m/s\n";
     std::cout << "  nu               = " << nu << " m^2/s\n";
     std::cout << "  ro               = " << ro << " kg/m^3\n";
-    std::cout << "  Re               = " << Re << "\n";
     std::cout << "  CFL              = " << CFL << "\n";
     std::cout << "  totalTime        = " << totalTime << " s\n";
     std::cout << "  dtUpdateInterval = " << dtUpdateInterval << " steps\n";
@@ -116,7 +138,6 @@ bool Config::setParam(const std::string& key, const std::string& value) {
     else if (lower == "ny")               ny = std::atoi(value.c_str());
     else if (lower == "u0")               U0 = std::strtof(value.c_str(), nullptr);
     else if (lower == "nu")               nu = std::strtof(value.c_str(), nullptr);
-    else if (lower == "re")               Re = std::strtod(value.c_str(), nullptr);
     else if (lower == "cfl")              CFL = std::strtof(value.c_str(), nullptr);
     else if (lower == "totaltime")        totalTime = std::strtod(value.c_str(), nullptr);
     else if (lower == "dtupdateinterval") dtUpdateInterval = std::atoi(value.c_str());
@@ -162,9 +183,6 @@ bool Config::modifyParam(const std::string& name) {
     } else if (lower == "nu") {
         std::cout << "New nu: ";
         std::cin >> nu;
-    } else if (lower == "re") {
-        std::cout << "New Re: ";
-        std::cin >> Re;
     } else if (lower == "cfl") {
         std::cout << "New CFL: ";
         std::cin >> CFL;
