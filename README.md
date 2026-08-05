@@ -18,6 +18,7 @@ The project is designed to simulate external incompressible flow around arbitrar
 
 Possible future extensions include:
 
+- Uploading last .vtk of some past simulations to continue on with it.
 - Adaptive mesh refinement (AMR)
 - Turbulence models
 - Compressible flow solver
