@@ -775,6 +775,7 @@ void Solver::run() {
 
     // Save initial state
     computeDt();
+    std::cout << "Program outputs 'Saved ---' one in ten saves. " << std::endl;
     saveVTK(step);
 
     const int saveInterval = std::max(1, cfg.saveInterval);
@@ -932,7 +933,6 @@ void Solver::saveVTK(int stepNum) const {
     }
     flushFloatBuffer();
     fout << "\n";
-
     if (stepNum % (std::max(1, cfg.saveInterval) * 10) == 0 || stepNum == 0)
         std::cout << "Saved " << filename.string() << std::endl;
 }
