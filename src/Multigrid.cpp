@@ -1,22 +1,26 @@
 #include "Multigrid.hpp"
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 #include <immintrin.h>
 
+static const int PRE_SMOOTH_SWEEPS = 2;
+static const int POST_SMOOTH_SWEEPS = 2;
+static const int COARSE_SMOOTH_SWEEPS = 50;
+// Only spawn OpenMP threads when the level is tall enough to pay for them
+static const int PARALLEL_ROWS_MIN = 32;
+
 namespace {
-constexpr int kPreSmooth    = 2;
-constexpr int kPostSmooth   = 2;
-constexpr int kCoarseSmooth = 50;
-inline int coarseSweeps(int nx, int ny) {
+// On the coarsest level the smoother acts as a solver, so it needs enough
+// sweeps to push information across the whole grid
+int coarseSweeps(int nx, int ny) {
     const int wanted = 2 * (nx > ny ? nx : ny);
-    if (wanted < kCoarseSmooth) return kCoarseSmooth;
+    if (wanted < COARSE_SMOOTH_SWEEPS) return COARSE_SMOOTH_SWEEPS;
     return (wanted > 400) ? 400 : wanted;
 }
 
-constexpr int kParallelRows = 32;
-
-inline float horizontalSum(__m256 v) {
+// Sum of the 8 lanes
+float horizontalSum(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
     __m128 hi = _mm256_extractf128_ps(v, 1);
     lo = _mm_add_ps(lo, hi);
@@ -24,11 +28,15 @@ inline float horizontalSum(__m256 v) {
     lo = _mm_add_ss(lo, _mm_shuffle_ps(lo, lo, 0x55));
     return _mm_cvtss_f32(lo);
 }
-
 }
+
 Multigrid::Multigrid(int nx, int ny, float dx, float dy, int minCoarseSize)
-    : nx0(nx), ny0(ny), dx0(dx), dy0(dy),
-      minCoarseSize(minCoarseSize < 4 ? 4 : minCoarseSize)
+    :
+    nx(nx),
+    ny(ny),
+    dx(dx),
+    dy(dy),
+    minCoarseSize(minCoarseSize < 4 ? 4 : minCoarseSize)
 {
 }
 
@@ -39,199 +47,212 @@ Multigrid::~Multigrid() {
 }
 
 void Multigrid::buildHierarchy() {
-    lv.clear();
-    int   cnx = nx0;
-    int   cny = ny0;
-    float cdx = dx0;
-    float cdy = dy0;
-    while (true) {
-        Level L;
-        L.nx = cnx;
-        L.ny = cny;
-        L.n  = cnx * cny;
-        L.dx = cdx;
-        L.dy = cdy;
-        const int halo = std::max(cnx, 8);
-        L.p.init(L.n, halo);
-        L.res.init(L.n, halo);
-        L.rhs.assign(static_cast<size_t>(L.n) + 16u, 0.0f);
-        L.cW.assign(static_cast<size_t>(L.n) + 16u, 0.0f);
-        L.cE.assign(static_cast<size_t>(L.n) + 16u, 0.0f);
-        L.cS.assign(static_cast<size_t>(L.n) + 16u, 0.0f);
-        L.cN.assign(static_cast<size_t>(L.n) + 16u, 0.0f);
-        L.diag.assign(static_cast<size_t>(L.n) + 16u, 0.0f);
-        L.invDiag.assign(static_cast<size_t>(L.n) + 16u, 0.0f);
-        L.solid.assign(static_cast<size_t>(L.n), 0u);
-        lv.push_back(std::move(L));
+    gridLevels.clear();
+    int curNx = nx;
+    int curNy = ny;
+    float curDx = dx;
+    float curDy = dy;
 
-        // Semi-coarsening. A point smoother only damps the error in the
-        // direction it is strongly coupled to, so on a grid with dx << dy the
-        // error along y is barely touched and standard full coarsening makes a
-        // V-cycle stall or even diverge. Coarsening the over-resolved axis
-        // alone drives the coarse grids towards isotropy, where the smoother
-        // works properly again.
-        // Only an even count is coarsened. With an odd count the last coarse
-        // cell would cover a single fine cell instead of two, its column of the
-        // prolongation would carry half the weight of every other column, and
-        // the restriction - being the transpose - would hand the coarse solver
-        // a residual that is half as large as it should be there. That
-        // inconsistency is enough to make the V-cycle diverge.
-        bool canX = (cnx > minCoarseSize) && (cnx % 2 == 0);
-        bool canY = (cny > minCoarseSize) && (cny % 2 == 0);
+    while (true) {
+        Level grid;
+        grid.nx = curNx;
+        grid.ny = curNy;
+        grid.cellCount = curNx * curNy;
+        grid.dx = curDx;
+        grid.dy = curDy;
+
+        const int halo = std::max(curNx, 8);
+        grid.pressure.init(grid.cellCount, halo);
+        grid.residual.init(grid.cellCount, halo);
+
+        const size_t padded = static_cast<size_t>(grid.cellCount) + 16u;
+        grid.rhs.assign(padded, 0.0f);
+        grid.coefW.assign(padded, 0.0f);
+        grid.coefE.assign(padded, 0.0f);
+        grid.coefS.assign(padded, 0.0f);
+        grid.coefN.assign(padded, 0.0f);
+        grid.diag.assign(padded, 0.0f);
+        grid.invDiag.assign(padded, 0.0f);
+        grid.solid.assign(static_cast<size_t>(grid.cellCount), 0);
+        gridLevels.push_back(std::move(grid));
+
+        // Semi-coarsening: a point smoother only damps the error along the axis
+        // it is strongly coupled to, so on a grid with dx << dy we coarsen the
+        // over-resolved axis alone to drive the coarse grids towards isotropy.
+        // Only an even count is coarsened, otherwise the last coarse cell would
+        // cover a single fine cell and restriction would stop being the
+        // transpose of prolongation, which makes the V-cycle diverge.
+        bool canX = (curNx > minCoarseSize) && (curNx % 2 == 0);
+        bool canY = (curNy > minCoarseSize) && (curNy % 2 == 0);
 
         if (canX && canY) {
-            if (cdx < 0.5f * cdy)      canY = false;
-            else if (cdy < 0.5f * cdx) canX = false;
+            if (curDx < 0.5f * curDy)      canY = false;
+            else if (curDy < 0.5f * curDx) canX = false;
         }
         if (!canX && !canY)
             break;
 
-        const int nnx = canX ? (cnx + 1) / 2 : cnx;
-        const int nny = canY ? (cny + 1) / 2 : cny;
-        cdx *= static_cast<float>(cnx) / static_cast<float>(nnx);
-        cdy *= static_cast<float>(cny) / static_cast<float>(nny);
-        lv.back().refX = canX ? 2 : 1;
-        lv.back().refY = canY ? 2 : 1;
-        cnx = nnx;
-        cny = nny;
+        const int nextNx = canX ? (curNx + 1) / 2 : curNx;
+        const int nextNy = canY ? (curNy + 1) / 2 : curNy;
+        curDx *= static_cast<float>(curNx) / static_cast<float>(nextNx);
+        curDy *= static_cast<float>(curNy) / static_cast<float>(nextNy);
+        gridLevels.back().refineX = canX ? 2 : 1;
+        gridLevels.back().refineY = canY ? 2 : 1;
+        curNx = nextNx;
+        curNy = nextNy;
     }
 
-    levels = static_cast<int>(lv.size());
+    levels = static_cast<int>(gridLevels.size());
 }
 
 namespace {
-
+// The two coarse cells a fine cell interpolates from, and their weights
 struct Stencil1D {
-    int   c0, c1;
-    float w0, w1;
+    int coarse0, coarse1;
+    float weight0, weight1;
 };
 
-inline Stencil1D transferStencil(int i, int ref, int coarseN) {
+Stencil1D transferStencil(int i, int refine, int coarseN) {
     Stencil1D s;
-    if (ref == 1) {
-        s.c0 = s.c1 = i;
-        s.w0 = 1.0f;
-        s.w1 = 0.0f;
+    if (refine == 1) {
+        s.coarse0 = s.coarse1 = i;
+        s.weight0 = 1.0f;
+        s.weight1 = 0.0f;
         return s;
     }
 
-    s.c0 = i >> 1;
-    s.c1 = ((i & 1) == 0) ? (s.c0 > 0 ? s.c0 - 1 : s.c0)
-                          : (s.c0 + 1 < coarseN ? s.c0 + 1 : s.c0);
-    if (s.c1 == s.c0) {
-        s.w0 = 1.0f;
-        s.w1 = 0.0f;
+    s.coarse0 = i >> 1;
+    s.coarse1 =
+        ((i & 1) == 0) ?
+        (s.coarse0 > 0 ? s.coarse0 - 1 : s.coarse0) :
+        (s.coarse0 + 1 < coarseN ? s.coarse0 + 1 : s.coarse0);
+
+    if (s.coarse1 == s.coarse0) {
+        s.weight0 = 1.0f;
+        s.weight1 = 0.0f;
     } else {
-        s.w0 = 0.75f;
-        s.w1 = 0.25f;
+        s.weight0 = 0.75f;
+        s.weight1 = 0.25f;
     }
     return s;
 }
-
 }
+
 void Multigrid::buildTransferWeights(int fineLevel) {
     const int coarseLevel = fineLevel + 1;
-    Level& F = lv[fineLevel];
+    Level& fine = gridLevels[fineLevel];
 
-    F.pWeight.assign(static_cast<size_t>(F.n), 0.0f);
+    fine.prolongWeight.assign(static_cast<size_t>(fine.cellCount), 0.0f);
     if (coarseLevel >= levels)
         return;
-    const Level& C = lv[coarseLevel];
-    for (int j = 0; j < F.ny; ++j) {
-        const Stencil1D sy = transferStencil(j, F.refY, C.ny);
-        for (int i = 0; i < F.nx; ++i) {
-            const int fid = j * F.nx + i;
-            if (F.solid[fid] || F.diag[fid] == 0.0f)
+
+    const Level& coarse = gridLevels[coarseLevel];
+    for (int j = 0; j < fine.ny; ++j) {
+        const Stencil1D sy = transferStencil(j, fine.refineY, coarse.ny);
+        for (int i = 0; i < fine.nx; ++i) {
+            const int fineId = j * fine.nx + i;
+            if (fine.solid[fineId] || fine.diag[fineId] == 0.0f)
                 continue;
-            const Stencil1D sx = transferStencil(i, F.refX, C.nx);
+            const Stencil1D sx = transferStencil(i, fine.refineX, coarse.nx);
+
+            const int coarseX[4] = {sx.coarse0, sx.coarse1, sx.coarse0, sx.coarse1};
+            const int coarseY[4] = {sy.coarse0, sy.coarse0, sy.coarse1, sy.coarse1};
+            const float weights[4] = {
+                sx.weight0 * sy.weight0, sx.weight1 * sy.weight0,
+                sx.weight0 * sy.weight1, sx.weight1 * sy.weight1};
 
             float weight = 0.0f;
-            const int   cx[4] = {sx.c0, sx.c1, sx.c0, sx.c1};
-            const int   cy[4] = {sy.c0, sy.c0, sy.c1, sy.c1};
-            const float w[4]  = {sx.w0 * sy.w0, sx.w1 * sy.w0,
-                                 sx.w0 * sy.w1, sx.w1 * sy.w1};
             for (int k = 0; k < 4; ++k) {
-                if (w[k] == 0.0f)
+                if (weights[k] == 0.0f)
                     continue;
-                if (!C.solid[cy[k] * C.nx + cx[k]])
-                    weight += w[k];
+                if (!coarse.solid[coarseY[k] * coarse.nx + coarseX[k]])
+                    weight += weights[k];
             }
-            F.pWeight[fid] = weight;
+            fine.prolongWeight[fineId] = weight;
         }
     }
 }
-void Multigrid::buildCoefficients(Level& L) {
-    const int nx = L.nx;
-    const int ny = L.ny;
-    const float invDx2 = 1.0f / (L.dx * L.dx);
-    const float invDy2 = 1.0f / (L.dy * L.dy);
+
+void Multigrid::buildCoefficients(Level& grid) {
+    const int nx = grid.nx;
+    const int ny = grid.ny;
+    const float invDx2 = 1.0f / (grid.dx * grid.dx);
+    const float invDy2 = 1.0f / (grid.dy * grid.dy);
 
     for (int j = 0; j < ny; ++j) {
         const int row = j * nx;
         for (int i = 0; i < nx; ++i) {
             const int id = row + i;
 
-            if (L.solid[id]) {
-                L.cW[id] = L.cE[id] = L.cS[id] = L.cN[id] = 0.0f;
-                L.diag[id] = 0.0f;
-                L.invDiag[id] = 0.0f;
+            if (grid.solid[id]) {
+                grid.coefW[id] = grid.coefE[id] = 0.0f;
+                grid.coefS[id] = grid.coefN[id] = 0.0f;
+                grid.diag[id] = 0.0f;
+                grid.invDiag[id] = 0.0f;
                 continue;
             }
-            const float cw = (i > 0      && !L.solid[id - 1])  ? invDx2 : 0.0f;
-            const float ce = (i < nx - 1 && !L.solid[id + 1])  ? invDx2 : 0.0f;
-            const float cs = (j > 0      && !L.solid[id - nx]) ? invDy2 : 0.0f;
-            const float cn = (j < ny - 1 && !L.solid[id + nx]) ? invDy2 : 0.0f;
+            // A link is only opened towards a fluid neighbour, so the solid
+            // walls are baked into the stencil instead of patched afterwards
+            const float coefW = (i > 0      && !grid.solid[id - 1])  ? invDx2 : 0.0f;
+            const float coefE = (i < nx - 1 && !grid.solid[id + 1])  ? invDx2 : 0.0f;
+            const float coefS = (j > 0      && !grid.solid[id - nx]) ? invDy2 : 0.0f;
+            const float coefN = (j < ny - 1 && !grid.solid[id + nx]) ? invDy2 : 0.0f;
 
-            float diag = cw + ce + cs + cn;
+            float diag = coefW + coefE + coefS + coefN;
 
+            // Outlet: p = 0 half a cell outside, hence the extra 2/dx^2
             if (i == nx - 1)
                 diag += 2.0f * invDx2;
 
-            L.cW[id] = cw;
-            L.cE[id] = ce;
-            L.cS[id] = cs;
-            L.cN[id] = cn;
+            grid.coefW[id] = coefW;
+            grid.coefE[id] = coefE;
+            grid.coefS[id] = coefS;
+            grid.coefN[id] = coefN;
 
             if (diag > 0.0f) {
-                L.diag[id] = diag;
-                L.invDiag[id] = 1.0f / diag;
+                grid.diag[id] = diag;
+                grid.invDiag[id] = 1.0f / diag;
             } else {
-                L.diag[id] = 0.0f;
-                L.invDiag[id] = 0.0f;
+                grid.diag[id] = 0.0f;
+                grid.invDiag[id] = 0.0f;
             }
         }
     }
 }
 
 void Multigrid::setGeometry(const std::vector<uint8_t>& solid) {
-    if (lv.empty())
+    if (gridLevels.empty())
         buildHierarchy();
 
-    std::copy(solid.begin(), solid.begin() + lv[0].n, lv[0].solid.begin());
-    for (int l = 1; l < levels; ++l) {
-        const Level& F = lv[l - 1];
-        Level& C = lv[l];
+    std::copy(solid.begin(),
+              solid.begin() + gridLevels[0].cellCount,
+              gridLevels[0].solid.begin());
 
-        for (int j = 0; j < C.ny; ++j) {
-            for (int i = 0; i < C.nx; ++i) {
-                const int i0 = i * F.refX;
-                const int i1 = std::min(i0 + F.refX - 1, F.nx - 1);
-                const int j0 = j * F.refY;
-                const int j1 = std::min(j0 + F.refY - 1, F.ny - 1);
+    // A coarse cell is solid only if every fine cell under it is solid
+    for (int l = 1; l < levels; ++l) {
+        const Level& fine = gridLevels[l - 1];
+        Level& coarse = gridLevels[l];
+
+        for (int j = 0; j < coarse.ny; ++j) {
+            for (int i = 0; i < coarse.nx; ++i) {
+                const int i0 = i * fine.refineX;
+                const int i1 = std::min(i0 + fine.refineX - 1, fine.nx - 1);
+                const int j0 = j * fine.refineY;
+                const int j1 = std::min(j0 + fine.refineY - 1, fine.ny - 1);
 
                 bool allSolid = true;
                 for (int jj = j0; jj <= j1 && allSolid; ++jj)
                     for (int ii = i0; ii <= i1 && allSolid; ++ii)
-                        if (!F.solid[jj * F.nx + ii])
+                        if (!fine.solid[jj * fine.nx + ii])
                             allSolid = false;
 
-                C.solid[j * C.nx + i] = allSolid ? 1u : 0u;
+                coarse.solid[j * coarse.nx + i] = allSolid ? 1 : 0;
             }
         }
     }
 
     for (int l = 0; l < levels; ++l)
-        buildCoefficients(lv[l]);
+        buildCoefficients(gridLevels[l]);
 
     for (int l = 0; l < levels; ++l)
         buildTransferWeights(l);
@@ -256,23 +277,29 @@ void Multigrid::setUseCuda(bool enable) {
 #endif
 }
 
-void Multigrid::smooth(int level, float omega, int sweeps) {
-    Level& L = lv[level];
-    const int nx = L.nx;
-    const int ny = L.ny;
+void Multigrid::smoothSOR(
+    int level,
+    float omega,
+    int sweeps)
+{
+    Level& grid = gridLevels[level];
+    const int nx = grid.nx;
+    const int ny = grid.ny;
 
-    float* const        pAll  = L.p.data();
-    const float* const  rhs   = L.rhs.data();
-    const float* const  cW    = L.cW.data();
-    const float* const  cE    = L.cE.data();
-    const float* const  cS    = L.cS.data();
-    const float* const  cN    = L.cN.data();
-    const float* const  invD  = L.invDiag.data();
+    float* const       pressure = grid.pressure.data();
+    const float* const rhs      = grid.rhs.data();
+    const float* const coefW    = grid.coefW.data();
+    const float* const coefE    = grid.coefE.data();
+    const float* const coefS    = grid.coefS.data();
+    const float* const coefN    = grid.coefN.data();
+    const float* const invDiag  = grid.invDiag.data();
 
+    // Red-black ordering: only every second lane of a vector is written back
     const __m256i laneEven = _mm256_setr_epi32(-1, 0, -1, 0, -1, 0, -1, 0);
     const __m256i laneOdd  = _mm256_setr_epi32(0, -1, 0, -1, 0, -1, 0, -1);
-    const __m256  omegaV   = _mm256_set1_ps(omega);
-    #pragma omp parallel if (ny >= kParallelRows)
+    const __m256 omegaVec  = _mm256_set1_ps(omega);
+
+    #pragma omp parallel if (ny >= PARALLEL_ROWS_MIN)
     for (int sweep = 0; sweep < sweeps; ++sweep) {
         for (int color = 0; color < 2; ++color) {
             #pragma omp for schedule(static)
@@ -285,181 +312,209 @@ void Multigrid::smooth(int level, float omega, int sweeps) {
                 for (; i + 8 <= nx; i += 8) {
                     const int id = row + i;
 
-                    const __m256 pc = _mm256_loadu_ps(pAll + id);
-                    const __m256 pl = _mm256_loadu_ps(pAll + id - 1);
-                    const __m256 pr = _mm256_loadu_ps(pAll + id + 1);
-                    const __m256 pd = _mm256_loadu_ps(pAll + id - nx);
-                    const __m256 pu = _mm256_loadu_ps(pAll + id + nx);
+                    const __m256 pCentre =
+                        _mm256_loadu_ps(pressure + id);
+                    const __m256 pLeft =
+                        _mm256_loadu_ps(pressure + id - 1);
+                    const __m256 pRight =
+                        _mm256_loadu_ps(pressure + id + 1);
+                    const __m256 pBot =
+                        _mm256_loadu_ps(pressure + id - nx);
+                    const __m256 pTop =
+                        _mm256_loadu_ps(pressure + id + nx);
 
-                    __m256 num = _mm256_mul_ps(_mm256_loadu_ps(cW + id), pl);
-                    num = _mm256_add_ps(num, _mm256_mul_ps(_mm256_loadu_ps(cE + id), pr));
-                    num = _mm256_add_ps(num, _mm256_mul_ps(_mm256_loadu_ps(cS + id), pd));
-                    num = _mm256_add_ps(num, _mm256_mul_ps(_mm256_loadu_ps(cN + id), pu));
+                    __m256 sum =
+                        _mm256_mul_ps(_mm256_loadu_ps(coefW + id), pLeft);
+                    sum = _mm256_add_ps(sum,
+                        _mm256_mul_ps(_mm256_loadu_ps(coefE + id), pRight));
+                    sum = _mm256_add_ps(sum,
+                        _mm256_mul_ps(_mm256_loadu_ps(coefS + id), pBot));
+                    sum = _mm256_add_ps(sum,
+                        _mm256_mul_ps(_mm256_loadu_ps(coefN + id), pTop));
 
-                    const __m256 pNew = _mm256_mul_ps(
-                        _mm256_sub_ps(num, _mm256_loadu_ps(rhs + id)),
-                        _mm256_loadu_ps(invD + id));
+                    const __m256 pNew =
+                        _mm256_mul_ps(
+                            _mm256_sub_ps(sum, _mm256_loadu_ps(rhs + id)),
+                            _mm256_loadu_ps(invDiag + id));
 
-                    const __m256 upd = _mm256_add_ps(
-                        pc, _mm256_mul_ps(omegaV, _mm256_sub_ps(pNew, pc)));
+                    const __m256 relaxed =
+                        _mm256_add_ps(
+                            pCentre,
+                            _mm256_mul_ps(
+                                omegaVec,
+                                _mm256_sub_ps(pNew, pCentre)));
 
-                    _mm256_maskstore_ps(pAll + id, lane, upd);
+                    _mm256_maskstore_ps(pressure + id, lane, relaxed);
                 }
                 for (int ii = i + parity; ii < nx; ii += 2) {
                     const int id = row + ii;
-                    const float num =
-                        cW[id] * pAll[id - 1] +
-                        cE[id] * pAll[id + 1] +
-                        cS[id] * pAll[id - nx] +
-                        cN[id] * pAll[id + nx];
-                    const float pNew = (num - rhs[id]) * invD[id];
-                    pAll[id] += omega * (pNew - pAll[id]);
+                    const float sum =
+                        coefW[id] * pressure[id - 1] +
+                        coefE[id] * pressure[id + 1] +
+                        coefS[id] * pressure[id - nx] +
+                        coefN[id] * pressure[id + nx];
+                    const float pNew = (sum - rhs[id]) * invDiag[id];
+                    pressure[id] += omega * (pNew - pressure[id]);
                 }
             }
         }
     }
 }
+
 void Multigrid::computeResidual(int level) {
-    Level& L = lv[level];
-    const int nx = L.nx;
-    const int ny = L.ny;
+    Level& grid = gridLevels[level];
+    const int nx = grid.nx;
+    const int ny = grid.ny;
 
-    const float* const pAll = L.p.data();
-    const float* const rhs  = L.rhs.data();
-    const float* const cW   = L.cW.data();
-    const float* const cE   = L.cE.data();
-    const float* const cS   = L.cS.data();
-    const float* const cN   = L.cN.data();
-    const float* const diag = L.diag.data();
-    float* const       res  = L.res.data();
+    const float* const pressure = grid.pressure.data();
+    const float* const rhs      = grid.rhs.data();
+    const float* const coefW    = grid.coefW.data();
+    const float* const coefE    = grid.coefE.data();
+    const float* const coefS    = grid.coefS.data();
+    const float* const coefN    = grid.coefN.data();
+    const float* const diag     = grid.diag.data();
+    float* const       residual = grid.residual.data();
 
-    #pragma omp parallel for schedule(static) if (ny >= kParallelRows)
+    #pragma omp parallel for schedule(static) if (ny >= PARALLEL_ROWS_MIN)
     for (int j = 0; j < ny; ++j) {
         const int row = j * nx;
 
         int i = 0;
         for (; i + 8 <= nx; i += 8) {
             const int id = row + i;
-            const __m256 pc = _mm256_loadu_ps(pAll + id);
-            const __m256 pl = _mm256_loadu_ps(pAll + id - 1);
-            const __m256 pr = _mm256_loadu_ps(pAll + id + 1);
-            const __m256 pd = _mm256_loadu_ps(pAll + id - nx);
-            const __m256 pu = _mm256_loadu_ps(pAll + id + nx);
+            const __m256 pCentre =
+                _mm256_loadu_ps(pressure + id);
+            const __m256 pLeft =
+                _mm256_loadu_ps(pressure + id - 1);
+            const __m256 pRight =
+                _mm256_loadu_ps(pressure + id + 1);
+            const __m256 pBot =
+                _mm256_loadu_ps(pressure + id - nx);
+            const __m256 pTop =
+                _mm256_loadu_ps(pressure + id + nx);
 
-            __m256 num = _mm256_mul_ps(_mm256_loadu_ps(cW + id), pl);
-            num = _mm256_add_ps(num, _mm256_mul_ps(_mm256_loadu_ps(cE + id), pr));
-            num = _mm256_add_ps(num, _mm256_mul_ps(_mm256_loadu_ps(cS + id), pd));
-            num = _mm256_add_ps(num, _mm256_mul_ps(_mm256_loadu_ps(cN + id), pu));
-            const __m256 Ap = _mm256_sub_ps(
-                num, _mm256_mul_ps(_mm256_loadu_ps(diag + id), pc));
-            _mm256_storeu_ps(res + id,
-                             _mm256_sub_ps(_mm256_loadu_ps(rhs + id), Ap));
+            __m256 sum =
+                _mm256_mul_ps(_mm256_loadu_ps(coefW + id), pLeft);
+            sum = _mm256_add_ps(sum,
+                _mm256_mul_ps(_mm256_loadu_ps(coefE + id), pRight));
+            sum = _mm256_add_ps(sum,
+                _mm256_mul_ps(_mm256_loadu_ps(coefS + id), pBot));
+            sum = _mm256_add_ps(sum,
+                _mm256_mul_ps(_mm256_loadu_ps(coefN + id), pTop));
+
+            // Ap = (neighbour sum) - diag * p, residual = rhs - Ap
+            const __m256 Ap =
+                _mm256_sub_ps(
+                    sum,
+                    _mm256_mul_ps(_mm256_loadu_ps(diag + id), pCentre));
+
+            _mm256_storeu_ps(
+                residual + id,
+                _mm256_sub_ps(_mm256_loadu_ps(rhs + id), Ap));
         }
 
         for (; i < nx; ++i) {
             const int id = row + i;
-            const float num =
-                cW[id] * pAll[id - 1] +
-                cE[id] * pAll[id + 1] +
-                cS[id] * pAll[id - nx] +
-                cN[id] * pAll[id + nx];
-            res[id] = rhs[id] - (num - diag[id] * pAll[id]);
+            const float sum =
+                coefW[id] * pressure[id - 1] +
+                coefE[id] * pressure[id + 1] +
+                coefS[id] * pressure[id - nx] +
+                coefN[id] * pressure[id + nx];
+            residual[id] = rhs[id] - (sum - diag[id] * pressure[id]);
         }
     }
 }
-float Multigrid::vectorNorm(const float* v, int n) {
+
+float Multigrid::computeVectorNorm(const float* values, int count) {
     double total = 0.0;
-    #pragma omp parallel reduction(+ : total) if (n >= 8192)
+    #pragma omp parallel reduction(+ : total) if (count >= 8192)
     {
         __m256 acc = _mm256_setzero_ps();
 
         #pragma omp for schedule(static) nowait
-        for (int i = 0; i <= n - 8; i += 8) {
-            const __m256 x = _mm256_loadu_ps(v + i);
+        for (int i = 0; i <= count - 8; i += 8) {
+            const __m256 x = _mm256_loadu_ps(values + i);
             acc = _mm256_add_ps(acc, _mm256_mul_ps(x, x));
         }
         total += static_cast<double>(horizontalSum(acc));
     }
-    const int start = (n / 8) * 8;
-    for (int i = start; i < n; ++i)
-        total += static_cast<double>(v[i]) * static_cast<double>(v[i]);
+    const int start = (count / 8) * 8;
+    for (int i = start; i < count; ++i)
+        total += static_cast<double>(values[i]) * static_cast<double>(values[i]);
 
     return static_cast<float>(std::sqrt(total));
 }
 
-float Multigrid::residualNorm(int level) const {
-    const Level& L = lv[level];
-    return vectorNorm(L.res.data(), L.n);
+float Multigrid::computeResidualNorm(int level) const {
+    const Level& grid = gridLevels[level];
+    return computeVectorNorm(grid.residual.data(), grid.cellCount);
 }
 
-// ---------------------------------------------------------------------------
-// Grid transfer
-//
-// The restriction is the exact transpose of the prolongation, divided by the
-// number of fine cells per coarse cell:  R = P^T / (refX*refY).
-//
-// This is the part the previous implementation got wrong. It restricted with a
-// plain average over the 2x2 block while prolongating bilinearly, so R was not
-// P^T and the coarse grid correction was not a projection in the energy norm.
-// For some grid sizes and aspect ratios the resulting two-grid operator has a
-// spectral radius above one and the V-cycle *amplifies* the error instead of
-// reducing it - which is exactly what made the solver blow up on a 100x100 or a
-// 64x128 domain while working fine on 128x128(during the tests, u know ehehe).
-// ---------------------------------------------------------------------------
+// Grid transfer. The restriction is the exact transpose of the prolongation
+// divided by the number of fine cells per coarse cell: R = P^T / (refineX*refineY).
+// The previous implementation restricted with a plain 2x2 average while
+// prolongating bilinearly, so R was not P^T, and for some grid sizes the
+// V-cycle amplified the error instead of reducing it - which is exactly what
+// blew the solver up on 100x100 and 64x128 while 128x128 worked fine
+// (during the tests, u know ehehe).
 
-void Multigrid::restrict(int fineLevel, const float* fineSrc) {
+void Multigrid::restrictField(int fineLevel, const float* fineSrc) {
     const int coarseLevel = fineLevel + 1;
     if (coarseLevel >= levels)
         return;
 
-    const Level& F = lv[fineLevel];
-    Level& C = lv[coarseLevel];
+    const Level& fine = gridLevels[fineLevel];
+    Level& coarse = gridLevels[coarseLevel];
 
-    const int refX = F.refX;
-    const int refY = F.refY;
+    const int refineX = fine.refineX;
+    const int refineY = fine.refineY;
+    const float scale = 1.0f / static_cast<float>(refineX * refineY);
 
-    const float scale = 1.0f / static_cast<float>(refX * refY);
+    float* const coarseRhs = coarse.rhs.data();
+    const float* const prolongWeight = fine.prolongWeight.data();
 
-    float* const coarseRhs = C.rhs.data();
-    const float* const pWeight = F.pWeight.data();
+    #pragma omp parallel for schedule(static) if (coarse.ny >= PARALLEL_ROWS_MIN)
+    for (int j = 0; j < coarse.ny; ++j) {
+        for (int i = 0; i < coarse.nx; ++i) {
+            const int coarseId = j * coarse.nx + i;
 
-    #pragma omp parallel for schedule(static) if (C.ny >= kParallelRows)
-    for (int J = 0; J < C.ny; ++J) {
-        for (int I = 0; I < C.nx; ++I) {
-            const int cid = J * C.nx + I;
-
-            if (C.solid[cid] || C.diag[cid] == 0.0f) {
-                coarseRhs[cid] = 0.0f;
+            if (coarse.solid[coarseId] || coarse.diag[coarseId] == 0.0f) {
+                coarseRhs[coarseId] = 0.0f;
                 continue;
             }
-            const int i0 = (refX == 1) ? I : std::max(0, 2 * I - 1);
-            const int i1 = (refX == 1) ? I : std::min(F.nx - 1, 2 * I + 2);
-            const int j0 = (refY == 1) ? J : std::max(0, 2 * J - 1);
-            const int j1 = (refY == 1) ? J : std::min(F.ny - 1, 2 * J + 2);
+            // Fine cells that can carry a non-zero weight into this coarse cell
+            const int i0 = (refineX == 1) ? i : std::max(0, 2 * i - 1);
+            const int i1 = (refineX == 1) ? i : std::min(fine.nx - 1, 2 * i + 2);
+            const int j0 = (refineY == 1) ? j : std::max(0, 2 * j - 1);
+            const int j1 = (refineY == 1) ? j : std::min(fine.ny - 1, 2 * j + 2);
+
             float sum = 0.0f;
             for (int jj = j0; jj <= j1; ++jj) {
-                const Stencil1D sy = transferStencil(jj, refY, C.ny);
+                const Stencil1D sy = transferStencil(jj, refineY, coarse.ny);
                 float wy = 0.0f;
-                if (sy.c0 == J) wy += sy.w0;
-                if (sy.c1 == J) wy += sy.w1;
+                if (sy.coarse0 == j) wy += sy.weight0;
+                if (sy.coarse1 == j) wy += sy.weight1;
                 if (wy == 0.0f)
                     continue;
-                const int frow = jj * F.nx;
+
+                const int fineRow = jj * fine.nx;
                 for (int ii = i0; ii <= i1; ++ii) {
-                    const int fid = frow + ii;
-                    const float norm = pWeight[fid];
+                    const int fineId = fineRow + ii;
+                    const float norm = prolongWeight[fineId];
                     if (norm <= 0.0f)
                         continue;
-                    const Stencil1D sx = transferStencil(ii, refX, C.nx);
+
+                    const Stencil1D sx = transferStencil(ii, refineX, coarse.nx);
                     float wx = 0.0f;
-                    if (sx.c0 == I) wx += sx.w0;
-                    if (sx.c1 == I) wx += sx.w1;
+                    if (sx.coarse0 == i) wx += sx.weight0;
+                    if (sx.coarse1 == i) wx += sx.weight1;
                     if (wx == 0.0f)
                         continue;
-                    sum += (wx * wy / norm) * fineSrc[fid];
+
+                    sum += (wx * wy / norm) * fineSrc[fineId];
                 }
             }
-            coarseRhs[cid] = sum * scale;
+            coarseRhs[coarseId] = sum * scale;
         }
     }
 }
@@ -468,124 +523,143 @@ void Multigrid::restrictResidual(int fineLevel) {
     const int coarseLevel = fineLevel + 1;
     if (coarseLevel >= levels)
         return;
-    lv[coarseLevel].p.zero();
-    restrict(fineLevel, lv[fineLevel].res.data());
+    gridLevels[coarseLevel].pressure.zero();
+    restrictField(fineLevel, gridLevels[fineLevel].residual.data());
 }
 
 void Multigrid::restrictRHS(int fineLevel) {
-    restrict(fineLevel, lv[fineLevel].rhs.data());
+    restrictField(fineLevel, gridLevels[fineLevel].rhs.data());
 }
-void Multigrid::prolongateAdd(int coarseLevel) {
+
+void Multigrid::prolongateCorrection(int coarseLevel) {
     if (coarseLevel <= 0 || coarseLevel >= levels)
         return;
     const int fineLevel = coarseLevel - 1;
-    Level& F = lv[fineLevel];
-    const Level& C = lv[coarseLevel];
+    Level& fine = gridLevels[fineLevel];
+    const Level& coarse = gridLevels[coarseLevel];
 
-    float* const fineP = F.p.data();
-    const float* const coarseP = C.p.data();
+    float* const finePressure = fine.pressure.data();
+    const float* const coarsePressure = coarse.pressure.data();
 
-    #pragma omp parallel for schedule(static) if (F.ny >= kParallelRows)
-    for (int j = 0; j < F.ny; ++j) {
-        const Stencil1D sy = transferStencil(j, F.refY, C.ny);
-        for (int i = 0; i < F.nx; ++i) {
-            const int fid = j * F.nx + i;
-            const float norm = F.pWeight[fid];
+    #pragma omp parallel for schedule(static) if (fine.ny >= PARALLEL_ROWS_MIN)
+    for (int j = 0; j < fine.ny; ++j) {
+        const Stencil1D sy = transferStencil(j, fine.refineY, coarse.ny);
+        for (int i = 0; i < fine.nx; ++i) {
+            const int fineId = j * fine.nx + i;
+            const float norm = fine.prolongWeight[fineId];
             if (norm <= 0.0f)
                 continue;
 
-            const Stencil1D sx = transferStencil(i, F.refX, C.nx);
+            const Stencil1D sx = transferStencil(i, fine.refineX, coarse.nx);
 
-            const int   cx[4] = {sx.c0, sx.c1, sx.c0, sx.c1};
-            const int   cy[4] = {sy.c0, sy.c0, sy.c1, sy.c1};
-            const float w[4]  = {sx.w0 * sy.w0, sx.w1 * sy.w0,
-                                 sx.w0 * sy.w1, sx.w1 * sy.w1};
+            const int coarseX[4] = {sx.coarse0, sx.coarse1, sx.coarse0, sx.coarse1};
+            const int coarseY[4] = {sy.coarse0, sy.coarse0, sy.coarse1, sy.coarse1};
+            const float weights[4] = {
+                sx.weight0 * sy.weight0, sx.weight1 * sy.weight0,
+                sx.weight0 * sy.weight1, sx.weight1 * sy.weight1};
 
             float value = 0.0f;
             for (int k = 0; k < 4; ++k) {
-                if (w[k] == 0.0f)
+                if (weights[k] == 0.0f)
                     continue;
-                const int cid = cy[k] * C.nx + cx[k];
-                if (!C.solid[cid])
-                    value += w[k] * coarseP[cid];
+                const int coarseId = coarseY[k] * coarse.nx + coarseX[k];
+                if (!coarse.solid[coarseId])
+                    value += weights[k] * coarsePressure[coarseId];
             }
 
-            fineP[fid] += value / norm;
+            finePressure[fineId] += value / norm;
         }
     }
 }
 
-void Multigrid::prolongateSet(int coarseLevel) {
+void Multigrid::prolongateSolution(int coarseLevel) {
     if (coarseLevel <= 0 || coarseLevel >= levels)
         return;
     const int fineLevel = coarseLevel - 1;
-    Level& F = lv[fineLevel];
-    const Level& C = lv[coarseLevel];
+    Level& fine = gridLevels[fineLevel];
+    const Level& coarse = gridLevels[coarseLevel];
 
-    F.p.zero();
+    fine.pressure.zero();
 
-    float* const fineP = F.p.data();
-    const float* const coarseP = C.p.data();
+    float* const finePressure = fine.pressure.data();
+    const float* const coarsePressure = coarse.pressure.data();
 
-    #pragma omp parallel for schedule(static) if (F.ny >= kParallelRows)
-    for (int j = 0; j < F.ny; ++j) {
-        const Stencil1D sy = transferStencil(j, F.refY, C.ny);
-        for (int i = 0; i < F.nx; ++i) {
-            const int fid = j * F.nx + i;
-            const float norm = F.pWeight[fid];
+    #pragma omp parallel for schedule(static) if (fine.ny >= PARALLEL_ROWS_MIN)
+    for (int j = 0; j < fine.ny; ++j) {
+        const Stencil1D sy = transferStencil(j, fine.refineY, coarse.ny);
+        for (int i = 0; i < fine.nx; ++i) {
+            const int fineId = j * fine.nx + i;
+            const float norm = fine.prolongWeight[fineId];
             if (norm <= 0.0f)
                 continue;
-            const Stencil1D sx = transferStencil(i, F.refX, C.nx);
-            const int   cx[4] = {sx.c0, sx.c1, sx.c0, sx.c1};
-            const int   cy[4] = {sy.c0, sy.c0, sy.c1, sy.c1};
-            const float w[4]  = {sx.w0 * sy.w0, sx.w1 * sy.w0,
-                                 sx.w0 * sy.w1, sx.w1 * sy.w1};
+
+            const Stencil1D sx = transferStencil(i, fine.refineX, coarse.nx);
+
+            const int coarseX[4] = {sx.coarse0, sx.coarse1, sx.coarse0, sx.coarse1};
+            const int coarseY[4] = {sy.coarse0, sy.coarse0, sy.coarse1, sy.coarse1};
+            const float weights[4] = {
+                sx.weight0 * sy.weight0, sx.weight1 * sy.weight0,
+                sx.weight0 * sy.weight1, sx.weight1 * sy.weight1};
+
             float value = 0.0f;
             for (int k = 0; k < 4; ++k) {
-                if (w[k] == 0.0f)
+                if (weights[k] == 0.0f)
                     continue;
-                const int cid = cy[k] * C.nx + cx[k];
-                if (!C.solid[cid])
-                    value += w[k] * coarseP[cid];
+                const int coarseId = coarseY[k] * coarse.nx + coarseX[k];
+                if (!coarse.solid[coarseId])
+                    value += weights[k] * coarsePressure[coarseId];
             }
 
-            fineP[fid] = value / norm;
+            finePressure[fineId] = value / norm;
         }
     }
 }
-void Multigrid::vCycle(int level, float smootherOmega, float coarseOmega) {
+
+void Multigrid::vCycle(
+    int level,
+    float smootherOmega,
+    float coarseOmega)
+{
     if (level == levels - 1) {
-        smooth(level, coarseOmega, coarseSweeps(lv[level].nx, lv[level].ny));
+        smoothSOR(level, coarseOmega,
+                  coarseSweeps(gridLevels[level].nx, gridLevels[level].ny));
         return;
     }
-    smooth(level, smootherOmega, kPreSmooth);
+    smoothSOR(level, smootherOmega, PRE_SMOOTH_SWEEPS);
     computeResidual(level);
     restrictResidual(level);
     vCycle(level + 1, smootherOmega, coarseOmega);
-    prolongateAdd(level + 1);
-    smooth(level, smootherOmega, kPostSmooth);
+    prolongateCorrection(level + 1);
+    smoothSOR(level, smootherOmega, POST_SMOOTH_SWEEPS);
 }
+
 void Multigrid::fullMultigrid(float smootherOmega, float coarseOmega) {
     const int coarsest = levels - 1;
     if (coarsest == 0) {
-        smooth(0, coarseOmega, coarseSweeps(lv[0].nx, lv[0].ny));
+        smoothSOR(0, coarseOmega,
+                  coarseSweeps(gridLevels[0].nx, gridLevels[0].ny));
         return;
     }
     for (int level = 0; level < coarsest; ++level)
         restrictRHS(level);
-    lv[coarsest].p.zero();
-    smooth(coarsest, coarseOmega, coarseSweeps(lv[coarsest].nx, lv[coarsest].ny));
+
+    gridLevels[coarsest].pressure.zero();
+    smoothSOR(coarsest, coarseOmega,
+              coarseSweeps(gridLevels[coarsest].nx, gridLevels[coarsest].ny));
+
     for (int level = coarsest; level > 0; --level) {
-        prolongateSet(level);
+        prolongateSolution(level);
         vCycle(level - 1, smootherOmega, coarseOmega);
     }
 }
-float Multigrid::solve(std::vector<float>& pressure,
-                       const std::vector<float>& rhs,
-                       float smootherOmega,
-                       float coarseOmega,
-                       int   maxCycles,
-                       float tolerance)
+
+float Multigrid::solve(
+    std::vector<float>& pressure,
+    const std::vector<float>& rhs,
+    float smootherOmega,
+    float coarseOmega,
+    int maxCycles,
+    float tolerance)
 {
     if (!geometryReady) {
         std::fprintf(stderr, "Multigrid::solve called before setGeometry\n");
@@ -594,23 +668,30 @@ float Multigrid::solve(std::vector<float>& pressure,
 
 #ifdef USE_CUDA
     if (useCuda)
-        return solveCuda(pressure, rhs, smootherOmega, coarseOmega,
-                         maxCycles, tolerance);
+        return solveCuda(
+            pressure,
+            rhs,
+            smootherOmega,
+            coarseOmega,
+            maxCycles,
+            tolerance);
 #endif
 
-    Level& L0 = lv[0];
-    const int n = L0.n;
+    Level& finest = gridLevels[0];
+    const int cellCount = finest.cellCount;
 
-    float* const p0 = L0.p.data();
-    float* const rhs0 = L0.rhs.data();
+    float* const finestPressure = finest.pressure.data();
+    float* const finestRhs = finest.rhs.data();
+
+    // Solid cells have a zero diagonal, they take no part in the solve
     #pragma omp parallel for schedule(static)
-    for (int id = 0; id < n; ++id) {
-        const bool active = (L0.diag[id] > 0.0f);
-        p0[id]   = active ? pressure[id] : 0.0f;
-        rhs0[id] = active ? rhs[id] : 0.0f;
+    for (int id = 0; id < cellCount; ++id) {
+        const bool active = (finest.diag[id] > 0.0f);
+        finestPressure[id] = active ? pressure[id] : 0.0f;
+        finestRhs[id] = active ? rhs[id] : 0.0f;
     }
 
-    const float rhsNorm = vectorNorm(rhs0, n);
+    const float rhsNorm = computeVectorNorm(finestRhs, cellCount);
     const float scale = (rhsNorm > 1e-20f) ? rhsNorm : 1.0f;
 
     if (firstSolve) {
@@ -626,7 +707,7 @@ float Multigrid::solve(std::vector<float>& pressure,
 
     for (int cycle = 0; cycle < maxCycles; ++cycle) {
         computeResidual(0);
-        relative = residualNorm(0) / scale;
+        relative = computeResidualNorm(0) / scale;
         if (relative < tolerance)
             break;
         vCycle(0, smootherOmega, coarseOmega);
@@ -635,8 +716,9 @@ float Multigrid::solve(std::vector<float>& pressure,
 
     if (lastCycles > 0) {
         computeResidual(0);
-        relative = residualNorm(0) / scale;
+        relative = computeResidualNorm(0) / scale;
     }
-    std::copy(p0, p0 + n, pressure.begin());
+
+    std::copy(finestPressure, finestPressure + cellCount, pressure.begin());
     return relative;
 }

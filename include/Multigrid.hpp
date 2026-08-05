@@ -1,25 +1,29 @@
 #pragma once
-#include <algorithm>
-#include <cstdint>
 #include <vector>
-
+#include <cstdint>
+#include <algorithm>
 
 class Multigrid {
 public:
     Multigrid(int nx, int ny, float dx, float dy, int minCoarseSize = 8);
     ~Multigrid();
 
+    // The levels own raw device pointers, so copying is forbidden
     Multigrid(const Multigrid&) = delete;
     Multigrid& operator=(const Multigrid&) = delete;
 
+    // Builds the level hierarchy and the stencil coefficients for the geometry.
+    // Must be called before solve().
     void setGeometry(const std::vector<uint8_t>& solid);
 
-    float solve(std::vector<float>& pressure,
-                const std::vector<float>& rhs,
-                float smootherOmega,
-                float coarseOmega,
-                int   maxCycles,
-                float tolerance);
+    // Returns the relative residual ||r|| / ||rhs|| reached
+    float solve(
+        std::vector<float>& pressure,
+        const std::vector<float>& rhs,
+        float smootherOmega,
+        float coarseOmega,
+        int maxCycles,
+        float tolerance);
 
     int levelCount() const { return levels; }
     int cyclesUsed() const { return lastCycles; }
@@ -28,123 +32,163 @@ public:
     bool usingCuda() const { return useCuda; }
 
 private:
+    // Array with a halo on both sides, so the stencil can read one cell past
+    // the ends without an out-of-range check
     struct Field {
         std::vector<float> storage;
         float* base = nullptr;
-        int    halo = 0;
+        int halo = 0;
 
-        void init(int n, int h) {
-            halo = h;
-            storage.assign(static_cast<size_t>(n) + 2u * h + 16u, 0.0f);
-            base = storage.data() + h;
+        void init(int cellCount, int haloWidth) {
+            halo = haloWidth;
+            storage.assign(
+                static_cast<size_t>(cellCount) + 2u * haloWidth + 16u, 0.0f);
+            base = storage.data() + haloWidth;
         }
         void zero() {
             std::fill(storage.begin(), storage.end(), 0.0f);
         }
-        float*       data()       { return base; }
+        float* data() { return base; }
         const float* data() const { return base; }
     };
 
+    // One grid of the hierarchy
     struct Level {
         int nx = 0;
         int ny = 0;
-        int n  = 0;
+        int cellCount = 0;
         float dx = 0.0f;
         float dy = 0.0f;
 
-        int refX = 1;
-        int refY = 1;
+        // Coarsening ratio towards the next coarser level (1 = axis not coarsened)
+        int refineX = 1;
+        int refineY = 1;
 
-        Field p;
-        Field res;
+        Field pressure;
+        Field residual;
         std::vector<float> rhs;
 
-        std::vector<float> cW, cE, cS, cN;
+        // Five point stencil: West/East/South/North neighbours and the diagonal
+        std::vector<float> coefW, coefE, coefS, coefN;
         std::vector<float> diag;
         std::vector<float> invDiag;
 
         std::vector<uint8_t> solid;
 
-        std::vector<float> pWeight;
-
+        // Sum of the prolongation weights that land on fluid cells, used to
+        // normalise both the prolongation and the restriction
+        std::vector<float> prolongWeight;
     };
 
-    int   nx0;
-    int   ny0;
-    float dx0;
-    float dy0;
-    int   minCoarseSize;
-    int   levels = 0;
-    int   lastCycles = 0;
-    bool  geometryReady = false;
-    bool  firstSolve = true;
-    bool  useCuda = false;
+    int nx;
+    int ny;
 
-    std::vector<Level> lv;
+    float dx;
+    float dy;
+
+    int minCoarseSize;
+    int levels = 0;
+    int lastCycles = 0;
+    bool geometryReady = false;
+    bool firstSolve = true;
+    bool useCuda = false;
+
+    std::vector<Level> gridLevels;
 
     void buildHierarchy();
-    void buildCoefficients(Level& L);
 
-    void smooth(int level, float omega, int sweeps);
-    void computeResidual(int level);
-    float residualNorm(int level) const;
-    static float vectorNorm(const float* v, int n);
+    void buildCoefficients(Level& grid);
 
-    void buildTransferWeights(int fineLevel);
-    void restrict(int fineLevel, const float* fineSrc);
-    void restrictResidual(int fineLevel);   // res(fine) -> rhs(coarse)
-    void restrictRHS(int fineLevel);        // rhs(fine)  -> rhs(coarse), for FMG
-    void prolongateAdd(int coarseLevel);    // p(fine) += I * p(coarse)
-    void prolongateSet(int coarseLevel);    // p(fine)  = I * p(coarse)
-
-    void vCycle(int level, float smootherOmega, float coarseOmega);
     void fullMultigrid(float smootherOmega, float coarseOmega);
 
-#ifdef USE_CUDA
-public:
-    void setGeometryCuda();
-    float solveCuda(std::vector<float>& pressure,
-                    const std::vector<float>& rhs,
-                    float smootherOmega,
-                    float coarseOmega,
-                    int   maxCycles,
-                    float tolerance);
+    void vCycle(
+        int level,
+        float smootherOmega,
+        float coarseOmega);
 
-private:
-    struct DeviceLevel {
-        float* p = nullptr;
-        float* pAlloc = nullptr;
-        float* res = nullptr;
-        float* resAlloc = nullptr;
-        float* rhs = nullptr;
-        float* cW = nullptr;
-        float* cE = nullptr;
-        float* cS = nullptr;
-        float* cN = nullptr;
-        float* diag = nullptr;
-        float* invDiag = nullptr;
-        uint8_t* solid = nullptr;
-        float* pWeight = nullptr;
-        int halo = 0;
-    };
+    void smoothSOR(
+        int level,
+        float omega,
+        int sweeps);
 
-    std::vector<DeviceLevel> dev;
-    float* dReduce = nullptr;
-    float* hReduce = nullptr;
-    int    reduceBlocks = 0;
-    bool   deviceReady = false;
+    void computeResidual(int level);
+    float computeResidualNorm(int level) const;
+    static float computeVectorNorm(const float* values, int count);
 
-    void allocateDevice();
-    void freeDevice();
-    void smoothCuda(int level, float omega, int sweeps);
-    void computeResidualCuda(int level);
-    float residualNormCuda(int level);
-    float rhsNormCuda(int level);
-    void restrictResidualCuda(int fineLevel);
-    void restrictRHSCuda(int fineLevel);
-    void prolongateAddCuda(int coarseLevel);
-    void prolongateSetCuda(int coarseLevel);
-    void vCycleCuda(int level, float smootherOmega, float coarseOmega);
-    void fullMultigridCuda(float smootherOmega, float coarseOmega);
-#endif
+    void buildTransferWeights(int fineLevel);
+    void restrictField(int fineLevel, const float* fineSrc);
+    void restrictResidual(int fineLevel);   // res(fine) -> rhs(coarse)
+    void restrictRHS(int fineLevel);        // rhs(fine)  -> rhs(coarse), for FMG
+
+    void prolongateCorrection(int coarseLevel);  // p(fine) += I * p(coarse)
+    void prolongateSolution(int coarseLevel);    // p(fine)  = I * p(coarse)
+
+    #ifdef USE_CUDA
+    public:
+        void setGeometryCuda();
+
+        float solveCuda(
+            std::vector<float>& pressure,
+            const std::vector<float>& rhs,
+            float smootherOmega,
+            float coarseOmega,
+            int maxCycles,
+            float tolerance);
+
+    private:
+        // Device side mirror of Level
+        struct DeviceLevel {
+            float* pressure = nullptr;
+            float* pressureAlloc = nullptr;
+            float* residual = nullptr;
+            float* residualAlloc = nullptr;
+            float* rhs = nullptr;
+            float* coefW = nullptr;
+            float* coefE = nullptr;
+            float* coefS = nullptr;
+            float* coefN = nullptr;
+            float* diag = nullptr;
+            float* invDiag = nullptr;
+            uint8_t* solid = nullptr;
+            float* prolongWeight = nullptr;
+            int halo = 0;
+        };
+
+        std::vector<DeviceLevel> deviceLevels;
+
+        float* deviceReduceBuffer = nullptr;
+        float* hostReduceBuffer = nullptr;
+        int reduceBlocks = 0;
+        bool deviceReady = false;
+
+        void allocateDevice();
+
+        void freeDevice();
+
+        void smoothSORCuda(
+            int level,
+            float omega,
+            int sweeps);
+
+        void computeResidualCuda(int level);
+
+        float computeResidualNormCuda(int level);
+
+        float computeRhsNormCuda(int level);
+
+        void restrictResidualCuda(int fineLevel);
+
+        void restrictRHSCuda(int fineLevel);
+
+        void prolongateCorrectionCuda(int coarseLevel);
+
+        void prolongateSolutionCuda(int coarseLevel);
+
+        void vCycleCuda(
+            int level,
+            float smootherOmega,
+            float coarseOmega);
+
+        void fullMultigridCuda(float smootherOmega, float coarseOmega);
+    #endif
 };
