@@ -78,7 +78,7 @@ void Config::readFromConsole() {
     std::cin >> omega;
     std::cout << "Enter SOR relaxation parameter smootherOmega (for the coarsest multigrid level, 1.0-1.3 recommended): ";
     std::cin >> smootherOmega;
-    std::cout << "Enter multigrid V-cycles per step (2 by default, 3-5 MAX recommended): ";
+    std::cout << "Enter multigrid V-cycles per step (2 by default, 4-10 max recommended): ";
     std::cin >> mgIterations;
     std::cout << "Enter multigrid relative residual tolerance (1e-4 HEAVILY recommended): ";
     std::cin >> mgTolerance;
