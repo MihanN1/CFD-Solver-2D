@@ -1,55 +1,76 @@
 #pragma once
+
 #ifdef USE_CUDA
-#include <cstdint>
+
 #include <cuda_runtime.h>
+#include <cstdint>
+class Multigrid;
 
-__global__ void mgSmoothKernel(int nx, int ny,
-                               float* __restrict__ p,
-                               const float* __restrict__ rhs,
-                               const float* __restrict__ cW,
-                               const float* __restrict__ cE,
-                               const float* __restrict__ cS,
-                               const float* __restrict__ cN,
-                               const float* __restrict__ invDiag,
-                               float omega,
-                               int color);
+__global__ void smoothSORKernel(
+    int nx,
+    int ny,
+    float* pressure,
+    const float* rhs,
+    const float* coefW,
+    const float* coefE,
+    const float* coefS,
+    const float* coefN,
+    const float* invDiag,
+    float omega,
+    int color);
 
-__global__ void mgResidualKernel(int nx, int ny,
-                                 const float* __restrict__ p,
-                                 const float* __restrict__ rhs,
-                                 const float* __restrict__ cW,
-                                 const float* __restrict__ cE,
-                                 const float* __restrict__ cS,
-                                 const float* __restrict__ cN,
-                                 const float* __restrict__ diag,
-                                 float* __restrict__ res);
+__global__ void computeResidualKernel(
+    int nx,
+    int ny,
+    const float* pressure,
+    const float* rhs,
+    const float* coefW,
+    const float* coefE,
+    const float* coefS,
+    const float* coefN,
+    const float* diag,
+    float* residual);
 
-__global__ void mgRestrictKernel(int fineNx, int fineNy,
-                                 int coarseNx, int coarseNy,
-                                 int refX, int refY,
-                                 const float* __restrict__ fineSrc,
-                                 const float* __restrict__ finePWeight,
-                                 const uint8_t* __restrict__ coarseSolid,
-                                 const float* __restrict__ coarseDiag,
-                                 float* __restrict__ coarseRhs);
+// Restricts either the residual or the rhs, depending on what is passed in
+__global__ void restrictKernel(
+    int fineNx,
+    int fineNy,
+    int coarseNx,
+    int coarseNy,
+    int refineX,
+    int refineY,
+    const float* fineSrc,
+    const float* fineProlongWeight,
+    const uint8_t* coarseSolid,
+    const float* coarseDiag,
+    float* coarseRhs);
 
-__global__ void mgProlongateKernel(int fineNx, int fineNy,
-                                   int coarseNx, int coarseNy,
-                                   int refX, int refY,
-                                   float* __restrict__ fineP,
-                                   const float* __restrict__ coarseP,
-                                   const float* __restrict__ finePWeight,
-                                   const uint8_t* __restrict__ coarseSolid,
-                                   int addMode);
+// addMode = 1 adds a correction (prolongateCorrection),
+// addMode = 0 overwrites the fine solution (prolongateSolution)
+__global__ void prolongateKernel(
+    int fineNx,
+    int fineNy,
+    int coarseNx,
+    int coarseNy,
+    int refineX,
+    int refineY,
+    float* finePressure,
+    const float* coarsePressure,
+    const float* fineProlongWeight,
+    const uint8_t* coarseSolid,
+    int addMode);
 
-__global__ void mgMaskKernel(int n,
-                             float* __restrict__ p,
-                             float* __restrict__ rhs,
-                             const float* __restrict__ invDiag);
+// Zeroes pressure and rhs in the cells that take no part in the solve
+__global__ void zeroSolidPressureKernel(
+    int cellCount,
+    float* pressure,
+    float* rhs,
+    const float* invDiag);
 
-// Partial sums of squares, one value per block.
-__global__ void mgNormKernel(int n,
-                             const float* __restrict__ v,
-                             float* __restrict__ partial);
+// Partial sums of squares, one value per block
+__global__ void computeNormKernel(
+    int cellCount,
+    const float* values,
+    float* partial);
 
 #endif

@@ -1,14 +1,15 @@
 #include "Config.hpp"
 #include "Mesh.hpp"
 #include "Solver.hpp"
-#include <chrono>
 #include <iostream>
 #include <string>
-#include <vector>
+#include <chrono>
 
-namespace {
+//for now no other libs are needed, so i deleted everything else from main.cpp, but we will need to add more later. for now these are used and none more
+//to perform tests faster.
 
-void printUsage(const char* exe) {
+// Printed for --help and whenever an argument is malformed
+static void printUsage(const char* exe) {
     std::cout <<
         "Usage:\n"
         "  " << exe << "                       interactive configuration\n"
@@ -24,13 +25,13 @@ void printUsage(const char* exe) {
                        "totalTime=2 saveInterval=25\n";
 }
 
-}
-
 int main(int argc, char** argv) {
     std::cout << "=== CFD-Solver-2D ===\n\n";
 
     Config cfg;
+
     if (argc > 1) {
+        // Non-interactive: every argument is a key=value pair
         for (int a = 1; a < argc; ++a) {
             const std::string arg = argv[a];
             if (arg == "-h" || arg == "--help") {
@@ -53,17 +54,21 @@ int main(int argc, char** argv) {
     } else {
         cfg.readFromConsole();
 
+        // Confirmation loop
         while (!cfg.confirm()) {
             // loop will repeat until user presses Enter without text
         }
 
+        // Final confirmation output
         std::cout << "\n--- Final Configuration ---\n";
         cfg.print();
 
+        // Instruction about geometry import
         std::cout << "\nNote: This version supports STL and OBJ models.\n";
         std::cout << "      The mask is generated from a central plane section of the model.\n";
         std::cout << "      Slice angles, in-plane rotation, and optional mirroring are applied.\n";
         std::cout << "      Enter 'none' to use the circle verification geometry.\n";
+
         std::cout << "      Total simulation time: " << cfg.totalTime << " s.\n";
     }
 
@@ -72,16 +77,18 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Create mesh (circle)
     Mesh mesh(cfg);
     mesh.printInfo();
 
     Solver solver(cfg, mesh);
-    const auto t0 = std::chrono::steady_clock::now();
+
+    const auto startTime = std::chrono::steady_clock::now();
     solver.run();
-    const auto t1 = std::chrono::steady_clock::now();
+    const auto endTime = std::chrono::steady_clock::now();
 
     const double seconds =
-        std::chrono::duration<double>(t1 - t0).count();
+        std::chrono::duration<double>(endTime - startTime).count();
     std::cout << "Wall clock: " << seconds << " s\n";
 
     if (argc <= 1) {

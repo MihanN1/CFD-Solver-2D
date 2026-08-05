@@ -4,28 +4,28 @@
 
 struct Config {
     // Domain
-    float Lx = 1.0f, Ly = 1.0f;
+    float Lx = 1.0, Ly = 1.0;
     int nx = 50, ny = 50;
 
     // Flow
-    float U0 = 1.0f;
-    float nu = 0.01f;
+    float U0 = 1.0;
+    float nu = 0.01;
     double Re = 0.0;   // 0 means compute from U0, D, nu later
 
     // Density
-    float ro = 1.225f;   // kg/m^3
+    float ro = 1.225;   // kg/m^3
 
     // Time
-    float CFL = 0.5f;
+    float CFL = 0.5;
     double totalTime = 10.0;
+    int dtUpdateInterval = 5;   // steps between dt recomputations
+    float dtSafety = 0.9f;      // covers the velocity growth in between
 
-    int dtUpdateInterval = 5;
-    float dtSafety = 0.9f;
-
-    // SOR / smoother relaxation used on the coarsest multigrid level, where the
-    // smoother acts as a solver. Inside a V-cycle the relaxation is clamped to
-    // smootherOmega because strong over-relaxation is a *bad* high-frequency
-    // smoother even though it is a good stand-alone solver.
+    // SOR
+    // omega is used on the coarsest multigrid level, where the smoother acts as
+    // a solver. Inside a V-cycle the relaxation is clamped to smootherOmega,
+    // because strong over-relaxation is a bad high-frequency smoother even
+    // though it is a good stand-alone solver.
     float omega = 1.85f;
     float smootherOmega = 1.15f;
 
@@ -40,15 +40,15 @@ struct Config {
     bool useCuda = true;
 
     // Output
-    int saveInterval = 20;               // write a VTK file every N steps
-    std::string outputDir = "output";    // directory for solution_*.vtk
+    int saveInterval = 20;              // write a VTK file every N steps
+    std::string outputDir = "output";   // directory for solution_*.vtk
 
     // Geometry
     std::string geometryFile = "none";
-    float sliceAngleX = 0.0f;
-    float sliceAngleZ = 0.0f;
-    float sliceRotation = 0.0f;
-    bool invertSection = false;
+    float sliceAngleX = 0.0;   // degrees
+    float sliceAngleZ = 0.0;   // degrees
+    float sliceRotation = 0.0;   // degrees
+    bool invertSection = false; // doesn't allow to invert the model by default
 
     // Methods
     void readFromConsole();
