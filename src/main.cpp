@@ -5,9 +5,6 @@
 #include <string>
 #include <chrono>
 
-//for now no other libs are needed, so i deleted everything else from main.cpp, but we will need to add more later. for now these are used and none more
-//to perform tests faster.
-
 // Printed for --help and whenever an argument is malformed
 static void printUsage(const char* exe) {
     std::cout <<
@@ -15,7 +12,7 @@ static void printUsage(const char* exe) {
         "  " << exe << "                       interactive configuration\n"
         "  " << exe << " key=value [key=value] non-interactive run\n"
         "\n"
-        "Keys: Lx Ly nx ny U0 nu Re CFL totalTime dtUpdateInterval dtSafety\n"
+        "Keys: Lx Ly nx ny U0 nu CFL totalTime dtUpdateInterval dtSafety\n"
         "      omega smootherOmega mgIterations mgTolerance mgMinCoarseSize\n"
         "      saveInterval outputDir geometryFile sliceAngleX sliceAngleZ\n"
         "      sliceRotation invertSection ro\n"
