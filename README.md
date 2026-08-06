@@ -24,6 +24,7 @@ Possible future extensions include:
 - Compressible flow solver
 - Cavity flow
 - Moving objects (NO idea how to do it for now, but ill figure that out)
+- Moving WALLS
 - Flow start coordinates and width of the flow
 
 ---
