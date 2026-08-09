@@ -1,247 +1,273 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(CFD_Solver_2D
+project(CFDMaskUIOptimized
     VERSION 0.1.0
-    LANGUAGES CXX
-)
-
-include(GNUInstallDirs)
-include(FetchContent)
-include(CheckLanguage)
-
-option(CFD_ENABLE_OPENMP "Enable OpenMP parallel loops when available" ON)
-option(CFD_ENABLE_AVX2 "Compile CPU C++ sources with AVX2 support" ON)
-option(CFD_ENABLE_CUDA "Enable the CUDA multigrid backend" ON)
-option(CFD_ENABLE_CUDA_EXPLICIT "Treat a missing CUDA toolkit as a hard error" OFF)
-
-set(
-    CFD_RUNTIME_OUTPUT_DIRECTORY
-    "${CMAKE_BINARY_DIR}/bin"
-    CACHE PATH "Root directory for the generated cfd_app executable"
-)
-
-set(CFD_CUDA_ARCHITECTURES "75" CACHE STRING
-    "CUDA architectures. 75 targets the NVIDIA GTX 1660 Ti/Turing GPU."
+    LANGUAGES C CXX
 )
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
-if(CFD_ENABLE_CUDA)
-    if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-        set(CMAKE_CUDA_ARCHITECTURES "${CFD_CUDA_ARCHITECTURES}" CACHE STRING
-            "CUDA architectures used by all CUDA targets."
-        )
-    endif()
+set(
+    CFD_ROOT_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/../CFD-Solver-2D"
+    CACHE PATH "Path to the GUI dependency bundle root"
+)
+get_filename_component(CFD_ROOT_DIR "${CFD_ROOT_DIR}" ABSOLUTE)
 
-    check_language(CUDA)
-    if(NOT CMAKE_CUDA_COMPILER)
-        # CFD_ENABLE_CUDA defaults to ON, so a machine without a toolkit used to
-        # fail to configure at all. Fall back to the CPU backend instead and say
-        # so; only an explicit request is treated as an error.
-        if(CFD_ENABLE_CUDA_EXPLICIT)
-            message(FATAL_ERROR
-                "CUDA compiler detection failed while CFD_ENABLE_CUDA=ON.\n"
-                "CUDA_PATH='$ENV{CUDA_PATH}'"
-            )
-        endif()
-        message(WARNING
-            "No CUDA compiler found; building the CPU backend only. "
-            "Install the CUDA Toolkit (with the Visual Studio Integration "
-            "component on Windows) and reconfigure in a fresh build directory "
-            "to enable the GPU path. CUDA_PATH='$ENV{CUDA_PATH}'"
-        )
-        set(CFD_ENABLE_CUDA OFF)
-    endif()
-endif()
-
-if(CFD_ENABLE_CUDA)
-    enable_language(CUDA)
-    find_package(CUDAToolkit REQUIRED)
-
-    set(CMAKE_CUDA_STANDARD 17)
-    set(CMAKE_CUDA_STANDARD_REQUIRED ON)
-    set(CMAKE_CUDA_EXTENSIONS OFF)
-
-    if(MSVC AND MSVC_VERSION GREATER_EQUAL 1950 AND CUDAToolkit_VERSION VERSION_LESS 13.2)
-        message(FATAL_ERROR
-            "Visual Studio 2026 requires CUDA Toolkit 13.2 or newer. "
-            "Detected CUDA ${CUDAToolkit_VERSION}."
-        )
-    endif()
-endif()
-
-set(CFD_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include")
-set(CFD_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib")
-set(CFD_MODELS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/models")
-set(CFD_STL_READER_DIR "${CFD_LIB_DIR}/stl_reader")
-set(CFD_TINYOBJ_HEADER "${CFD_INCLUDE_DIR}/tiny_obj_loader.h")
-
-# Keep generated files outside the source tree.
-set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${CFD_RUNTIME_OUTPUT_DIRECTORY}")
-set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/lib")
-
-foreach(config Debug Release RelWithDebInfo MinSizeRel)
-    string(TOUPPER "${config}" config_upper)
-    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY_${config_upper} "${CFD_RUNTIME_OUTPUT_DIRECTORY}/${config}")
-    set(CMAKE_LIBRARY_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/lib/${config}")
-    set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY_${config_upper} "${CMAKE_BINARY_DIR}/lib/${config}")
-endforeach()
-
-# tinyobjloader is a header-only dependency in this project.
-if(NOT EXISTS "${CFD_TINYOBJ_HEADER}")
+if(NOT EXISTS "${CFD_ROOT_DIR}/lib/sfml/CMakeLists.txt"
+   OR NOT EXISTS "${CFD_ROOT_DIR}/include/tiny_obj_loader.h"
+   OR NOT EXISTS
+       "${CFD_ROOT_DIR}/lib/stl_reader/include/stl_reader/stl_reader.h")
     message(FATAL_ERROR
-        "Missing dependency: ${CFD_TINYOBJ_HEADER}\n"
-        "Restore include/tiny_obj_loader.h before configuring the project."
+        "GUI dependency bundle not found at ${CFD_ROOT_DIR}. "
+        "Set -DCFD_ROOT_DIR=<path> to the dependency root."
+    )
+endif()
+set(
+    CFD_SOLVER_EXE
+    ""
+    CACHE FILEPATH "Path to the separately built friend solver executable"
+)
+if(CFD_SOLVER_EXE STREQUAL "")
+    foreach(CFD_SOLVER_CANDIDATE
+        "${CFD_ROOT_DIR}_build/bin/Release/cfd_app.exe"
+        "${CFD_ROOT_DIR}/build/bin/cfd_app.exe"
+        "${CFD_ROOT_DIR}/build/bin/Release/cfd_app.exe"
+        "${CFD_ROOT_DIR}/out/manual/cfd_app.exe"
+    )
+        if(EXISTS "${CFD_SOLVER_CANDIDATE}")
+            set(CFD_SOLVER_EXE "${CFD_SOLVER_CANDIDATE}")
+            break()
+        endif()
+    endforeach()
+endif()
+get_filename_component(CFD_SOLVER_EXE "${CFD_SOLVER_EXE}" ABSOLUTE)
+if(NOT EXISTS "${CFD_SOLVER_EXE}")
+    message(FATAL_ERROR
+        "Friend solver executable not found at ${CFD_SOLVER_EXE}. "
+        "Build the current friend source separately or set "
+        "-DCFD_SOLVER_EXE=<absolute-path>."
+    )
+endif()
+file(GLOB_RECURSE
+    CFD_SOLVER_CODE_INPUTS
+    CONFIGURE_DEPENDS
+    "${CFD_ROOT_DIR}/include/*.h"
+    "${CFD_ROOT_DIR}/include/*.hpp"
+    "${CFD_ROOT_DIR}/include/*.cuh"
+    "${CFD_ROOT_DIR}/lib/stl_reader/include/*.h"
+    "${CFD_ROOT_DIR}/lib/stl_reader/include/*.hpp"
+    "${CFD_ROOT_DIR}/src/*.cpp"
+    "${CFD_ROOT_DIR}/src/*.cu"
+    "${CFD_ROOT_DIR}/src/*.cuh"
+)
+set(CFD_SOLVER_BUILD_INPUTS
+    "${CFD_ROOT_DIR}/CMakeLists.txt"
+    ${CFD_SOLVER_CODE_INPUTS}
+)
+file(TIMESTAMP
+    "${CFD_SOLVER_EXE}"
+    CFD_SOLVER_EXE_TIMESTAMP
+    "%s"
+    UTC
+)
+set(CFD_STALE_SOLVER_INPUTS)
+foreach(CFD_SOLVER_BUILD_INPUT IN LISTS CFD_SOLVER_BUILD_INPUTS)
+    file(TIMESTAMP
+        "${CFD_SOLVER_BUILD_INPUT}"
+        CFD_SOLVER_INPUT_TIMESTAMP
+        "%s"
+        UTC
+    )
+    if(CFD_SOLVER_INPUT_TIMESTAMP GREATER CFD_SOLVER_EXE_TIMESTAMP)
+        list(APPEND
+            CFD_STALE_SOLVER_INPUTS
+            "${CFD_SOLVER_BUILD_INPUT}"
+        )
+    endif()
+endforeach()
+if(CFD_STALE_SOLVER_INPUTS)
+    list(JOIN CFD_STALE_SOLVER_INPUTS "\n  " CFD_STALE_SOLVER_INPUT_LIST)
+    message(FATAL_ERROR
+        "Friend solver executable is stale. These build inputs are newer "
+        "than ${CFD_SOLVER_EXE}:\n  ${CFD_STALE_SOLVER_INPUT_LIST}\n"
+        "Build the current friend source separately, then configure with "
+        "-DCFD_SOLVER_EXE=<absolute-path>."
+    )
+endif()
+file(TO_CMAKE_PATH "${CFD_SOLVER_EXE}" CFD_SOLVER_EXE_PATH)
+file(TO_CMAKE_PATH
+    "${CFD_ROOT_DIR}/lib/stl_reader/tests/data"
+    CFD_TEST_DATA_DIR
+)
+set(CFD_CAR_MODEL "")
+foreach(CFD_CAR_MODEL_CANDIDATE
+    "${CFD_ROOT_DIR}/models/Car.obj"
+    "${CFD_ROOT_DIR}/../CAR.obj"
+)
+    if(EXISTS "${CFD_CAR_MODEL_CANDIDATE}")
+        file(TO_CMAKE_PATH
+            "${CFD_CAR_MODEL_CANDIDATE}"
+            CFD_CAR_MODEL
+        )
+        break()
+    endif()
+endforeach()
+if(CFD_CAR_MODEL STREQUAL "")
+    message(FATAL_ERROR
+        "Car OBJ test fixture was not found beside or inside the solver root."
     )
 endif()
 
-add_library(cfd_tinyobj INTERFACE)
-target_include_directories(cfd_tinyobj INTERFACE "${CFD_INCLUDE_DIR}")
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(SFML_BUILD_WINDOW ON CACHE BOOL "" FORCE)
+set(SFML_BUILD_GRAPHICS ON CACHE BOOL "" FORCE)
+set(SFML_BUILD_AUDIO OFF CACHE BOOL "" FORCE)
+set(SFML_BUILD_NETWORK OFF CACHE BOOL "" FORCE)
+set(SFML_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(SFML_BUILD_DOC OFF CACHE BOOL "" FORCE)
+set(SFML_BUILD_TEST_SUITE OFF CACHE BOOL "" FORCE)
+set(SFML_CONFIGURE_EXTRAS OFF CACHE BOOL "" FORCE)
+set(SFML_INSTALL_PKGCONFIG_FILES OFF CACHE BOOL "" FORCE)
 
-# stl_reader is header-only. Prefer the copy included in the project.
-if(EXISTS "${CFD_STL_READER_DIR}/include/stl_reader/stl_reader.h")
-    add_library(cfd_stl_reader INTERFACE)
-    target_include_directories(cfd_stl_reader INTERFACE "${CFD_STL_READER_DIR}/include")
-else()
-    FetchContent_Declare(
-        stl_reader
-        URL https://github.com/sreiter/stl_reader/archive/refs/tags/v2.0.zip
-        DOWNLOAD_EXTRACT_TIMESTAMP TRUE
-    )
-    FetchContent_MakeAvailable(stl_reader)
-    add_library(cfd_stl_reader ALIAS stl_reader)
-endif()
-
-set(CFD_SOURCES
-    src/main.cpp
-    src/tiny_obj_loader_impl.cpp
-    src/Config.cpp
-    src/Mesh.cpp
-    src/Solver.cpp
-    src/Multigrid.cpp
+add_subdirectory(
+    "${CFD_ROOT_DIR}/lib/sfml"
+    "${CMAKE_CURRENT_BINARY_DIR}/sfml-build"
 )
 
-if(CFD_ENABLE_CUDA)
-    list(APPEND CFD_SOURCES src/MultigridCuda.cu)
+if(MSVC)
+    add_compile_options(/utf-8)
 endif()
 
-add_executable(cfd_app ${CFD_SOURCES})
+add_library(mask_ui_core STATIC
+    src/ExplorerTarget.cpp
+    src/FriendRun.cpp
+    src/GeometryProcessor.cpp
+    src/NumericInput.cpp
+    src/SectionAdapter.cpp
+    src/tiny_obj_loader_impl.cpp
+    src/VtkFrame.cpp
+    src/VelocityOverlay.cpp
+)
+
+target_include_directories(mask_ui_core
+    PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CFD_ROOT_DIR}/include"
+        "${CFD_ROOT_DIR}/lib/stl_reader/include"
+)
+
+target_compile_features(mask_ui_core PUBLIC cxx_std_17)
+
+add_executable(cfd_mask_ui_optimized
+    src/main.cpp
+    src/Application.cpp
+)
+
+target_link_libraries(cfd_mask_ui_optimized
+    PRIVATE
+        mask_ui_core
+        SFML::Graphics
+)
+
+target_compile_definitions(cfd_mask_ui_optimized
+    PRIVATE
+        CFD_SOLVER_EXE="${CFD_SOLVER_EXE_PATH}"
+        NOMINMAX
+        WIN32_LEAN_AND_MEAN
+)
+
+target_compile_features(cfd_mask_ui_optimized PRIVATE cxx_std_17)
+
+if(WIN32)
+    set_target_properties(cfd_mask_ui_optimized PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_libraries(
+        cfd_mask_ui_optimized
+        PRIVATE
+            SFML::Main
+            Comdlg32
+            Shell32
+            Comctl32
+    )
+endif()
 
 add_custom_command(
-    TARGET cfd_app
+    TARGET cfd_mask_ui_optimized
     POST_BUILD
-    COMMAND "${CMAKE_COMMAND}" -E echo
-        "Built executable: $<TARGET_FILE:cfd_app>"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different
+        "${CFD_SOLVER_EXE}"
+        "$<TARGET_FILE_DIR:cfd_mask_ui_optimized>/cfd_app.exe"
+    COMMENT "Bundling the current friend solver beside the GUI"
     VERBATIM
 )
 
-set_target_properties(cfd_app PROPERTIES
-    CXX_STANDARD 17
-    CXX_STANDARD_REQUIRED ON
-    CXX_EXTENSIONS OFF
-)
-
-if(CFD_ENABLE_CUDA)
-    set_target_properties(cfd_app PROPERTIES
-        CUDA_STANDARD 17
-        CUDA_STANDARD_REQUIRED ON
-        CUDA_EXTENSIONS OFF
-        CUDA_ARCHITECTURES "${CFD_CUDA_ARCHITECTURES}"
-    )
-endif()
-
-target_include_directories(cfd_app PRIVATE "${CFD_INCLUDE_DIR}")
-
-target_link_libraries(cfd_app
-    PRIVATE
-        cfd_tinyobj
-        cfd_stl_reader
-)
-
-if(CFD_ENABLE_CUDA)
-    target_link_libraries(cfd_app PRIVATE CUDA::cudart)
-endif()
-
-target_compile_definitions(cfd_app
-    PRIVATE
-        CFD_MODELS_DIR="${CFD_MODELS_DIR}"
-        NOMINMAX
-)
-
-if(CFD_ENABLE_CUDA)
-    target_compile_definitions(cfd_app PRIVATE USE_CUDA=1)
-endif()
-
-# CUDA 13.x CCCL requires MSVC's standards-conforming preprocessor.
-# For .cu files, nvcc must forward the option to its MSVC host compiler.
-if(MSVC)
-    target_compile_options(cfd_app
-        PRIVATE
-            $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
-    )
-    if(CFD_ENABLE_CUDA)
-        target_compile_options(cfd_app
-            PRIVATE
-                $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
-        )
-    endif()
-endif()
-
-if(CFD_ENABLE_OPENMP)
-    find_package(OpenMP QUIET COMPONENTS CXX)
-    if(OpenMP_CXX_FOUND)
-        target_link_libraries(cfd_app PRIVATE OpenMP::OpenMP_CXX)
-        message(STATUS "OpenMP: enabled")
-    else()
-        message(STATUS "OpenMP: not found; building without OpenMP")
-    endif()
-endif()
-
-if(CFD_ENABLE_AVX2)
-    if(MSVC)
-        target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
-    elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
-    else()
-        message(WARNING "AVX2 flags are not configured for ${CMAKE_CXX_COMPILER_ID}")
-    endif()
-endif()
-
 include(CTest)
 
+if(BUILD_TESTING)
+    add_executable(ExplorerTargetTests
+        tests/ExplorerTargetTests.cpp
+    )
+    target_link_libraries(ExplorerTargetTests PRIVATE mask_ui_core)
+    add_test(NAME ExplorerTargetTests COMMAND ExplorerTargetTests)
 
-install(
-    TARGETS cfd_app
-    RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
-)
+    add_executable(GeometryProcessorTests
+        tests/GeometryProcessorTests.cpp
+    )
+    target_link_libraries(GeometryProcessorTests PRIVATE mask_ui_core)
+    target_compile_definitions(GeometryProcessorTests
+        PRIVATE
+            CFD_TEST_DATA_DIR="${CFD_TEST_DATA_DIR}"
+            CFD_CAR_MODEL="${CFD_CAR_MODEL}"
+    )
+    add_test(NAME GeometryProcessorTests COMMAND GeometryProcessorTests)
 
-install(
-    DIRECTORY "${CFD_INCLUDE_DIR}/"
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-)
+    add_executable(VtkFrameTests
+        tests/VtkFrameTests.cpp
+    )
+    target_link_libraries(VtkFrameTests PRIVATE mask_ui_core)
+    add_test(NAME VtkFrameTests COMMAND VtkFrameTests)
 
-if(EXISTS "${CFD_STL_READER_DIR}/include/")
-    install(
-        DIRECTORY "${CFD_STL_READER_DIR}/include/"
-        DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+    add_executable(FriendRunTests
+        tests/FriendRunTests.cpp
+    )
+    target_link_libraries(FriendRunTests PRIVATE mask_ui_core)
+    add_test(NAME FriendRunTests COMMAND FriendRunTests)
+
+    add_executable(NumericInputTests
+        tests/NumericInputTests.cpp
+    )
+    target_link_libraries(NumericInputTests PRIVATE mask_ui_core)
+    add_test(NAME NumericInputTests COMMAND NumericInputTests)
+
+    add_executable(VelocityOverlayTests
+        tests/VelocityOverlayTests.cpp
+    )
+    target_link_libraries(VelocityOverlayTests PRIVATE mask_ui_core)
+    add_test(NAME VelocityOverlayTests COMMAND VelocityOverlayTests)
+
+    add_executable(SectionAdapterTests
+        tests/SectionAdapterTests.cpp
+    )
+    target_link_libraries(SectionAdapterTests PRIVATE mask_ui_core)
+    add_test(NAME SectionAdapterTests COMMAND SectionAdapterTests)
+
+    add_executable(ExactNinetyIntegrationTests
+        tests/ExactNinetyIntegrationTests.cpp
+    )
+    target_link_libraries(
+        ExactNinetyIntegrationTests
+        PRIVATE
+            mask_ui_core
+    )
+    target_compile_definitions(ExactNinetyIntegrationTests
+        PRIVATE
+            CFD_CAR_MODEL="${CFD_CAR_MODEL}"
+            CFD_SOLVER_EXE="${CFD_SOLVER_EXE_PATH}"
+    )
+    add_test(
+        NAME ExactNinetyIntegrationTests
+        COMMAND ExactNinetyIntegrationTests
     )
 endif()
-
-install(
-    DIRECTORY "${CFD_MODELS_DIR}/"
-    DESTINATION models
-)
-
-message(STATUS "CFD Solver configuration")
-message(STATUS "  CUDA:         ${CFD_ENABLE_CUDA}")
-if(CFD_ENABLE_CUDA)
-    message(STATUS "  CUDA toolkit: ${CUDAToolkit_VERSION}")
-    message(STATUS "  CUDA arch:    ${CFD_CUDA_ARCHITECTURES}")
-endif()
-message(STATUS "  OpenMP:       ${CFD_ENABLE_OPENMP}")
-message(STATUS "  AVX2:         ${CFD_ENABLE_AVX2}")
-message(STATUS "  Build dir:    ${CMAKE_BINARY_DIR}")

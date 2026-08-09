@@ -1,96 +1,84 @@
-#include "Config.hpp"
-#include "Mesh.hpp"
-#include "Solver.hpp"
-#include <iostream>
-#include <string>
-#include <chrono>
+#include "Application.hpp"
 
-// Printed for --help and whenever an argument is malformed
-static void printUsage(const char* exe) {
-    std::cout <<
-        "Usage:\n"
-        "  " << exe << "                       interactive configuration\n"
-        "  " << exe << " key=value [key=value] non-interactive run\n"
-        "\n"
-        "Keys: Lx Ly nx ny U0 nu CFL totalTime dtUpdateInterval dtSafety\n"
-        "      omega smootherOmega mgIterations mgTolerance mgMinCoarseSize\n"
-        "      saveInterval outputDir geometryFile sliceAngleX sliceAngleZ\n"
-        "      sliceRotation invertSection ro\n"
-        "\n"
-        "Example:\n"
-        "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "
-                       "totalTime=2 saveInterval=25\n";
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
+#include <filesystem>
+#include <iostream>
+#include <utility>
+#include <vector>
+
+namespace {
+
+std::vector<std::filesystem::path> systemArguments(
+    int argc,
+    char* argv[]) {
+#ifdef _WIN32
+    int wideArgumentCount = 0;
+    LPWSTR* wideArguments =
+        CommandLineToArgvW(GetCommandLineW(), &wideArgumentCount);
+    if (wideArguments != nullptr) {
+        std::vector<std::filesystem::path> arguments;
+        arguments.reserve(static_cast<std::size_t>(wideArgumentCount));
+        for (int index = 0; index < wideArgumentCount; ++index) {
+            arguments.emplace_back(wideArguments[index]);
+        }
+        LocalFree(wideArguments);
+        return arguments;
+    }
+#endif
+    std::vector<std::filesystem::path> arguments;
+    arguments.reserve(static_cast<std::size_t>(argc));
+    for (int index = 0; index < argc; ++index) {
+        arguments.emplace_back(argv[index]);
+    }
+    return arguments;
 }
 
-int main(int argc, char** argv) {
-    std::cout << "=== CFD-Solver-2D ===\n\n";
-
-    Config cfg;
-
-    if (argc > 1) {
-        // Non-interactive: every argument is a key=value pair
-        for (int a = 1; a < argc; ++a) {
-            const std::string arg = argv[a];
-            if (arg == "-h" || arg == "--help") {
-                printUsage(argv[0]);
-                return 0;
-            }
-            const size_t eq = arg.find('=');
-            if (eq == std::string::npos || eq == 0) {
-                std::cerr << "Malformed argument: " << arg << "\n";
-                printUsage(argv[0]);
-                return 1;
-            }
-            if (!cfg.setParam(arg.substr(0, eq), arg.substr(eq + 1))) {
-                std::cerr << "Unknown parameter: " << arg.substr(0, eq) << "\n";
-                printUsage(argv[0]);
-                return 1;
-            }
-        }
-        cfg.print();
-    } else {
-        cfg.readFromConsole();
-
-        // Confirmation loop
-        while (!cfg.confirm()) {
-            // loop will repeat until user presses Enter without text
-        }
-
-        // Final confirmation output
-        std::cout << "\n--- Final Configuration ---\n";
-        cfg.print();
-
-        // Instruction about geometry import
-        std::cout << "\nNote: This version supports STL and OBJ models.\n";
-        std::cout << "      The mask is generated from a central plane section of the model.\n";
-        std::cout << "      Slice angles, in-plane rotation, and optional mirroring are applied.\n";
-        std::cout << "      Enter 'none' to use the circle verification geometry.\n";
-
-        std::cout << "      Total simulation time: " << cfg.totalTime << " s.\n";
+std::filesystem::path executablePath(
+    const std::vector<std::filesystem::path>& arguments) {
+#ifdef _WIN32
+    std::wstring buffer(32768, L'\0');
+    const DWORD length = GetModuleFileNameW(
+        nullptr,
+        buffer.data(),
+        static_cast<DWORD>(buffer.size()));
+    if (length > 0 &&
+        static_cast<std::size_t>(length) < buffer.size()) {
+        buffer.resize(length);
+        return std::filesystem::path(buffer);
     }
+#endif
+    std::error_code error;
+    std::filesystem::path executable =
+        arguments.empty()
+            ? std::filesystem::path{}
+            : std::filesystem::absolute(arguments.front(), error);
+    if (error && !arguments.empty()) {
+        executable = arguments.front();
+    }
+    return executable;
+}
 
-    if (cfg.nx < 8 || cfg.ny < 8) {
-        std::cerr << "nx and ny must be at least 8.\n";
+} // namespace
+
+int main(int argc, char* argv[]) {
+    const std::vector<std::filesystem::path> arguments =
+        systemArguments(argc, argv);
+    if (arguments.size() > 2) {
+        std::cerr
+            << "Usage: cfd_mask_ui_optimized [model.stl|model.obj|result-directory]\n";
         return 1;
     }
 
-    // Create mesh (circle)
-    Mesh mesh(cfg);
-    mesh.printInfo();
-
-    Solver solver(cfg, mesh);
-
-    const auto startTime = std::chrono::steady_clock::now();
-    solver.run();
-    const auto endTime = std::chrono::steady_clock::now();
-
-    const double seconds =
-        std::chrono::duration<double>(endTime - startTime).count();
-    std::cout << "Wall clock: " << seconds << " s\n";
-
-    if (argc <= 1) {
-        std::cout << "\nSimulation complete. Press Enter to exit...";
-        std::cin.get();
-    }
-    return 0;
+    const std::filesystem::path initialModel =
+        arguments.size() == 2
+            ? arguments[1]
+            : std::filesystem::path{};
+    maskui::Application application(
+        executablePath(arguments),
+        initialModel);
+    return application.run();
 }
