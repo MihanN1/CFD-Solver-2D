@@ -23,8 +23,13 @@ Possible future extensions include:
 - Turbulence models
 - Compressible flow solver
 - Cavity flow
+- Add optional gravity for fluids
 - Moving objects (NO idea how to do it for now, but ill figure that out)
+- Moving WALLS
 - Flow start coordinates and width of the flow
+- Multiphase(multiple liquids/gases)
+- MAY add several other solvers(deforming solver + thermal solver) and merge all of em into one
+- MAY make a full on website where u would download it all, but only if the previous point is done
 
 ---
 
@@ -177,6 +182,13 @@ The implementation prioritizes computational performance without changing the nu
 CFD-Solver-2D/
 ├── .vscode/
 ├── output/
+├── logo/
+│   ├── toxic-mark-32.png
+│   ├── toxic-mark-64.png
+│   ├── toxic-mark-128.png
+│   ├── toxic-mark-256.png
+│   ├── toxic-mark-512.png
+│   ├── toxic-mark-1024.png
 ├── src/
 │   ├── main.cpp
 │   ├── Config.cpp
