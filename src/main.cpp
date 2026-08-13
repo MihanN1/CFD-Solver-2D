@@ -101,6 +101,18 @@ int main(int argc, char** argv) {
                 cfg.totalTime = restart.currentTime + cfg.addTime;
                 std::cout << "addTime " << cfg.addTime
                           << " s -> totalTime " << cfg.totalTime << " s\n";
+            } else if (cfg.addTime < 0.0) {
+                // Ignoring this quietly was worse than being wrong out loud.
+                // addTime walks forward from where the frame stopped, it does
+                // not subtract from totalTime, and time does not run backwards.
+                std::cout << "\n!!! addTime " << cfg.addTime
+                          << " s is negative and does nothing. It counts "
+                             "forward from the\n    time this frame stopped at ("
+                          << restart.currentTime
+                          << " s). To stop earlier, set totalTime itself,\n"
+                             "    and it still has to be past "
+                          << restart.currentTime << " s.\n";
+                cfg.addTime = 0.0;
             }
         };
         applyAddTime();
