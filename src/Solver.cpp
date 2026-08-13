@@ -54,6 +54,11 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
     invDx2 = invDx * invDx;
     invDy2 = invDy * invDy;
 
+    outputPath =
+        cfg.outputDir.empty() ?
+        std::filesystem::path(".") :
+        narrowToPath(cfg.outputDir);
+
     // Same story for the text that goes into every frame: the configuration
     // is fixed by now, so it is serialized once instead of on each save
     configHeader = "formatVersion=1\n" + cfg.serialize();
@@ -820,7 +825,7 @@ void Solver::run() {
     }
 
     std::error_code ec;
-    std::filesystem::create_directories(cfg.outputDir, ec);
+    std::filesystem::create_directories(outputPath, ec);
 
     if (hasRestartState && restartDt > 0.0f && !needsProjection) {
         dt = restartDt;
@@ -833,7 +838,7 @@ void Solver::run() {
             projectRestartState();
         std::cout << "Continuing from t = " << currentTime
                   << " s, step " << step
-                  << ". Frames go to " << framePrefix << "_N.vtk\n";
+                  << ". Frames go to " << framePrefix << "_<step>.vtk\n";
     } else {
         saveVTK(step);
     }
@@ -888,26 +893,22 @@ void Solver::run() {
               << step << " steps.\n";
 }
 
-void Solver::saveVTK(int stepNum) {
+void Solver::saveVTK(int stepNum) const {
     const int nx = cfg.nx, ny = cfg.ny;
     constexpr size_t BUFFER_WORDS = 4096;
     std::array<uint32_t, BUFFER_WORDS> buffer;
     size_t bufferPos = 0;
 
-    // A fresh run keeps solution_<step>.vtk. A continuation numbers its own
-    // frames off the file it was seeded from, so nothing is ever overwritten:
-    // solution_400.vtk -> solution_400_1.vtk, solution_400_2.vtk, ...
-    const int fileNumber = hasRestartState ? ++restartSaveIndex : stepNum;
-
-    std::filesystem::path filename =
-        cfg.outputDir.empty() ?
-        std::filesystem::path(".") :
-        std::filesystem::path(cfg.outputDir);
-    filename /= framePrefix + "_" + std::to_string(fileNumber) + ".vtk";
+    // A fresh run keeps solution_<step>.vtk. A continuation hangs the very
+    // same step number off the frame it was seeded from, so the name says
+    // where it came from and how far it got:
+    // solution_200.vtk -> solution_200_300.vtk, solution_200_400.vtk, ...
+    std::filesystem::path filename = outputPath;
+    filename /= framePrefix + "_" + std::to_string(stepNum) + ".vtk";
 
     std::ofstream fout(filename, std::ios::binary);
     if (!fout){
-        std::cerr << "Cannot open " << filename.string() << " for writing.\n";
+        std::cerr << "Cannot open " << pathToConsole(filename) << " for writing.\n";
         return;
     }
     fout
@@ -995,14 +996,6 @@ void Solver::saveVTK(int stepNum) {
     flushFloatBuffer();
     fout << "\n";
 
-    // RestartData
-    // Everything above is cell centred, and the velocity in it is an average
-    // of two faces, which cannot be inverted. So the raw staggered fields go
-    // out as well, together with the configuration that produced them. FIELD
-    // is the only legacy VTK block that allows per-array tuple counts, which
-    // is exactly what (nx+1)*ny and nx*(ny+1) need. It sits last so every
-    // reader gets the physical arrays before it reaches anything new.
-    // Its done so we can continue a sim without losing info, cause we use MAC and shi.
     std::ostringstream state;
     state << std::setprecision(std::numeric_limits<double>::max_digits10)
           << "restartTime=" << currentTime << "\n"
@@ -1042,7 +1035,6 @@ void Solver::saveVTK(int stepNum) {
     flushFloatBuffer();
     fout << "\n";
 
-    if (fileNumber % (std::max(1, cfg.saveInterval) * 10) == 0 ||
-        fileNumber == 0 || fileNumber == 1)
-        std::cout << "Saved " << filename.string() << std::endl;
+    if (stepNum % (std::max(1, cfg.saveInterval) * 10) == 0 || stepNum == 0)
+        std::cout << "Saved " << pathToConsole(filename) << std::endl;
 }

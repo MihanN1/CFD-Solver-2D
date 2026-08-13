@@ -5,6 +5,7 @@
 #include "Restart.hpp"
 #include <vector>
 #include <string>
+#include <filesystem>
 #include <cstdint>
 
 class Solver {
@@ -12,10 +13,6 @@ public:
     Solver(const Config& cfg, const Mesh& mesh);
     void run();
 
-    // Seeds the run with a state read from a VTK frame instead of the inlet
-    // profile. Must be called before run(). framePrefix is the stem of that
-    // frame, so a continuation writes <framePrefix>_1.vtk, _2.vtk and so on
-    // and never collides with the series it came from.
     bool setInitialState(RestartData&& state, const std::string& framePrefix);
 
 private:
@@ -38,15 +35,13 @@ private:
     float dt = 0.0f;  // current time step
     float lastResidual = 0.0f;  // relative residual of the last pressure solve
 
-    // Continuation state. framePrefix is "solution" for a fresh run, so the
-    // file names stay solution_<step>.vtk exactly as before.
     bool hasRestartState = false;
     bool needsProjection = false;   // u/v were rebuilt from cell averages
     float restartDt = 0.0f;         // dt that was in flight when the frame was written
-    std::string framePrefix = "solution";
-    int restartSaveIndex = 0;       // frame counter of the continued run
-    // The configuration cannot change mid-run, so its serialized form is
-    // built once instead of on every save
+    std::string framePrefix = "solution";   // <framePrefix>_<step>.vtk
+    // Resolved once in the constructor: outputDir is a narrow string, and
+    // turning it into a path is not free of encoding traps on Windows
+    std::filesystem::path outputPath;
     std::string configHeader;
 
     std::vector<uint8_t> uFluidMask;
@@ -71,7 +66,7 @@ private:
     float maxDivergence() const;
     float maxVelocity() const;
 
-    void saveVTK(int stepNum);
+    void saveVTK(int stepNum) const;
 
     // Inline index helpers (for readability)
     inline int idxP(int i, int j) const { return j * cfg.nx + i; }

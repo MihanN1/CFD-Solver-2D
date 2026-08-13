@@ -297,18 +297,21 @@ overrides what the frame remembers:
 ```
 
 **What a continuation writes.** Frames are named after the file they were
-started from, numbered inside the new run:
+started from, and carry their own step number, so the name says both where the
+run came from and how far it got. Continuing from step 200 with
+`saveInterval = 100`:
 
 ```text
-output/solution_400.vtk          <- what you continued from
-output/solution_400_1.vtk        <- first frame of the continuation
-output/solution_400_2.vtk
-...
+output/solution_200.vtk          <- what you continued from
+output/solution_200_300.vtk      <- step 300
+output/solution_200_400.vtk
+output/solution_200_522.vtk      <- final step
 ```
 
-so nothing is ever overwritten and it stays obvious which run produced what.
-Continue from `solution_400_2.vtk` and the next series is `solution_400_2_1.vtk`
-and so on. A fresh run is unchanged: `solution_<step>.vtk`.
+Nothing is ever overwritten and it stays obvious which run produced what.
+Continue from `solution_200_400.vtk` and the next series is
+`solution_200_400_450.vtk` and so on. A fresh run is unchanged:
+`solution_<step>.vtk`.
 
 **What can and cannot change.**
 

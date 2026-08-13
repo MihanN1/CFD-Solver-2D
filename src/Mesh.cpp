@@ -1,4 +1,5 @@
 #include "Mesh.hpp"
+#include "Restart.hpp"   // narrowToPath / pathToConsole, the Windows path encoding fix
 #include <stl_reader/stl_reader.h>
 #include <tiny_obj_loader.h>
 #include <algorithm>
@@ -33,7 +34,9 @@ bool pathExists(const std::filesystem::path& path) {
 }
 
 std::filesystem::path resolveGeometryPath(const std::string& filename) {
-    const std::filesystem::path requested(filename);
+    // Straight from the console or from argv, so it is not necessarily in the
+    // code page a path is built from. Same trap as restartFile.
+    const std::filesystem::path requested = narrowToPath(filename);
     if (pathExists(requested)) {
         return requested;
     }
@@ -120,15 +123,28 @@ bool Mesh::loadGeometry(const std::string& filename) {
     } else if (extension == ".obj") {
         geometryType = GeometryType::OBJ;
     } else {
-        std::cerr << "Unsupported geometry format: " << path.string() << "\n";
+        std::cerr << "Unsupported geometry format: "
+                  << pathToConsole(path) << "\n";
         return false;
     }
 
-    switch (geometryType) {
-        case GeometryType::STL:
-            return loadSTL(path.string());
-        case GeometryType::OBJ:
-            return loadOBJ(path.string());
+    // Both loaders take a narrow file name and open it themselves, so the
+    // path has to be handed over in the encoding the C runtime reads back,
+    // which is exactly what path::string() produces. It throws on a path the
+    // runtime cannot express at all, hence the catch.
+    try {
+        switch (geometryType) {
+            case GeometryType::STL:
+                return loadSTL(path.string());
+            case GeometryType::OBJ:
+                return loadOBJ(path.string());
+        }
+    } catch (const std::exception& exception) {
+        std::cerr << "Cannot hand this path to the model loader: "
+                  << pathToConsole(path) << "\n"
+                  << "  (" << exception.what()
+                  << ") Put the model somewhere with a simpler path.\n";
+        return false;
     }
 
     return false;

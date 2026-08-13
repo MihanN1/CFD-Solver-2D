@@ -5,13 +5,6 @@
 #include <string>
 #include <vector>
 
-// State pulled back out of a frame written by Solver::saveVTK().
-// The cell-centred VECTORS block in a VTK frame is an average of two face
-// values, and averaging is not invertible, so it cannot seed a staggered run
-// on its own. saveVTK therefore appends a FIELD block holding the raw face
-// arrays plus the configuration text; that block is what this reads.
-// Frames written before the block existed still load, but only approximately
-// (exactState stays false and the solver projects the field once).
 struct RestartData {
     Config cfg;                    // configuration the source run was started with
     double currentTime = 0.0;
@@ -30,9 +23,14 @@ struct RestartData {
     bool hasConfigText = false;    // false for frames of an older format
 };
 
-// Takes a .vtk path or a directory. For a directory the most recently written
-// .vtk in it wins, which is what "continue where it stopped" means in practice
-// and works for both naming schemes. Returns an empty path on failure.
+// Windows hands out narrow strings in one code page and reads them back in
+// another: the console speaks 866, argv speaks 1251, and filesystem::path
+// assumes 1251 for both. Anything with Cyrillic in it therefore quietly stops
+// existing. These two are the only sane way in and out.
+// Elsewhere they are a plain path <-> string conversion.
+std::filesystem::path narrowToPath(const std::string& text);
+std::string pathToConsole(const std::filesystem::path& path);
+
 std::filesystem::path resolveRestartPath(const std::string& path,
                                          std::string& error);
 

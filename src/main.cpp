@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
             std::cerr << "Cannot continue: " << error << "\n";
             return 1;
         }
-        std::cout << "\nContinuing from " << restartPath.string() << "\n";
+        std::cout << "\nContinuing from " << pathToConsole(restartPath) << "\n";
 
         const std::string requested = cfg.restartFile;
         cfg = restart.cfg;
@@ -96,9 +96,6 @@ int main(int argc, char** argv) {
         cfg.restartFile = requested;
         for (const auto& override : overrides)
             cfg.setParam(override.first, override.second);
-        // "run N more seconds from wherever this frame stopped". Applied
-        // before every check, because it can also be typed into the
-        // confirmation screen.
         const auto applyAddTime = [&]() {
             if (cfg.addTime > 0.0) {
                 cfg.totalTime = restart.currentTime + cfg.addTime;

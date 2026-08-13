@@ -8,6 +8,16 @@
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#ifdef _WIN32
+// windows.h defines min and max as macros, which eats std::min in readSolid
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#endif
 
 namespace {
 // Same 16 KB stack buffer as the writer, for the same reason: no heap
@@ -98,6 +108,71 @@ std::string lowerExtension(const std::filesystem::path& path) {
 }
 }
 
+std::filesystem::path narrowToPath(const std::string& text) {
+#ifdef _WIN32
+    // Drag and drop, tab completion and copy-paste all like to leave a
+    // separator behind, which turns the path into "a folder whose file name
+    // is empty" and makes it stop existing
+    std::string trimmed = text;
+    while (trimmed.size() > 1 &&
+           (trimmed.back() == '\\' || trimmed.back() == '/') &&
+           trimmed[trimmed.size() - 2] != ':') {
+        trimmed.pop_back();
+    }
+
+    std::filesystem::path fallback;
+    for (UINT cp : {GetConsoleCP(), static_cast<UINT>(CP_ACP),
+                    static_cast<UINT>(CP_UTF8)}) {
+        if (cp == 0)
+            continue;
+        const int n = MultiByteToWideChar(cp, 0, trimmed.c_str(),
+                                          static_cast<int>(trimmed.size()),
+                                          nullptr, 0);
+        if (n <= 0)
+            continue;
+        std::wstring wide(static_cast<size_t>(n), L'\0');
+        MultiByteToWideChar(cp, 0, trimmed.c_str(),
+                            static_cast<int>(trimmed.size()), &wide[0], n);
+        const std::filesystem::path candidate(wide);
+        std::error_code ec;
+        if (std::filesystem::exists(candidate, ec) && !ec)
+            return candidate;
+        // Nothing exists under any of them (a directory about to be created,
+        // say), so the console page wins: that is where the string came from
+        if (fallback.empty())
+            fallback = candidate;
+    }
+    return fallback.empty() ? std::filesystem::path(trimmed) : fallback;
+#else
+    return std::filesystem::path(text);
+#endif
+}
+
+std::string pathToConsole(const std::filesystem::path& path) {
+#ifdef _WIN32
+    // path::string() would re-encode to the ANSI page and print mojibake in a
+    // console running 866, and it throws outright on anything ANSI cannot
+    // represent. Going out through the console page does neither.
+    const std::wstring wide = path.wstring();
+    if (wide.empty())
+        return {};
+    UINT cp = GetConsoleOutputCP();
+    if (cp == 0)
+        cp = CP_ACP;
+    const int n = WideCharToMultiByte(cp, 0, wide.c_str(),
+                                      static_cast<int>(wide.size()),
+                                      nullptr, 0, nullptr, nullptr);
+    if (n <= 0)
+        return {};
+    std::string narrow(static_cast<size_t>(n), '\0');
+    WideCharToMultiByte(cp, 0, wide.c_str(), static_cast<int>(wide.size()),
+                        &narrow[0], n, nullptr, nullptr);
+    return narrow;
+#else
+    return path.string();
+#endif
+}
+
 std::filesystem::path resolveRestartPath(const std::string& path,
                                          std::string& error) {
     error.clear();
@@ -107,7 +182,7 @@ std::filesystem::path resolveRestartPath(const std::string& path,
         return {};
     }
 
-    const std::filesystem::path given(path);
+    const std::filesystem::path given = narrowToPath(path);
     std::error_code ec;
 
     if (std::filesystem::is_directory(given, ec)) {
@@ -132,14 +207,14 @@ std::filesystem::path resolveRestartPath(const std::string& path,
         }
 
         if (newest.empty()) {
-            error = "No .vtk frames in " + given.string();
+            error = "No .vtk frames in " + pathToConsole(given);
             return {};
         }
         return newest;
     }
 
     if (!std::filesystem::is_regular_file(given, ec)) {
-        error = "Not a file or a folder: " + given.string();
+        error = "Not a file or a folder: " + pathToConsole(given);
         return {};
     }
     return given;
@@ -152,16 +227,16 @@ bool loadRestart(const std::filesystem::path& file,
 
     std::ifstream fin(file, std::ios::binary);
     if (!fin)
-        return fail(error, "Cannot open " + file.string());
+        return fail(error, "Cannot open " + pathToConsole(file));
 
     std::string version, title, encoding;
     if (!std::getline(fin, version) ||
         !std::getline(fin, title) ||
         !std::getline(fin, encoding))
-        return fail(error, "Not a legacy VTK file: " + file.string());
+        return fail(error, "Not a legacy VTK file: " + pathToConsole(file));
 
     if (trimCR(version).rfind("# vtk DataFile Version", 0) != 0)
-        return fail(error, "Unsupported VTK header in " + file.string());
+        return fail(error, "Unsupported VTK header in " + pathToConsole(file));
     if (trimCR(encoding) != "BINARY")
         return fail(error, "Only BINARY legacy VTK frames can be continued");
 
@@ -183,7 +258,7 @@ bool loadRestart(const std::filesystem::path& file,
             out.nx = pointNx - 1;
             out.ny = pointNy - 1;
             if (pointNz != 1 || out.nx < 1 || out.ny < 1)
-                return fail(error, "Bad DIMENSIONS in " + file.string());
+                return fail(error, "Bad DIMENSIONS in " + pathToConsole(file));
         } else if (token == "ORIGIN") {
             double ox, oy, oz;
             fin >> ox >> oy >> oz;
