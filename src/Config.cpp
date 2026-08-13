@@ -96,8 +96,11 @@ void Config::readFromConsole() {
 void Config::print() const {
     std::cout << "\n--- Current Configuration ---\n";
     std::cout << "  mode             = " << (restart ? "CONTINUE" : "NEW") << "\n";
-    if (restart)
+    if (restart) {
         std::cout << "  restartFile      = " << restartFile << "\n";
+        std::cout << "  addTime          = " << addTime
+                  << " s (0 = totalTime is used as is)\n";
+    }
     std::cout << "  Lx               = " << Lx << " m\n";
     std::cout << "  Ly               = " << Ly << " m\n";
     std::cout << "  nx               = " << nx << "\n";
@@ -194,6 +197,7 @@ bool Config::setParam(const std::string& key, const std::string& value) {
     else if (lower == "usecuda")          useCuda = (std::atoi(value.c_str()) != 0);
     else if (lower == "restart")          restart = (std::atoi(value.c_str()) != 0);
     else if (lower == "restartfile")      restartFile = value;
+    else if (lower == "addtime")          addTime = std::strtod(value.c_str(), nullptr);
     else return false;
 
     return true;
@@ -281,6 +285,9 @@ bool Config::modifyParam(const std::string& name) {
         std::cout << "New restartFile: ";
         restartFile = readGeometryPath();
         usedFormattedInput = false;
+    } else if (lower == "addtime") {
+        std::cout << "New addTime (seconds to add on top of the frame): ";
+        std::cin >> addTime;
     } else {
         std::cout << "Unknown parameter: " << name << "\n";
         return false;

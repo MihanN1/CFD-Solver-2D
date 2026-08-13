@@ -9,6 +9,9 @@ struct Config {
     // which case the newest frame in it is taken.
     bool restart = false;
     std::string restartFile = "";
+    // Overrides totalTime when it is greater than zero. Never stored
+    // in a frame, see serialize(), otherwise will work really weird ahaha
+    double addTime = 0.0;
 
     // Domain
     float Lx = 1.0, Ly = 1.0;

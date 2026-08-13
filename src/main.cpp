@@ -5,6 +5,7 @@
 #include <cmath>
 #include <filesystem>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -19,7 +20,7 @@ static void printUsage(const char* exe) {
         "Keys: Lx Ly nx ny U0 nu CFL totalTime dtUpdateInterval dtSafety\n"
         "      omega smootherOmega mgIterations mgTolerance mgMinCoarseSize\n"
         "      saveInterval outputDir geometryFile sliceAngleX sliceAngleZ\n"
-        "      sliceRotation invertSection ro useCuda restart restartFile\n"
+        "      sliceRotation invertSection ro useCuda restart restartFile addTime\n"
         "\n"
         "Example:\n"
         "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "
@@ -27,7 +28,7 @@ static void printUsage(const char* exe) {
         "\n"
         "Continuing a run (restartFile takes a frame or the folder holding\n"
         "them; anything given after it overrides the stored configuration):\n"
-        "  " << exe << " restart=1 restartFile=output totalTime=30 "
+        "  " << exe << " restart=1 restartFile=output totalTime=30 addTime=10\n"
                        "saveInterval=5\n";
 }
 
@@ -95,7 +96,42 @@ int main(int argc, char** argv) {
         cfg.restartFile = requested;
         for (const auto& override : overrides)
             cfg.setParam(override.first, override.second);
+        // "run N more seconds from wherever this frame stopped". Applied
+        // before every check, because it can also be typed into the
+        // confirmation screen.
+        const auto applyAddTime = [&]() {
+            if (cfg.addTime > 0.0) {
+                cfg.totalTime = restart.currentTime + cfg.addTime;
+                std::cout << "addTime " << cfg.addTime
+                          << " s -> totalTime " << cfg.totalTime << " s\n";
+            }
+        };
+        applyAddTime();
+        const auto validate = [&](std::string& reason) {
+            std::ostringstream why;
+            if (cfg.nx != restart.nx || cfg.ny != restart.ny) {
+                why << "nx and ny cannot change on a continuation ("
+                    << restart.nx << "x" << restart.ny << " in the frame).";
+            } else if (std::fabs(cfg.Lx - restart.cfg.Lx) >
+                           1e-6f * restart.cfg.Lx ||
+                       std::fabs(cfg.Ly - restart.cfg.Ly) >
+                           1e-6f * restart.cfg.Ly) {
+                why << "Lx and Ly cannot change on a continuation ("
+                    << restart.cfg.Lx << " x " << restart.cfg.Ly
+                    << " in the frame).";
+            } else if (cfg.totalTime <= restart.currentTime) {
+                why << "totalTime (" << cfg.totalTime
+                    << " s) is not past the time this frame already reached ("
+                    << restart.currentTime << " s), there would be nothing to "
+                       "compute. Type 'totalTime' and give it more.";
+            } else {
+                return true;
+            }
+            reason = why.str();
+            return false;
+        };
 
+        std::string reason;
         if (argc <= 1) {
             std::cout << "\nThe configuration below came out of that frame. "
                          "Change whatever you want\n"
@@ -103,30 +139,20 @@ int main(int argc, char** argv) {
                          "then press Enter to start.\n"
                          "The grid and the geometry are fixed by the frame "
                          "and cannot be changed.\n";
-            while (!cfg.confirm()) {
+
+            for (;;) {
+                while (!cfg.confirm()) {
+                }
+                applyAddTime();
+                if (validate(reason))
+                    break;
+                std::cout << "\n!!! " << reason << "\n";
             }
+        } else if (!validate(reason)) {
+            std::cerr << reason << "\n";
+            return 1;
         }
         cfg.print();
-
-        if (cfg.nx != restart.nx || cfg.ny != restart.ny) {
-            std::cerr << "nx and ny cannot change on a continuation ("
-                      << restart.nx << "x" << restart.ny << " in the frame).\n";
-            return 1;
-        }
-        if (std::fabs(cfg.Lx - restart.cfg.Lx) > 1e-6f * restart.cfg.Lx ||
-            std::fabs(cfg.Ly - restart.cfg.Ly) > 1e-6f * restart.cfg.Ly) {
-            std::cerr << "Lx and Ly cannot change on a continuation ("
-                      << restart.cfg.Lx << " x " << restart.cfg.Ly
-                      << " in the frame).\n";
-            return 1;
-        }
-        if (cfg.totalTime <= restart.currentTime) {
-            std::cerr << "totalTime (" << cfg.totalTime
-                      << " s) must be greater than the time already reached ("
-                      << restart.currentTime << " s), otherwise there is "
-                         "nothing left to compute.\n";
-            return 1;
-        }
 
         std::cout << "\nNote: the solid mask is taken from the frame, so the "
                      "geometry parameters\n"
