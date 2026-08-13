@@ -2,20 +2,21 @@
 #include "Config.hpp"
 #include "Mesh.hpp"
 #include "Multigrid.hpp"
+#include "Restart.hpp"
 #include <vector>
 #include <string>
 #include <cstdint>
 
-// Projection (fractional step) method on a staggered MAC grid:
-//   u*      = u^n + dt * (-(u.grad)u + nu*lap u)   predictor
-//   lap p   = div u* / dt                          pressure Poisson
-//   u^{n+1} = u* - dt * grad p                     corrector
-
 class Solver {
 public:
     Solver(const Config& cfg, const Mesh& mesh);
-    // Main loop: run simulation until totalTime
     void run();
+
+    // Seeds the run with a state read from a VTK frame instead of the inlet
+    // profile. Must be called before run(). framePrefix is the stem of that
+    // frame, so a continuation writes <framePrefix>_1.vtk, _2.vtk and so on
+    // and never collides with the series it came from.
+    bool setInitialState(RestartData&& state, const std::string& framePrefix);
 
 private:
     const Config& cfg;
@@ -37,22 +38,27 @@ private:
     float dt = 0.0f;  // current time step
     float lastResidual = 0.0f;  // relative residual of the last pressure solve
 
-    // Faces the corrector owns: interior faces with fluid on both sides.
-    // Every other face keeps its prescribed value (0 on walls/solids, U0 at the
-    // inlet), so the hot loops can multiply by the mask instead of branching.
+    // Continuation state. framePrefix is "solution" for a fresh run, so the
+    // file names stay solution_<step>.vtk exactly as before.
+    bool hasRestartState = false;
+    bool needsProjection = false;   // u/v were rebuilt from cell averages
+    float restartDt = 0.0f;         // dt that was in flight when the frame was written
+    std::string framePrefix = "solution";
+    int restartSaveIndex = 0;       // frame counter of the continued run
+    // The configuration cannot change mid-run, so its serialized form is
+    // built once instead of on every save
+    std::string configHeader;
+
     std::vector<uint8_t> uFluidMask;
     std::vector<uint8_t> vFluidMask;
-    // Same masks as float, so SIMD code can multiply by them directly
     std::vector<float> uFluidMaskF;
     std::vector<float> vFluidMaskF;
     std::vector<uint8_t> solidMask;
 
-    // Cached mesh spacing (mesh.dx/dy never change during a run)
     float dx = 0.0f, dy = 0.0f;
     float invDx = 0.0f, invDy = 0.0f;
     float invDx2 = 0.0f, invDy2 = 0.0f;
 
-    // Helper methods
     void initFields();
     void computeDt();
     void predictor();
@@ -60,13 +66,12 @@ private:
     void corrector();
     void applyBC();
     void buildFaceMasks(); // build masks for u and v to identify fluid faces
+    void projectRestartState(); // one projection after an approximate restart
 
-    // Diagnostics printed in the progress line
     float maxDivergence() const;
     float maxVelocity() const;
 
-    // VTK output
-    void saveVTK(int stepNum) const;
+    void saveVTK(int stepNum);
 
     // Inline index helpers (for readability)
     inline int idxP(int i, int j) const { return j * cfg.nx + i; }

@@ -18,7 +18,6 @@ The project is designed to simulate external incompressible flow around arbitrar
 
 Possible future extensions include:
 
-- Uploading last .vtk of some past simulations to continue on with it.
 - Adaptive mesh refinement (AMR)
 - Turbulence models
 - Compressible flow solver
@@ -85,6 +84,8 @@ Possible future extensions include:
 - ✅ Velocity vectors
 - ✅ Solid mask
 - ✅ ParaView compatible
+- ✅ Full run state embedded in every frame
+- ✅ Continue a stopped simulation from any frame
 
 ---
 
@@ -267,6 +268,128 @@ Configure:
 - Visualization options
 
 After confirmation the simulation starts immediately.
+
+# Continuing a run
+
+The first thing the configuration asks is whether this is a new simulation or a
+continuation of an old one:
+
+```text
+Start a new simulation or continue an old one?
+  0 = new simulation
+  1 = continue from a saved .vtk
+>
+```
+
+Answer `1` and give it either a frame or the folder the frames live in — a
+folder means "take the newest one". Every parameter of the old run comes back
+out of that file, and the usual confirmation screen opens on top of it, so
+anything can still be changed before the run starts. The typical reason to
+continue is precisely that: the flow looked interesting somewhere in the middle
+and you want denser output from there on, so you continue with a smaller
+`saveInterval` and a longer `totalTime`.
+
+The same thing from the command line, where anything after `restartFile`
+overrides what the frame remembers:
+
+```powershell
+.\install\bin\cfd_app.exe restart=1 restartFile=output totalTime=30 saveInterval=5
+```
+
+**What a continuation writes.** Frames are named after the file they were
+started from, numbered inside the new run:
+
+```text
+output/solution_400.vtk          <- what you continued from
+output/solution_400_1.vtk        <- first frame of the continuation
+output/solution_400_2.vtk
+...
+```
+
+so nothing is ever overwritten and it stays obvious which run produced what.
+Continue from `solution_400_2.vtk` and the next series is `solution_400_2_1.vtk`
+and so on. A fresh run is unchanged: `solution_<step>.vtk`.
+
+**What can and cannot change.**
+
+| Parameter | On a continuation |
+|---|---|
+| `nx`, `ny`, `Lx`, `Ly` | fixed by the frame, changing them is refused |
+| geometry (`geometryFile`, slice angles, `invertSection`) | ignored — the solid mask comes out of the frame, the model file is not needed any more |
+| `totalTime` | must be larger than the time already reached, otherwise there is nothing to compute |
+| `saveInterval`, `outputDir`, `CFL`, `dtSafety`, `dtUpdateInterval`, `omega`, `smootherOmega`, `mgIterations`, `mgTolerance`, `mgMinCoarseSize`, `useCuda` | free |
+| `U0`, `nu` | allowed, but it is a discontinuity in the physics, not a continuation of the same problem |
+| `ro` | free — it only scales the pressure on the way out to Pa, the frame stores the kinematic field |
+
+Continuing from the last frame of a run and letting it go further produces
+**bit-identical** results to never having stopped at all.
+Piece 3 — deep-dive section, matches the tone of ## 9. Output
+markdown
+## 10. Continuing a run
+
+Every frame is also a checkpoint. That is less obvious than it sounds, because
+what a frame shows and what the solver needs are not the same thing.
+
+**Why the visible arrays are not enough.** The solver lives on a staggered
+grid: `u` sits on `(nx+1)×ny` vertical faces, `v` on `nx×(ny+1)` horizontal
+ones. A VTK frame is cell centred, so what gets written is the average of the
+two faces around each cell — `0.5*(u[i] + u[i+1])`. Averaging throws away
+exactly one degree of freedom per row, and no amount of cleverness gets it
+back. Reading a frame and interpolating back onto the faces gives a field that
+looks right and is not divergence free, which the projection then has to repair
+with a visible kick.
+
+So every frame carries a `FIELD RestartData` block at the very end, after the
+arrays ParaView cares about:
+
+```text
+FIELD RestartData 4
+configText 1 <n> char     the whole configuration as key=value lines,
+                          plus restartTime, restartStep and restartDt
+uFace 1 (nx+1)*ny float   the raw face velocities, not averages
+vFace 1 nx*(ny+1) float
+pRaw  1 nx*ny     float   kinematic, unlike SCALARS pressure which is in Pa
+```
+
+`FIELD` is the only legacy VTK block that lets each array declare its own tuple
+count, which is the whole reason it is used — `(nx+1)*ny` simply does not fit
+in a `CELL_DATA` section. It is written through the same 16 KB byte-swap buffer
+as everything else, straight from the live arrays, so there are no temporaries
+and no copies. It costs about 60% more file size, and it is the difference
+between a frame you can look at and a frame you can resume.
+
+The configuration is serialized in the same `key=value` form the command line
+already speaks, so reading it back is `setParam()` on each line, and unknown
+keys are skipped instead of rejected — old frames stay loadable and new frames
+do not break old builds.
+
+**The two things that make it exact.** Restoring `u`, `v`, `p` and the clock is
+not quite enough, and both leftovers are easy to miss:
+
+*The time step in flight.* `dt` is only recomputed every `dtUpdateInterval`
+steps. A continuation that recomputes it immediately would shift that cadence
+by a fraction of a step and drift away from the original trajectory, so the
+frame stores the `dt` that was live when it was written and the solver takes it
+back instead of recomputing.
+
+*The nested iteration.* The first pressure solve of a run does one full
+multigrid pass to build a field out of nothing. A continuation is not starting
+from nothing — it has the converged pressure of the step it stopped at, which is
+a better guess than that pass produces — so the pass is skipped. Leave it in and
+the field gets nudged, and the two trajectories separate within a few steps.
+
+With both pinned, continuing from frame *k* and running on gives byte-for-byte
+the same frames as the uninterrupted run would have.
+
+**Frames written before all this existed** still load. The face velocities get
+rebuilt from the cell averages, the state is projected once before the first
+step, and it says so loudly. It is a restart, not *the* restart: use it to
+rescue an old run, not to claim continuity.
+
+**The mask comes from the frame**, not from the model. `Mesh` takes an optional
+preset mask and skips loading, slicing and rasterizing entirely when it gets
+one. The STL does not have to still exist, and no rasterizer change can ever
+move a boundary in the middle of a run.
 
 ---
 

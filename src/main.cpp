@@ -1,11 +1,15 @@
 #include "Config.hpp"
 #include "Mesh.hpp"
+#include "Restart.hpp"
 #include "Solver.hpp"
+#include <cmath>
+#include <filesystem>
 #include <iostream>
 #include <string>
+#include <utility>
+#include <vector>
 #include <chrono>
 
-// Printed for --help and whenever an argument is malformed
 static void printUsage(const char* exe) {
     std::cout <<
         "Usage:\n"
@@ -15,20 +19,25 @@ static void printUsage(const char* exe) {
         "Keys: Lx Ly nx ny U0 nu CFL totalTime dtUpdateInterval dtSafety\n"
         "      omega smootherOmega mgIterations mgTolerance mgMinCoarseSize\n"
         "      saveInterval outputDir geometryFile sliceAngleX sliceAngleZ\n"
-        "      sliceRotation invertSection ro\n"
+        "      sliceRotation invertSection ro useCuda restart restartFile\n"
         "\n"
         "Example:\n"
         "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "
-                       "totalTime=2 saveInterval=25\n";
+                       "totalTime=2 saveInterval=25\n"
+        "\n"
+        "Continuing a run (restartFile takes a frame or the folder holding\n"
+        "them; anything given after it overrides the stored configuration):\n"
+        "  " << exe << " restart=1 restartFile=output totalTime=30 "
+                       "saveInterval=5\n";
 }
 
 int main(int argc, char** argv) {
     std::cout << "=== CFD-Solver-2D ===\n\n";
 
     Config cfg;
+    std::vector<std::pair<std::string, std::string>> overrides;
 
     if (argc > 1) {
-        // Non-interactive: every argument is a key=value pair
         for (int a = 1; a < argc; ++a) {
             const std::string arg = argv[a];
             if (arg == "-h" || arg == "--help") {
@@ -46,27 +55,83 @@ int main(int argc, char** argv) {
                 printUsage(argv[0]);
                 return 1;
             }
+            overrides.emplace_back(arg.substr(0, eq), arg.substr(eq + 1));
         }
         cfg.print();
     } else {
         cfg.readFromConsole();
 
-        // Confirmation loop
-        while (!cfg.confirm()) {
-            // loop will repeat until user presses Enter without text
-        }
+        if (!cfg.restart) {
+            while (!cfg.confirm()) {
+            }
 
-        // Final confirmation output
-        std::cout << "\n--- Final Configuration ---\n";
+            std::cout << "\n--- Final Configuration ---\n";
+            cfg.print();
+
+            std::cout << "\nNote: This version supports STL and OBJ models.\n";
+            std::cout << "      The mask is generated from a central plane section of the model.\n";
+            std::cout << "      Slice angles, in-plane rotation, and optional mirroring are applied.\n";
+            std::cout << "      Enter 'none' to use the circle verification geometry.\n";
+
+            std::cout << "      Total simulation time: " << cfg.totalTime << " s.\n";
+        }
+    }
+
+    RestartData restart;
+    std::filesystem::path restartPath;
+
+    if (cfg.restart) {
+        std::string error;
+        restartPath = resolveRestartPath(cfg.restartFile, error);
+        if (restartPath.empty() || !loadRestart(restartPath, restart, error)) {
+            std::cerr << "Cannot continue: " << error << "\n";
+            return 1;
+        }
+        std::cout << "\nContinuing from " << restartPath.string() << "\n";
+
+        const std::string requested = cfg.restartFile;
+        cfg = restart.cfg;
+        cfg.restart = true;
+        cfg.restartFile = requested;
+        for (const auto& override : overrides)
+            cfg.setParam(override.first, override.second);
+
+        if (argc <= 1) {
+            std::cout << "\nThe configuration below came out of that frame. "
+                         "Change whatever you want\n"
+                         "(totalTime and saveInterval are the usual ones), "
+                         "then press Enter to start.\n"
+                         "The grid and the geometry are fixed by the frame "
+                         "and cannot be changed.\n";
+            while (!cfg.confirm()) {
+            }
+        }
         cfg.print();
 
-        // Instruction about geometry import
-        std::cout << "\nNote: This version supports STL and OBJ models.\n";
-        std::cout << "      The mask is generated from a central plane section of the model.\n";
-        std::cout << "      Slice angles, in-plane rotation, and optional mirroring are applied.\n";
-        std::cout << "      Enter 'none' to use the circle verification geometry.\n";
+        if (cfg.nx != restart.nx || cfg.ny != restart.ny) {
+            std::cerr << "nx and ny cannot change on a continuation ("
+                      << restart.nx << "x" << restart.ny << " in the frame).\n";
+            return 1;
+        }
+        if (std::fabs(cfg.Lx - restart.cfg.Lx) > 1e-6f * restart.cfg.Lx ||
+            std::fabs(cfg.Ly - restart.cfg.Ly) > 1e-6f * restart.cfg.Ly) {
+            std::cerr << "Lx and Ly cannot change on a continuation ("
+                      << restart.cfg.Lx << " x " << restart.cfg.Ly
+                      << " in the frame).\n";
+            return 1;
+        }
+        if (cfg.totalTime <= restart.currentTime) {
+            std::cerr << "totalTime (" << cfg.totalTime
+                      << " s) must be greater than the time already reached ("
+                      << restart.currentTime << " s), otherwise there is "
+                         "nothing left to compute.\n";
+            return 1;
+        }
 
-        std::cout << "      Total simulation time: " << cfg.totalTime << " s.\n";
+        std::cout << "\nNote: the solid mask is taken from the frame, so the "
+                     "geometry parameters\n"
+                     "      above are only informational and the model file "
+                     "is not needed.\n";
     }
 
     if (cfg.nx < 8 || cfg.ny < 8) {
@@ -74,11 +139,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    // Create mesh (circle)
-    Mesh mesh(cfg);
+    Mesh mesh(cfg, cfg.restart ? &restart.solid : nullptr);
     mesh.printInfo();
 
     Solver solver(cfg, mesh);
+
+    if (cfg.restart &&
+        !solver.setInitialState(std::move(restart),
+                                restartPath.stem().string())) {
+        std::cerr << "The state in the frame does not match the grid.\n";
+        return 1;
+    }
 
     const auto startTime = std::chrono::steady_clock::now();
     solver.run();

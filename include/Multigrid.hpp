@@ -31,6 +31,15 @@ public:
     void setUseCuda(bool enable);
     bool usingCuda() const { return useCuda; }
 
+    // The first solve() normally runs one nested iteration to build a field
+    // out of nothing. A continuation arrives with the pressure of the step it
+    // stopped at, which is a better guess than that pass can produce, and
+    // running it anyway would nudge the field off the original trajectory.
+    // Call after setGeometry(), which resets the flag. Hope it works correctly, 
+    // because the user is responsible for not changing the geometry in between.
+    // Otherwise we is fucked.
+    void skipInitialFullMultigrid() { firstSolve = false; }
+
 private:
     // Array with a halo on both sides, so the stencil can read one cell past
     // the ends without an out-of-range check

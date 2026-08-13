@@ -1,0 +1,414 @@
+#include "Restart.hpp"
+#include <algorithm>
+#include <array>
+#include <cctype>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <fstream>
+#include <iostream>
+#include <sstream>
+
+namespace {
+// Same 16 KB stack buffer as the writer, for the same reason: no heap
+// allocation and no per-value stream calls on arrays that are megabytes wide
+constexpr size_t BUFFER_WORDS = 4096;
+
+// Legacy VTK binary data is big endian; this is the writer's swap read backwards
+inline uint32_t swapWord(uint32_t x) {
+    return
+        ((x & 0x000000FFu) << 24) |
+        ((x & 0x0000FF00u) << 8 ) |
+        ((x & 0x00FF0000u) >> 8 ) |
+        ((x & 0xFF000000u) >> 24);
+}
+
+std::string trimCR(std::string line) {
+    if (!line.empty() && line.back() == '\r')
+        line.pop_back();
+    return line;
+}
+
+// A binary payload starts right after the newline that ends its declaration
+bool skipToPayload(std::istream& in) {
+    char c = '\0';
+    while (in.get(c)) {
+        if (c == '\n')
+            return true;
+    }
+    return false;
+}
+
+bool skipBytes(std::istream& in, std::streamoff count) {
+    return static_cast<bool>(in.seekg(count, std::ios::cur));
+}
+
+// Reads straight into the destination and swaps in place: the array is never
+// copied and never passes through a temporary
+bool readFloats(std::istream& in, std::vector<float>& dst, size_t count) {
+    dst.resize(count);
+    const std::streamsize bytes =
+        static_cast<std::streamsize>(count * sizeof(float));
+    in.read(reinterpret_cast<char*>(dst.data()), bytes);
+    if (in.gcount() != bytes)
+        return false;
+
+    for (size_t k = 0; k < count; ++k) {
+        uint32_t word;
+        std::memcpy(&word, &dst[k], sizeof(word));
+        word = swapWord(word);
+        std::memcpy(&dst[k], &word, sizeof(word));
+    }
+    return true;
+}
+
+// solid is int32 on disk and one byte in memory, so it is streamed through the
+// fixed buffer instead of allocating a second full-size array
+bool readSolid(std::istream& in, std::vector<uint8_t>& dst, size_t count) {
+    dst.resize(count);
+    std::array<uint32_t, BUFFER_WORDS> buffer;
+    size_t done = 0;
+
+    while (done < count) {
+        const size_t chunk = std::min(BUFFER_WORDS, count - done);
+        const std::streamsize bytes =
+            static_cast<std::streamsize>(chunk * sizeof(uint32_t));
+        in.read(reinterpret_cast<char*>(buffer.data()), bytes);
+        if (in.gcount() != bytes)
+            return false;
+
+        for (size_t k = 0; k < chunk; ++k)
+            dst[done + k] = swapWord(buffer[k]) ? 1 : 0;
+
+        done += chunk;
+    }
+    return true;
+}
+
+bool fail(std::string& error, const std::string& message) {
+    error = message;
+    return false;
+}
+
+std::string lowerExtension(const std::filesystem::path& path) {
+    std::string ext = path.extension().string();
+    for (char& c : ext)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return ext;
+}
+}
+
+std::filesystem::path resolveRestartPath(const std::string& path,
+                                         std::string& error) {
+    error.clear();
+    if (path.empty()) {
+        error = "restartFile is empty. Point it at a .vtk frame or the folder "
+                "that holds them.";
+        return {};
+    }
+
+    const std::filesystem::path given(path);
+    std::error_code ec;
+
+    if (std::filesystem::is_directory(given, ec)) {
+        std::filesystem::path newest;
+        std::filesystem::file_time_type newestTime{};
+
+        for (const std::filesystem::directory_entry& entry :
+             std::filesystem::directory_iterator(given, ec)) {
+            if (!entry.is_regular_file(ec))
+                continue;
+            if (lowerExtension(entry.path()) != ".vtk")
+                continue;
+
+            const std::filesystem::file_time_type written =
+                entry.last_write_time(ec);
+            if (ec)
+                continue;
+            if (newest.empty() || written > newestTime) {
+                newest = entry.path();
+                newestTime = written;
+            }
+        }
+
+        if (newest.empty()) {
+            error = "No .vtk frames in " + given.string();
+            return {};
+        }
+        return newest;
+    }
+
+    if (!std::filesystem::is_regular_file(given, ec)) {
+        error = "Not a file or a folder: " + given.string();
+        return {};
+    }
+    return given;
+}
+
+bool loadRestart(const std::filesystem::path& file,
+                 RestartData& out,
+                 std::string& error) {
+    error.clear();
+
+    std::ifstream fin(file, std::ios::binary);
+    if (!fin)
+        return fail(error, "Cannot open " + file.string());
+
+    std::string version, title, encoding;
+    if (!std::getline(fin, version) ||
+        !std::getline(fin, title) ||
+        !std::getline(fin, encoding))
+        return fail(error, "Not a legacy VTK file: " + file.string());
+
+    if (trimCR(version).rfind("# vtk DataFile Version", 0) != 0)
+        return fail(error, "Unsupported VTK header in " + file.string());
+    if (trimCR(encoding) != "BINARY")
+        return fail(error, "Only BINARY legacy VTK frames can be continued");
+
+    int pointNx = 0, pointNy = 0, pointNz = 0;
+    long long declaredCells = -1;
+    std::string configText;
+    // Only filled when the frame predates the FIELD block, in which case they
+    // are the fallback the staggered fields get rebuilt from
+    std::vector<float> cellPressure, cellVelocity;
+
+    std::string token;
+    while (fin >> token) {
+        if (token == "DATASET") {
+            fin >> token;
+            if (token != "STRUCTURED_POINTS")
+                return fail(error, "Only STRUCTURED_POINTS frames are supported");
+        } else if (token == "DIMENSIONS") {
+            fin >> pointNx >> pointNy >> pointNz;
+            out.nx = pointNx - 1;
+            out.ny = pointNy - 1;
+            if (pointNz != 1 || out.nx < 1 || out.ny < 1)
+                return fail(error, "Bad DIMENSIONS in " + file.string());
+        } else if (token == "ORIGIN") {
+            double ox, oy, oz;
+            fin >> ox >> oy >> oz;
+        } else if (token == "SPACING") {
+            double sx, sy, sz;
+            fin >> sx >> sy >> sz;
+            out.dx = static_cast<float>(sx);
+            out.dy = static_cast<float>(sy);
+        } else if (token == "CELL_DATA") {
+            fin >> declaredCells;
+            if (declaredCells !=
+                static_cast<long long>(out.nx) * out.ny)
+                return fail(error, "CELL_DATA count does not match DIMENSIONS");
+        } else if (token == "POINT_DATA") {
+            return fail(error, "POINT_DATA frames cannot seed the solver");
+        } else if (token == "SCALARS") {
+            std::string name, type, next;
+            fin >> name >> type >> next;
+            int components = 1;
+            if (next != "LOOKUP_TABLE") {
+                components = std::atoi(next.c_str());
+                fin >> next;
+            }
+            std::string table;
+            fin >> table;
+            if (components < 1)
+                return fail(error, "Bad component count for SCALARS " + name);
+            if (!skipToPayload(fin))
+                return fail(error, "Truncated frame before SCALARS " + name);
+
+            const size_t count =
+                static_cast<size_t>(out.nx) * out.ny * components;
+            if (name == "solid") {
+                if (!readSolid(fin, out.solid, count))
+                    return fail(error, "Truncated solid array");
+            } else if (name == "pressure") {
+                if (!readFloats(fin, cellPressure, count))
+                    return fail(error, "Truncated pressure array");
+            } else if (!skipBytes(fin,
+                                  static_cast<std::streamoff>(count * 4))) {
+                return fail(error, "Truncated SCALARS " + name);
+            }
+        } else if (token == "VECTORS") {
+            std::string name, type;
+            fin >> name >> type;
+            if (!skipToPayload(fin))
+                return fail(error, "Truncated frame before VECTORS " + name);
+
+            const size_t count = static_cast<size_t>(out.nx) * out.ny * 3;
+            if (name == "velocity") {
+                if (!readFloats(fin, cellVelocity, count))
+                    return fail(error, "Truncated velocity array");
+            } else if (!skipBytes(fin,
+                                  static_cast<std::streamoff>(count * 4))) {
+                return fail(error, "Truncated VECTORS " + name);
+            }
+        } else if (token == "FIELD") {
+            std::string fieldName;
+            int arrayCount = 0;
+            fin >> fieldName >> arrayCount;
+
+            for (int a = 0; a < arrayCount; ++a) {
+                std::string arrayName, arrayType;
+                long long components = 0, tuples = 0;
+                fin >> arrayName >> components >> tuples >> arrayType;
+                if (components < 1 || tuples < 0)
+                    return fail(error, "Bad FIELD array " + arrayName);
+                if (!skipToPayload(fin))
+                    return fail(error, "Truncated frame before " + arrayName);
+
+                const size_t count =
+                    static_cast<size_t>(components) *
+                    static_cast<size_t>(tuples);
+
+                if (arrayType == "char" || arrayType == "unsigned_char") {
+                    if (arrayName == "configText") {
+                        configText.resize(count);
+                        fin.read(&configText[0],
+                                 static_cast<std::streamsize>(count));
+                        if (fin.gcount() !=
+                            static_cast<std::streamsize>(count))
+                            return fail(error, "Truncated configText");
+                        out.hasConfigText = true;
+                    } else if (!skipBytes(
+                                   fin,
+                                   static_cast<std::streamoff>(count))) {
+                        return fail(error, "Truncated FIELD " + arrayName);
+                    }
+                } else if (arrayType == "float" || arrayType == "int") {
+                    bool ok = true;
+                    if (arrayName == "uFace")
+                        ok = readFloats(fin, out.u, count);
+                    else if (arrayName == "vFace")
+                        ok = readFloats(fin, out.v, count);
+                    else if (arrayName == "pRaw")
+                        ok = readFloats(fin, out.p, count);
+                    else
+                        ok = skipBytes(
+                            fin, static_cast<std::streamoff>(count * 4));
+                    if (!ok)
+                        return fail(error, "Truncated FIELD " + arrayName);
+                } else {
+                    return fail(error,
+                                "Unsupported FIELD type " + arrayType +
+                                    " for " + arrayName);
+                }
+            }
+        } else {
+            return fail(error, "Unsupported VTK declaration: " + token);
+        }
+    }
+
+    const size_t cells = static_cast<size_t>(out.nx) * out.ny;
+    if (cells == 0 || out.solid.size() != cells)
+        return fail(error, "Frame carries no usable solid mask");
+
+    // The configuration text is authoritative for everything except the grid,
+    // which the file header already fixed. Unknown keys are skipped rather
+    // than rejected so newer frames stay loadable by older builds.
+    if (out.hasConfigText) {
+        std::istringstream text(configText);
+        std::string line;
+        while (std::getline(text, line)) {
+            line = trimCR(line);
+            const size_t eq = line.find('=');
+            if (eq == std::string::npos || eq == 0)
+                continue;
+
+            const std::string key = line.substr(0, eq);
+            const std::string value = line.substr(eq + 1);
+            if (key == "restartTime")
+                out.currentTime = std::strtod(value.c_str(), nullptr);
+            else if (key == "restartStep")
+                out.step = std::atoi(value.c_str());
+            else if (key == "restartDt")
+                out.dt = std::strtof(value.c_str(), nullptr);
+            else if (key == "formatVersion")
+                continue;
+            else
+                out.cfg.setParam(key, value);
+        }
+    } else {
+        // Nothing but the geometry can be recovered, so at least keep the
+        // domain consistent with the grid that produced the frame
+        out.cfg.Lx = out.dx * out.nx;
+        out.cfg.Ly = out.dy * out.ny;
+
+        // Frames of that vintage were always solution_<step>.vtk, so the
+        // trailing number is the step count. The time behind it is gone.
+        const std::string stem = file.stem().string();
+        const size_t underscore = stem.find_last_of('_');
+        if (underscore != std::string::npos)
+            out.step = std::atoi(stem.c_str() + underscore + 1);
+    }
+
+    out.cfg.nx = out.nx;
+    out.cfg.ny = out.ny;
+    out.cfg.restart = true;
+
+    const size_t uCells = static_cast<size_t>(out.nx + 1) * out.ny;
+    const size_t vCells = static_cast<size_t>(out.nx) * (out.ny + 1);
+    out.exactState =
+        out.u.size() == uCells &&
+        out.v.size() == vCells &&
+        out.p.size() == cells;
+
+    if (!out.exactState) {
+        if (cellVelocity.size() != cells * 3)
+            return fail(error,
+                        "Frame has neither a RestartData block nor a usable "
+                        "velocity array");
+
+        std::cout << "  note: this frame predates the RestartData block, so "
+                     "the face velocities are\n"
+                     "        reconstructed from the cell averages and the "
+                     "state is projected once.\n";
+
+        // Cell centre -> face. Interior faces are the average of their two
+        // neighbours, the inlet and outlet faces copy the cell they touch.
+        out.u.assign(uCells, 0.0f);
+        out.v.assign(vCells, 0.0f);
+        for (int j = 0; j < out.ny; ++j) {
+            const int rowC = j * out.nx;
+            const int rowU = j * (out.nx + 1);
+            out.u[rowU] = cellVelocity[3 * rowC];
+            for (int i = 1; i < out.nx; ++i)
+                out.u[rowU + i] = 0.5f * (cellVelocity[3 * (rowC + i - 1)] +
+                                          cellVelocity[3 * (rowC + i)]);
+            out.u[rowU + out.nx] = cellVelocity[3 * (rowC + out.nx - 1)];
+        }
+        for (int j = 1; j < out.ny; ++j) {
+            const int rowC = j * out.nx;
+            const int rowBot = (j - 1) * out.nx;
+            for (int i = 0; i < out.nx; ++i)
+                out.v[rowC + i] = 0.5f * (cellVelocity[3 * (rowBot + i) + 1] +
+                                          cellVelocity[3 * (rowC + i) + 1]);
+        }
+        // Top and bottom rows stay zero, which is the wall condition anyway
+
+        // Pressure is only the multigrid warm start, so an approximate one is
+        // fine. It is stored in Pa in the frame and kinematic in the solver.
+        out.p.assign(cells, 0.0f);
+        if (cellPressure.size() == cells && out.cfg.ro > 0.0f) {
+            const float invRo = 1.0f / out.cfg.ro;
+            for (size_t id = 0; id < cells; ++id)
+                out.p[id] = cellPressure[id] * invRo;
+        }
+    }
+
+    if (!out.hasConfigText) {
+        std::cout << "  note: no configuration was stored in this frame. "
+                     "Everything except the grid\n"
+                     "        falls back to defaults, check it in the "
+                     "confirmation screen.\n";
+    }
+
+    // Guard against a frame that came from a different domain than its own
+    // configuration text claims
+    const float expectedDx = out.cfg.Lx / out.nx;
+    const float expectedDy = out.cfg.Ly / out.ny;
+    if (std::fabs(expectedDx - out.dx) > 1e-4f * out.dx ||
+        std::fabs(expectedDy - out.dy) > 1e-4f * out.dy)
+        return fail(error,
+                    "Domain in the stored configuration does not match the "
+                    "SPACING of the frame");
+
+    return true;
+}

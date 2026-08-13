@@ -54,11 +54,21 @@ double squaredDistance(const Mesh::Vertex& first, const Mesh::Vertex& second) {
     return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
 }
 }
-Mesh::Mesh(const Config& cfg)
+Mesh::Mesh(const Config& cfg, const std::vector<uint8_t>* presetSolid)
     : nx(cfg.nx), ny(cfg.ny), cfg(cfg)
 {
     solid.resize(nx * ny, 0);
     createGrid();
+
+    if (presetSolid) {
+        // Restart: the mask came out of the frame, so no model is loaded, no
+        // section is cut and no fallback circle is generated
+        const int cells = nx * ny;
+        for (int id = 0; id < cells; ++id)
+            solid[id] = (*presetSolid)[id] ? 1 : 0;
+        return;
+    }
+
     const bool geometryLoaded = loadGeometry(cfg.geometryFile);
     buildSection();
     rasterizeSection();

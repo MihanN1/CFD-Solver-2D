@@ -8,6 +8,9 @@
 #include <algorithm>
 #include <immintrin.h>
 #include <array>
+#include <limits>
+#include <sstream>
+#include <utility>
 
 namespace {
 // Largest of the 8 lanes
@@ -50,6 +53,33 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
     invDy = 1.0f / dy;
     invDx2 = invDx * invDx;
     invDy2 = invDy * invDy;
+
+    // Same story for the text that goes into every frame: the configuration
+    // is fixed by now, so it is serialized once instead of on each save
+    configHeader = "formatVersion=1\n" + cfg.serialize();
+}
+
+bool Solver::setInitialState(RestartData&& state,
+                             const std::string& prefix) {
+    if (state.u.size() != u.size() ||
+        state.v.size() != v.size() ||
+        state.p.size() != p.size())
+        return false;
+
+    // These are the same megabytes the reader just filled
+    u = std::move(state.u);
+    v = std::move(state.v);
+    p = std::move(state.p);
+
+    currentTime = state.currentTime;
+    step = state.step;
+    restartDt = state.dt;
+    needsProjection = !state.exactState;
+    hasRestartState = true;
+    if (!prefix.empty())
+        framePrefix = prefix;
+
+    return true;
 }
 
 void Solver::buildFaceMasks(){
@@ -96,25 +126,33 @@ void Solver::initFields()
     multigrid.setUseCuda(cfg.useCuda);
     multigrid.setGeometry(solidMask);
 
-    std::fill(p.begin(), p.end(), 0.0f);
+    if (hasRestartState && !needsProjection)
+        multigrid.skipInitialFullMultigrid();
+
     std::fill(rhs.begin(), rhs.end(), 0.0f);
-    std::fill(u.begin(), u.end(), 0.0f);
-    std::fill(v.begin(), v.end(), 0.0f);
     std::fill(u_star.begin(), u_star.end(), 0.0f);
     std::fill(v_star.begin(), v_star.end(), 0.0f);
 
-    // Start every open face at the inlet velocity
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 1; i < nx; ++i)
-            if (uFluidMask[idxU(i, j)])
-                u[idxU(i, j)] = cfg.U0;
+    // A continuation already carries p, u and v, so only a fresh run starts
+    // from a uniform inlet profile
+    if (!hasRestartState) {
+        std::fill(p.begin(), p.end(), 0.0f);
+        std::fill(u.begin(), u.end(), 0.0f);
+        std::fill(v.begin(), v.end(), 0.0f);
 
-        if (!solidMask[idxP(0, j)])
-            u[idxU(0, j)] = cfg.U0;
-        if (!solidMask[idxP(nx - 1, j)])
-            u[idxU(nx, j)] = cfg.U0;
+        for (int j = 0; j < ny; ++j) {
+            for (int i = 1; i < nx; ++i)
+                if (uFluidMask[idxU(i, j)])
+                    u[idxU(i, j)] = cfg.U0;
+
+            if (!solidMask[idxP(0, j)])
+                u[idxU(0, j)] = cfg.U0;
+            if (!solidMask[idxP(nx - 1, j)])
+                u[idxU(nx, j)] = cfg.U0;
+        }
     }
 
+    // Runs in both cases: on a restart this is what applies a changed U0
     applyBC();
 
     std::cout << "Fields initialized. Multigrid levels: "
@@ -122,9 +160,6 @@ void Solver::initFields()
               << ", backend: " << (multigrid.usingCuda() ? "CUDA" : "CPU")
               << "\n";
 
-    // An axis is only coarsened while its cell count is even, so a grid that is
-    // odd in both directions gets no hierarchy and the pressure solve degrades
-    // to plain SOR, well, thats shitty cause we tryna optimize shit
     if (multigrid.levelCount() < 3 && (nx > 32 || ny > 32)) {
         std::cout << "  note: few multigrid levels for " << nx << "x" << ny
                   << ". Cell counts divisible by a high power of two "
@@ -229,8 +264,6 @@ void Solver::predictor() {
     const __m256 dtConvVec = _mm256_set1_ps(dtConv);
     const __m256 dtNuVec   = _mm256_set1_ps(dtNu);
 
-    // Compute u_star for internal fluid cells (i = 1..nx-1, j = 1..ny-2)
-    // u is on vertical faces, so we need to compute convection and diffusion at those points
     #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny - 1; ++j) {
         const int rowU = j * (nx + 1);
@@ -346,8 +379,6 @@ void Solver::predictor() {
         }
     }
 
-    // Bottom (j = 0) and top (j = ny-1) rows: the missing neighbour is replaced
-    // by the face itself, which is the free-slip condition for u
     for (int pass = 0; pass < 2; ++pass) {
         if (ny < 2)
             break;
@@ -396,7 +427,6 @@ void Solver::predictor() {
         }
     }
 
-    // Compute v_star similarly
     #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny; ++j){ // internal horizontal faces
         const int rowV = j * nx;
@@ -511,7 +541,6 @@ void Solver::predictor() {
                 + dtNu * (d2vdx2 + d2vdy2));
         }
 
-        // Left (i = 0) and right (i = nx-1) columns, same trick as for u
         for (int pass = 0; pass < 2; ++pass) {
             const int iCol = (pass == 0) ? 0 : nx - 1;
             if (iCol < 0 || (pass == 1 && nx < 2))
@@ -551,8 +580,6 @@ void Solver::predictor() {
         }
     }
 
-    // Apply BC to u_star and v_star
-    // Inlet (left): u_star = U0. Outlet (right): zero gradient (neumann)
     for (int j = 0; j < ny; ++j) {
         uStar[idxU(0, j)] = solidMask[idxP(0, j)] ? 0.0f : cfg.U0;
         uStar[idxU(nx, j)] =
@@ -560,7 +587,6 @@ void Solver::predictor() {
             0.0f :
             uStar[idxU(nx - 1, j)];
     }
-    // Top/Bottom: v = 0 (no vertical flow through the walls)
     for (int i = 0; i < nx; ++i) {
         vStar[idxV(i, 0)] = 0.0f;
         vStar[idxV(i, ny)] = 0.0f;
@@ -577,7 +603,6 @@ void Solver::solvePoisson() {
     const float* __restrict vStar = v_star.data();
     float* __restrict rhsPtr = rhs.data();
 
-    // rhs = div(u*) / dt
     #pragma omp parallel for schedule(static)
     for (int j = 0; j < ny; ++j) {
         const int rowP = j * nx;
@@ -636,7 +661,6 @@ void Solver::corrector() {
     float* __restrict uPtr = u.data();
     float* __restrict vPtr = v.data();
 
-    // Update u: u_new = u_star - dt * (p(i) - p(i-1)) / dx
     #pragma omp parallel for schedule(static)
     for (int j = 0; j < ny; ++j) {
         const int rowP = j * nx;
@@ -672,7 +696,6 @@ void Solver::corrector() {
         }
     }
 
-    // Update v: v_new = v_star - dt * (p(j) - p(j-1)) / dy
     #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny; ++j) {
         const int rowP = j * nx;
@@ -709,7 +732,6 @@ void Solver::corrector() {
         }
     }
 
-    // Outlet face: p = 0 sits half a cell outside, hence the factor 2
     const float outletFactor = 2.f * dt * invDx;
     for (int j = 0; j < ny; ++j) {
         if (solidMask[idxP(nx - 1, j)]) {
@@ -720,17 +742,14 @@ void Solver::corrector() {
         }
     }
 
-    // Apply boundary conditions again
     applyBC();
 }
 
 void Solver::applyBC() {
     const int nx = cfg.nx, ny = cfg.ny;
-    // Inlet (left): u = U0
     for (int j = 0; j < ny; ++j)
         u[idxU(0, j)] = solidMask[idxP(0, j)] ? 0.0f : cfg.U0;
 
-    // Top/Bottom: free slip (u gradient zero, v = 0)
     for (int i = 0; i < nx; ++i) {
         v[idxV(i, 0)] = 0.0f;
         v[idxV(i, ny)] = 0.0f;
@@ -764,19 +783,60 @@ float Solver::maxVelocity() const {
     return maxVel;
 }
 
+void Solver::projectRestartState() {
+    const int nx = cfg.nx, ny = cfg.ny;
+
+    // Averaged cell velocities interpolated back onto the faces are not
+    // divergence free, so one projection is run before the first real step.
+    // Same size assignment on both sides, so this is a memcpy, not a realloc.
+    u_star = u;
+    v_star = v;
+
+    for (int j = 0; j < ny; ++j) {
+        u_star[idxU(0, j)] = solidMask[idxP(0, j)] ? 0.0f : cfg.U0;
+        u_star[idxU(nx, j)] =
+            solidMask[idxP(nx - 1, j)] ?
+            0.0f :
+            u_star[idxU(nx - 1, j)];
+    }
+    for (int i = 0; i < nx; ++i) {
+        v_star[idxV(i, 0)] = 0.0f;
+        v_star[idxV(i, ny)] = 0.0f;
+    }
+
+    solvePoisson();
+    corrector();
+
+    std::cout << "  reconstructed state projected, div = "
+              << maxDivergence() << "\n";
+}
+
 void Solver::run() {
     std::cout << "Starting simulation...\n";
     initFields();
-    currentTime = 0.0;
-    step = 0;
+    if (!hasRestartState) {
+        currentTime = 0.0;
+        step = 0;
+    }
 
     std::error_code ec;
     std::filesystem::create_directories(cfg.outputDir, ec);
 
-    // Save initial state
-    computeDt();
+    if (hasRestartState && restartDt > 0.0f && !needsProjection) {
+        dt = restartDt;
+    } else {
+        computeDt();
+    }
     std::cout << "Program outputs 'Saved ---' one in ten saves. " << std::endl;
-    saveVTK(step);
+    if (hasRestartState) {
+        if (needsProjection)
+            projectRestartState();
+        std::cout << "Continuing from t = " << currentTime
+                  << " s, step " << step
+                  << ". Frames go to " << framePrefix << "_N.vtk\n";
+    } else {
+        saveVTK(step);
+    }
 
     const int saveInterval = std::max(1, cfg.saveInterval);
     const int dtUpdateInterval = std::max(1, cfg.dtUpdateInterval);
@@ -785,7 +845,6 @@ void Solver::run() {
         if (step % dtUpdateInterval == 0)
             computeDt();
 
-        // Avoid overshooting totalTime, but keep the CFL dt for the next step
         float stepDt = dt;
         if (currentTime + stepDt > cfg.totalTime)
             stepDt = static_cast<float>(cfg.totalTime - currentTime);
@@ -802,7 +861,6 @@ void Solver::run() {
         step++;
         dt = savedDt;
 
-        // Progress output
         if (step % 10 == 0) {
             const float maxVel = maxVelocity();
             std::cout << "Step " << step
@@ -820,29 +878,32 @@ void Solver::run() {
             }
         }
 
-        // Save VTK periodically
         if (step % saveInterval == 0)
             saveVTK(step);
     }
 
-    // Final save
-    saveVTK(step);
+    if (step % saveInterval != 0)
+        saveVTK(step);
     std::cout << "Simulation finished at t = " << currentTime << " s after "
               << step << " steps.\n";
-    // Not sure about this, if it works its so cool
 }
 
-void Solver::saveVTK(int stepNum) const {
+void Solver::saveVTK(int stepNum) {
     const int nx = cfg.nx, ny = cfg.ny;
     constexpr size_t BUFFER_WORDS = 4096;
-    std::array<uint32_t, BUFFER_WORDS> buffer{};
+    std::array<uint32_t, BUFFER_WORDS> buffer;
     size_t bufferPos = 0;
+
+    // A fresh run keeps solution_<step>.vtk. A continuation numbers its own
+    // frames off the file it was seeded from, so nothing is ever overwritten:
+    // solution_400.vtk -> solution_400_1.vtk, solution_400_2.vtk, ...
+    const int fileNumber = hasRestartState ? ++restartSaveIndex : stepNum;
 
     std::filesystem::path filename =
         cfg.outputDir.empty() ?
         std::filesystem::path(".") :
         std::filesystem::path(cfg.outputDir);
-    filename /= "solution_" + std::to_string(stepNum) + ".vtk";
+    filename /= framePrefix + "_" + std::to_string(fileNumber) + ".vtk";
 
     std::ofstream fout(filename, std::ios::binary);
     if (!fout){
@@ -933,6 +994,55 @@ void Solver::saveVTK(int stepNum) const {
     }
     flushFloatBuffer();
     fout << "\n";
-    if (stepNum % (std::max(1, cfg.saveInterval) * 10) == 0 || stepNum == 0)
+
+    // RestartData
+    // Everything above is cell centred, and the velocity in it is an average
+    // of two faces, which cannot be inverted. So the raw staggered fields go
+    // out as well, together with the configuration that produced them. FIELD
+    // is the only legacy VTK block that allows per-array tuple counts, which
+    // is exactly what (nx+1)*ny and nx*(ny+1) need. It sits last so every
+    // reader gets the physical arrays before it reaches anything new.
+    // Its done so we can continue a sim without losing info, cause we use MAC and shi.
+    std::ostringstream state;
+    state << std::setprecision(std::numeric_limits<double>::max_digits10)
+          << "restartTime=" << currentTime << "\n"
+          << "restartStep=" << stepNum << "\n"
+          << std::setprecision(std::numeric_limits<float>::max_digits10)
+          << "restartDt=" << dt << "\n";
+    const std::string configText = configHeader + state.str();
+
+    const size_t uCount = static_cast<size_t>(nx + 1) * ny;
+    const size_t vCount = static_cast<size_t>(nx) * (ny + 1);
+    const size_t pCount = static_cast<size_t>(nx) * ny;
+
+    fout << "FIELD RestartData 4\n";
+    fout << "configText 1 " << configText.size() << " char\n";
+    fout.write(configText.data(),
+               static_cast<std::streamsize>(configText.size()));
+    fout << "\n";
+
+    // Written straight from the live arrays through the same buffer as
+    // everything else, so no copies and no temporary vectors
+    fout << "uFace 1 " << uCount << " float\n";
+    for (size_t id = 0; id < uCount; ++id)
+        writeFloat(u[id]);
+    flushFloatBuffer();
+    fout << "\n";
+
+    fout << "vFace 1 " << vCount << " float\n";
+    for (size_t id = 0; id < vCount; ++id)
+        writeFloat(v[id]);
+    flushFloatBuffer();
+    fout << "\n";
+
+    // Kinematic, unlike SCALARS pressure above, which is scaled to Pa
+    fout << "pRaw 1 " << pCount << " float\n";
+    for (size_t id = 0; id < pCount; ++id)
+        writeFloat(p[id]);
+    flushFloatBuffer();
+    fout << "\n";
+
+    if (fileNumber % (std::max(1, cfg.saveInterval) * 10) == 0 ||
+        fileNumber == 0 || fileNumber == 1)
         std::cout << "Saved " << filename.string() << std::endl;
 }

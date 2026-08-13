@@ -1,5 +1,6 @@
 #pragma once
 #include "Config.hpp"
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -22,7 +23,11 @@ public:
         OBJ
     };
 
-    explicit Mesh(const Config& cfg);
+    // presetSolid short-circuits the whole geometry pipeline: a continuation
+    // already has the mask in its frame, so the model file does not have to
+    // exist any more and the rasterizer cannot drift between runs.
+    explicit Mesh(const Config& cfg,
+                  const std::vector<uint8_t>* presetSolid = nullptr);
 
     std::vector<double> x, y;
     std::vector<int> solid;   // 1 = inside body, 0 = fluid
