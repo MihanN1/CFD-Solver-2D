@@ -70,18 +70,14 @@ private:
 
     void saveVTK(int stepNum) const;
 
-    // Gravity potential, phi = g . x, i.e. the hydrostatic pressure. Its
-    // reference point sits at the outlet at mid-height, which is what makes
-    // phiOutlet independent of gx and keeps the printed numbers small.
-    // Both are identically zero when gravity is off.
+    // Gravity potential, phi = g . x, i.e. the hydrostatic pressure. At
+    // constant density it is an exact solution of the discrete pressure
+    // problem for the body force, so p carries only the reduced pressure and
+    // this is added on output. Identically zero when gravity is off. The
+    // reference point is the outlet at mid-height, which keeps phi small.
     inline float phiCell(int i, int j) const {
-        return gx * ((i + 0.5f) * dx - cfg.Lx) +
-               gy * ((j + 0.5f) * dy - 0.5f * cfg.Ly);
-    }
-    // The pressure the outlet Dirichlet has to hold instead of zero: phi on
-    // the outlet face, where the gx term vanishes by choice of reference.
-    inline float phiOutlet(int j) const {
-        return gy * ((j + 0.5f) * dy - 0.5f * cfg.Ly);
+        return gx * ((i + 0.5f - cfg.nx) * dx) +
+               gy * ((j + 0.5f - 0.5f * cfg.ny) * dy);
     }
 
     // Inline index helpers (for readability)

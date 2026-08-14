@@ -23,7 +23,8 @@ public:
         float smootherOmega,
         float coarseOmega,
         int maxCycles,
-        float tolerance);
+        float tolerance,
+        float rhsScale = 0.0f);
 
     int levelCount() const { return levels; }
     int cyclesUsed() const { return lastCycles; }
@@ -142,7 +143,8 @@ private:
             float smootherOmega,
             float coarseOmega,
             int maxCycles,
-            float tolerance);
+            float tolerance,
+            float rhsScale);
 
     private:
         // Device side mirror of Level

@@ -659,7 +659,8 @@ float Multigrid::solve(
     float smootherOmega,
     float coarseOmega,
     int maxCycles,
-    float tolerance)
+    float tolerance,
+    float rhsScale)
 {
     if (!geometryReady) {
         std::fprintf(stderr, "Multigrid::solve called before setGeometry\n");
@@ -674,7 +675,8 @@ float Multigrid::solve(
             smootherOmega,
             coarseOmega,
             maxCycles,
-            tolerance);
+            tolerance,
+            rhsScale);
 #endif
 
     Level& finest = gridLevels[0];
@@ -691,7 +693,7 @@ float Multigrid::solve(
         finestRhs[id] = active ? rhs[id] : 0.0f;
     }
 
-    const float rhsNorm = computeVectorNorm(finestRhs, cellCount);
+    const float rhsNorm = (rhsScale > 0.0f) ? rhsScale : computeVectorNorm(finestRhs, cellCount);
     const float scale = (rhsNorm > 1e-20f) ? rhsNorm : 1.0f;
 
     if (firstSolve) {
@@ -708,7 +710,7 @@ float Multigrid::solve(
     for (int cycle = 0; cycle < maxCycles; ++cycle) {
         computeResidual(0);
         relative = computeResidualNorm(0) / scale;
-        if (relative < tolerance)
+        if (cycle > 0 && relative < tolerance)
             break;
         vCycle(0, smootherOmega, coarseOmega);
         ++lastCycles;
