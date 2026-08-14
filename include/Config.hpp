@@ -3,14 +3,8 @@
 #include <vector>
 
 struct Config {
-    // Run mode. This is the first thing the configuration asks for: a fresh
-    // run, or a continuation of one that already produced VTK frames.
-    // restartFile is either a solution_*.vtk or the folder holding them, in
-    // which case the newest frame in it is taken.
     bool restart = false;
     std::string restartFile = "";
-    // Overrides totalTime when it is greater than zero. Never stored
-    // in a frame, see serialize(), otherwise will work really weird ahaha
     double addTime = 0.0;
 
     // Domain
@@ -23,6 +17,14 @@ struct Config {
 
     // Density
     float ro = 1.225;   // kg/m^3
+
+    // Gravity (optional). The direction is degrees measured clockwise from
+    // "straight down", because in a 2D domain the flow direction is the one
+    // thing that cannot be turned, so everything else turns around it:
+    // 0 = down, 90 = towards the inlet, 180 = up, 270 = along the flow.
+    bool gravityEnabled = false;
+    float gravityAccel = 9.81f;   // m/s^2
+    float gravityAngle = 0.0f;    // degrees, clockwise, 0 = down
 
     // Time
     float CFL = 0.5;
@@ -59,8 +61,5 @@ struct Config {
 
     bool setParam(const std::string& key, const std::string& value);
 
-    // The same "key=value" lines, one per parameter. This is what gets
-    // embedded into every VTK frame so a continuation can restore the run
-    // without the user retyping anything. Reading it back is just setParam().
     std::string serialize() const;
 };

@@ -39,8 +39,6 @@ private:
     bool needsProjection = false;   // u/v were rebuilt from cell averages
     float restartDt = 0.0f;         // dt that was in flight when the frame was written
     std::string framePrefix = "solution";   // <framePrefix>_<step>.vtk
-    // Resolved once in the constructor: outputDir is a narrow string, and
-    // turning it into a path is not free of encoding traps on Windows
     std::filesystem::path outputPath;
     std::string configHeader;
 
@@ -53,6 +51,10 @@ private:
     float dx = 0.0f, dy = 0.0f;
     float invDx = 0.0f, invDy = 0.0f;
     float invDx2 = 0.0f, invDy2 = 0.0f;
+
+    // Gravity as a vector, resolved once in the constructor. Both stay at zero
+    // when gravity is off, so every expression below degenerates to the old one.
+    float gx = 0.0f, gy = 0.0f;
 
     void initFields();
     void computeDt();
@@ -67,6 +69,20 @@ private:
     float maxVelocity() const;
 
     void saveVTK(int stepNum) const;
+
+    // Gravity potential, phi = g . x, i.e. the hydrostatic pressure. Its
+    // reference point sits at the outlet at mid-height, which is what makes
+    // phiOutlet independent of gx and keeps the printed numbers small.
+    // Both are identically zero when gravity is off.
+    inline float phiCell(int i, int j) const {
+        return gx * ((i + 0.5f) * dx - cfg.Lx) +
+               gy * ((j + 0.5f) * dy - 0.5f * cfg.Ly);
+    }
+    // The pressure the outlet Dirichlet has to hold instead of zero: phi on
+    // the outlet face, where the gx term vanishes by choice of reference.
+    inline float phiOutlet(int j) const {
+        return gy * ((j + 0.5f) * dy - 0.5f * cfg.Ly);
+    }
 
     // Inline index helpers (for readability)
     inline int idxP(int i, int j) const { return j * cfg.nx + i; }

@@ -21,6 +21,7 @@ static void printUsage(const char* exe) {
         "      omega smootherOmega mgIterations mgTolerance mgMinCoarseSize\n"
         "      saveInterval outputDir geometryFile sliceAngleX sliceAngleZ\n"
         "      sliceRotation invertSection ro useCuda restart restartFile addTime\n"
+        "      gravityEnabled gravityAccel gravityAngle\n"
         "\n"
         "Example:\n"
         "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "
@@ -102,9 +103,6 @@ int main(int argc, char** argv) {
                 std::cout << "addTime " << cfg.addTime
                           << " s -> totalTime " << cfg.totalTime << " s\n";
             } else if (cfg.addTime < 0.0) {
-                // Ignoring this quietly was worse than being wrong out loud.
-                // addTime walks forward from where the frame stopped, it does
-                // not subtract from totalTime, and time does not run backwards.
                 std::cout << "\n!!! addTime " << cfg.addTime
                           << " s is negative and does nothing. It counts "
                              "forward from the\n    time this frame stopped at ("

@@ -8,7 +8,7 @@ CFD‑Solver‑2D is an educational/research project that implements a finite‑
 - Interactive console parameter input with confirmation and on-the-fly editing.
 - Full numerical solver with VTK output for post-processing in ParaView.
 - STL/OBJ loading, central plane section extraction, geometry masking, profile rotation, mirroring, and robust contour reconstruction.
-- Real-time visualization with SFML.
+- Optional gravity as a uniform body force, pointing in any direction.
 
 The project is designed to simulate external incompressible flow around arbitrary 2D profiles such as cylinders, airfoils, valves, turbine blades, and similar engineering geometries.
 
@@ -22,7 +22,6 @@ Possible future extensions include:
 - Turbulence models
 - Compressible flow solver
 - Cavity flow
-- Add optional gravity for fluids
 - Moving objects (NO idea how to do it for now, but ill figure that out)
 - Moving WALLS
 - Flow start coordinates and width of the flow
@@ -46,6 +45,8 @@ Possible future extensions include:
 - ✅ Optimized Poisson solver
 - ✅ Correct residual evaluation
 - ✅ Immersed boundary method
+- ✅ Optional gravity / uniform body force, direction free
+- ✅ Restarting sim from a given save
 
 ---
 
@@ -61,19 +62,6 @@ Possible future extensions include:
 - ✅ Automatic scaling and centering
 - ✅ Rotation and mirroring
 - ✅ Polygon rasterization using even-odd filling
-
----
-
-## Visualization
-
-- ✅ Real-time SFML visualization
-- ✅ Pressure rendering
-- ✅ Velocity rendering
-- ✅ Solid mask rendering
-- ✅ Pause / Resume
-- ✅ Time scrubbing
-- ✅ Zoom and camera movement
-- ✅ Rendering mode switching
 
 ---
 
@@ -95,11 +83,13 @@ We solve the 2D incompressible Navier–Stokes equations (kinematic pressure, ρ
 
 **Momentum (X):**
 
-![](https://latex.codecogs.com/svg.image?\frac{\partial%20u}{\partial%20t}+u\frac{\partial%20u}{\partial%20x}+v\frac{\partial%20u}{\partial%20y}=-\frac{\partial%20p}{\partial%20x}+\nu\nabla^{2}u)
+![](https://latex.codecogs.com/svg.image?\frac{\partial%20u}{\partial%20t}+u\frac{\partial%20u}{\partial%20x}+v\frac{\partial%20u}{\partial%20y}=-\frac{\partial%20p}{\partial%20x}+\nu\nabla^{2}u+g_{x})
 
 **Momentum (Y):**
 
-![](https://latex.codecogs.com/svg.image?\frac{\partial%20v}{\partial%20t}+u\frac{\partial%20v}{\partial%20x}+v\frac{\partial%20v}{\partial%20y}=-\frac{\partial%20p}{\partial%20y}+\nu\nabla^{2}v)
+![](https://latex.codecogs.com/svg.image?\frac{\partial%20v}{\partial%20t}+u\frac{\partial%20v}{\partial%20x}+v\frac{\partial%20v}{\partial%20y}=-\frac{\partial%20p}{\partial%20y}+\nu\nabla^{2}v+g_{y})
+
+where the body force **g** is zero unless gravity is enabled.
 
 **Continuity (incompressibility):**
 
@@ -112,11 +102,11 @@ The **Chorin projection** splits each time step into:
 
 ![](https://latex.codecogs.com/svg.image?\nabla^{2}p=\frac{1}{\Delta%20t}\left(\frac{\partial%20u^{*}}{\partial%20x}+\frac{\partial%20v^{*}}{\partial%20y}\right))
 
-using SOR.
+using a multigrid V-cycle with red/black SOR as its smoother.
 
 3. **Corrector** – update velocities with the pressure gradient.
 
-Boundary conditions: no-slip on solid walls, constant velocity at inlet, zero-gradient at outlet, free-slip at top/bottom.
+Boundary conditions: no-slip on solid walls, constant velocity at inlet, zero-gradient at outlet, free-slip at top/bottom. The outlet also carries the only Dirichlet condition on pressure, and gravity changes what that condition holds — see *Gravity* under §4.
 
 ### Geometry section
 
@@ -209,7 +199,6 @@ CFD-Solver-2D/
 │   └── tiny_obj_loader.h
 ├── models/
 ├── lib/
-│   ├── sfml/
 │   └── stl_reader/
 ├── build/
 ├── CMakeLists.txt
@@ -222,9 +211,13 @@ CFD-Solver-2D/
 # Requirements
 
 - C++17 compatible compiler
-- CMake 3.10+
-- SFML
-- ParaView (optional)
+- CMake 3.28+
+- CUDA Toolkit (optional, for the GPU pressure solver)
+- OpenMP (optional, picked up automatically when present)
+- ParaView (optional, for looking at the output)
+
+There are no other dependencies. `tiny_obj_loader` and `stl_reader` are
+header-only and vendored, so a plain configure-and-build works out of the box.
 
 Supported compilers:
 
@@ -263,13 +256,39 @@ Configure:
 - Grid resolution
 - Flow parameters
 - Reynolds number
+- Gravity (optional: magnitude and direction)
 - Time parameters
 - Pressure solver parameters
 - Geometry
 - Slice orientation
-- Visualization options
 
 After confirmation the simulation starts immediately.
+
+## Gravity
+
+Off by default. Turning it on asks for two more numbers:
+
+```text
+Enable gravity? (0 = no, 1 = yes): 1
+Enter gravitational acceleration (m/s^2, 9.81 on Earth): 9.81
+Enter gravity direction (degrees clockwise from straight down: 0 = down, 90 = towards the inlet, 180 = up): 0
+```
+
+The direction is an angle rather than a vector for one reason: the flow
+direction is the one thing in this domain that cannot be turned — the inlet is
+always the left edge and the outlet the right one — so everything else turns
+around it. `0` is straight down, and the angle runs clockwise from there, so
+`90` points into the inlet, `180` is up, `270` runs along the flow. On the
+command line it is the same three keys:
+
+```powershell
+.\install\bin\cfd_app.exe gravityEnabled=1 gravityAccel=9.81 gravityAngle=30
+```
+
+**Read the *Gravity* part of §4 before expecting it to do something.** The
+short version: at constant density it cannot change the velocity field, only
+the pressure. That is not a limitation of this implementation, it is what the
+equations say.
 
 # Continuing a run
 
@@ -325,12 +344,16 @@ Continue from `solution_200_400.vtk` and the next series is
 | `saveInterval`, `outputDir`, `CFL`, `dtSafety`, `dtUpdateInterval`, `omega`, `smootherOmega`, `mgIterations`, `mgTolerance`, `mgMinCoarseSize`, `useCuda` | free |
 | `U0`, `nu` | allowed, but it is a discontinuity in the physics, not a continuation of the same problem |
 | `ro` | free — it only scales the pressure on the way out to Pa, the frame stores the kinematic field |
+| `gravityEnabled`, `gravityAccel`, `gravityAngle` | free — changing them shifts the hydrostatic part of the pressure and leaves the velocity where it was |
 
 Continuing from the last frame of a run and letting it go further produces
 **bit-identical** results to never having stopped at all.
-Piece 3 — deep-dive section, matches the tone of ## 9. Output
-markdown
-## 10. Continuing a run
+
+Frames written before gravity existed simply do not carry its three keys, and
+the reader skips keys it does not know, so they load with gravity off. Frames
+written now stay readable by builds that predate it, for the same reason.
+
+## Continuing a run, in detail
 
 Every frame is also a checkpoint. That is less obvious than it sounds, because
 what a frame shows and what the solver needs are not the same thing.
@@ -463,7 +486,7 @@ Alright. Building it up from the physics, because every design choice in the cod
 
 ## The one-paragraph version
 
-Pressure has no equation of its own; it's whatever makes the flow divergence-free. So each step you advance momentum ignoring pressure, measure the divergence you created, solve a Poisson equation for the pressure that cancels it, and subtract its gradient. The grid is staggered so pressure gradients and divergences land exactly where they're needed and the chessboard mode can't survive. The Poisson operator encodes every boundary condition in its coefficients, which guarantees it's exactly `div ∘ grad` and therefore that the projection actually projects. Multigrid solves it in `O(N)` by exploiting the fact that SOR smooths error fast but converges slowly — so you smooth on every grid size at once. Everything else is SIMD, threads, and not allocating memory in the inner loop.
+Pressure has no equation of its own; it's whatever makes the flow divergence-free. So each step you advance momentum ignoring pressure, measure the divergence you created, solve a Poisson equation for the pressure that cancels it, and subtract its gradient. The grid is staggered so pressure gradients and divergences land exactly where they're needed and the chessboard mode can't survive. The Poisson operator encodes every boundary condition in its coefficients, which guarantees it's exactly `div ∘ grad` and therefore that the projection actually projects. Multigrid solves it in `O(N)` by exploiting the fact that SOR smooths error fast but converges slowly — so you smooth on every grid size at once. Everything else is SIMD, threads, and not allocating memory in the inner loop. Gravity, if you switch it on, is one extra term in the predictor that the projection then cancels exactly — which is the correct answer at constant density, and §4 explains why.
 
 ---
 
@@ -586,7 +609,7 @@ dudy = (vn  > 0) ? (uij − ubot )*invDy : (utop   − uij)*invDy;
 d2x  = (uright − 2*uij + uleft)*invDx2;                          // central
 d2y  = (utop   − 2*uij + ubot )*invDy2;
 
-uStar = uij − dt*(uij*dudx + vn*dudy) + dt*ν*(d2x + d2y);
+uStar = uij − dt*(uij*dudx + vn*dudy) + dt*ν*(d2x + d2y) + dt*gx;
 ```
 
 **Convection uses upwind** — the derivative is taken on the side the flow is *coming from*. If fluid moves right, what's arriving at this face came from the left, so ask the left neighbour. Using a centred difference here would be unstable: it lets information propagate against the flow, which is physically wrong and numerically explosive.
@@ -597,7 +620,88 @@ uStar = uij − dt*(uij*dudx + vn*dudy) + dt*ν*(d2x + d2y);
 
 `vn` is the vertical velocity *at the u-face*, which doesn't exist there, so it's the average of the four surrounding `v` faces. This is the one place staggering makes you interpolate.
 
+`dt*gx` is gravity, and it is zero unless gravity is enabled. It goes *inside*
+the mask multiply, never outside — a closed face has to leave the predictor as
+an exact zero, and §8 explains what breaks if it doesn't.
+
 Then `v` gets the mirror-image treatment.
+
+### Gravity — and why it does nothing
+
+This one deserves its own heading, because the honest answer is unintuitive
+enough that people assume the code is broken when they see it.
+
+**At constant density, gravity cannot change the velocity field.** Not
+approximately — exactly. Gravity is uniform, so it is the gradient of a
+potential:
+
+```
+g = ∇Φ        with        Φ = gx·x + gy·y
+```
+
+which means `−∇p + g = −∇(p − Φ)`. Substitute `P = p − Φ` and the momentum
+equation is *literally* the gravity-free one. So the flow is whatever it was,
+and the pressure gains a hydrostatic term. This is why a swimming pool doesn't
+develop currents.
+
+And it holds **discretely**, not just on paper, for two reasons that are both
+already true in this solver:
+
+- the body force on a face, `dt·gx`, is exactly the discrete gradient of a
+  linear `Φ` across that face, because `Φ[i] − Φ[i−1] = gx·dx` with no
+  truncation error at all — a linear function is differenced exactly;
+- the Laplacian is exactly `div ∘ grad`, face by face, including at the
+  boundaries (§5).
+
+So the projection reconstructs `Φ` and subtracts precisely what the predictor
+added. Measured: turning gravity on changes `|u|` by `5·10⁻⁷` on a field of
+order 1, which is float roundoff, and changes `p` by exactly `ρΦ`.
+
+**Where it does *not* cancel: the outlet.** The outlet is the only Dirichlet
+condition in the operator, and it holds `p = 0` on the face. The hydrostatic
+field wants `p = Φ` there, and those are different demands. Left alone, the
+outlet is pinned to a pressure the field cannot reach, and the mismatch drives
+a jet of order `√(g·Ly)` — with `g = 9.81` and `Ly = 1` that is several times
+the inlet velocity. It doesn't look like a bug, it looks like gravity working,
+which is the worst way for a bug to look. Measured, on the run above:
+
+```
+|u|max, gravity off                    1.386   (steady)
+|u|max, gravity on, outlet left alone  3.671   (still climbing at t = 0.38)
+|u|max, gravity on, outlet corrected   1.386   (identical to gravity off)
+```
+
+The fix is to tell the outlet the truth. The ghost value becomes `2Φ − p`
+instead of `−p`, so the face average is `Φ` rather than zero. Expanding that,
+the coefficients are unchanged and the whole difference is one extra term,
+`2Φ/dx²`, which moves to the right-hand side — and the corrector applies the
+matching gradient, `+2·dt·(p − Φ)/dx` instead of `+2·dt·p/dx`. Two small
+additions, both of which vanish identically when gravity is off.
+
+The coefficients staying untouched matters: every coarse grid solves for the
+*error*, whose boundary condition is homogeneous no matter what the fine one
+is. The inhomogeneity belongs on the finest level's right-hand side and
+nowhere else, which is also why the CUDA path needed no changes at all — the
+fine RHS is the one thing that crosses the bus each step anyway.
+
+**One side effect worth knowing.** The multigrid stops on the *relative*
+residual `‖r‖/‖rhs‖`, and the hydrostatic term inflates `‖rhs‖`. So the same
+`mgTolerance` buys a looser solve than it does without gravity — on the run
+above, divergence went from `8·10⁻⁵` to `6·10⁻⁴` purely from stopping a cycle
+early. Tightening `mgTolerance` to `1e-6` brings it back to `7.6·10⁻⁵`, at or
+below the gravity-free value. The solver prints the ratio at startup when the
+hydrostatic head is more than a few times `U0²`, so you don't have to work it
+out yourself.
+
+**So why implement it at all?** Because the body force is the hook. Gravity
+starts driving flow the moment density stops being constant — a second phase,
+or a Boussinesq buoyancy term from a thermal solver, both of which are on the
+list at the top of this file. When that happens the term becomes
+`g·(ρ(x) − ρ₀)/ρ₀` and the cancellation stops being exact, which is the entire
+point. Everything else — the config plumbing, the six predictor sites, the
+outlet condition — is already correct and stays put. And in the meantime the
+pressure field in ParaView is a real pressure field, hydrostatic head included,
+rather than one with gravity quietly left out of it.
 
 ### `solvePoisson` — build the right-hand side, then solve
 
@@ -620,6 +724,8 @@ v[i,j] = v*[i,j] − dt·(p[i,j] − p[i,j−1])·invDy;
 ```
 
 Two adjacent pressures, subtract, scale. Done. Notice how clean this is *because* of staggering.
+
+The outlet face is the exception, since it is the one place with a prescribed pressure rather than a prescribed velocity — see §5, and *Gravity* above for what changes there when gravity is on.
 
 ---
 
@@ -660,6 +766,8 @@ u[nx,j] = u*[nx,j] + 2·dt·p[nx−1,j]·invDx;
 ```
 
 Two payoffs: (a) with one real Dirichlet condition the matrix is non-singular, so no pinning and no drift; (b) the outlet velocity is *corrected by the pressure*, so the solver balances outflow against inflow by itself. Measured mass error: 0.00000%.
+
+Being the only Dirichlet condition also makes it the only place gravity has to be told anything: `0` becomes `Φ`, the ghost becomes `2Φ − p`, and the extra `2Φ/dx²` lands in the right-hand side. The coefficients above do not change. See *Gravity* in §4.
 
 ### The identity
 
@@ -769,3 +877,5 @@ Everything above is the algorithm. This part is just making it run fast without 
 ## 9. Output
 
 `saveVTK` byte-swaps values into a 16 KB stack buffer and writes binary legacy VTK straight out — no temporary arrays, no per-cell copies. Pressure is stored internally as `p/ρ` (kinematic), so it's multiplied by `ro` on the way out to give Pascals. Btw kinematic pressure is much easier to use cause if u divide regular pressure by density u get m^2/s^2, not some kg/(m*s^2)
+
+One cell class gets special treatment on the way out. Solid cells have a zero diagonal and never take part in the solve, so their pressure sits at a permanent zero. Without gravity that zero is somewhere in the middle of the fluid range and nobody notices. With it the fluid is offset by the hydrostatic head, and the body would punch a visible hole straight through the pressure map — so solid cells are written with the hydrostatic value they would have had. Nothing ever reads them back; this is purely what ParaView sees.

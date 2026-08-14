@@ -54,13 +54,23 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
     invDx2 = invDx * invDx;
     invDy2 = invDy * invDy;
 
+    // Gravity is a constant of the run just like the spacing above, so the
+    // angle is resolved into a vector once. Clockwise from "straight down":
+    // 0 gives (0, -g), 90 gives (-g, 0) which points into the inlet.
+    if (cfg.gravityEnabled) {
+        constexpr float degToRad = 3.14159265358979f / 180.0f;
+        const float rad = cfg.gravityAngle * degToRad;
+        // The +0.f turns the -0.f that sin(0) produces back into a plain 0,
+        // purely so the startup line does not read "g = (-0, -9.81)"
+        gx = -cfg.gravityAccel * std::sin(rad) + 0.f;
+        gy = -cfg.gravityAccel * std::cos(rad) + 0.f;
+    }
+
     outputPath =
         cfg.outputDir.empty() ?
         std::filesystem::path(".") :
         narrowToPath(cfg.outputDir);
 
-    // Same story for the text that goes into every frame: the configuration
-    // is fixed by now, so it is serialized once instead of on each save
     configHeader = "formatVersion=1\n" + cfg.serialize();
 }
 
@@ -138,8 +148,6 @@ void Solver::initFields()
     std::fill(u_star.begin(), u_star.end(), 0.0f);
     std::fill(v_star.begin(), v_star.end(), 0.0f);
 
-    // A continuation already carries p, u and v, so only a fresh run starts
-    // from a uniform inlet profile
     if (!hasRestartState) {
         std::fill(p.begin(), p.end(), 0.0f);
         std::fill(u.begin(), u.end(), 0.0f);
@@ -164,6 +172,35 @@ void Solver::initFields()
               << multigrid.levelCount()
               << ", backend: " << (multigrid.usingCuda() ? "CUDA" : "CPU")
               << "\n";
+
+    if (cfg.gravityEnabled) {
+        // Say out loud what this does and does not do, because the honest
+        // answer surprises people: at constant density gravity is exactly a
+        // gradient, so the projection absorbs it into the pressure and the
+        // velocity field comes out unchanged. It starts driving flow only
+        // once the density stops being constant.
+        const float head = std::fabs(gx) * cfg.Lx + std::fabs(gy) * cfg.Ly;
+        std::cout << "Gravity: " << cfg.gravityAccel << " m/s^2 at "
+                  << cfg.gravityAngle << " deg -> g = (" << gx << ", " << gy
+                  << ") m/s^2.\n"
+                  << "  At constant density this cannot change the velocity "
+                     "field; it is absorbed\n"
+                     "  into the pressure as a hydrostatic head of "
+                  << head * cfg.ro << " Pa across the domain.\n";
+
+        // The head lands in the Poisson right-hand side, and the multigrid
+        // stops on ||r|| / ||rhs||. A big head inflates the denominator, so
+        // the same mgTolerance buys a looser solve than it would without it.
+        const float dynamic = cfg.U0 * cfg.U0;
+        if (dynamic > 0.0f && head > 5.0f * dynamic) {
+            std::cout << "  note: that head is " << (head / dynamic)
+                      << "x the dynamic scale U0^2. The multigrid stops on "
+                         "the relative\n"
+                         "  residual, so mgTolerance is effectively that much "
+                         "looser here. Lower it\n"
+                         "  (1e-6 or so) if the reported divergence matters.\n";
+        }
+    }
 
     if (multigrid.levelCount() < 3 && (nx > 32 || ny > 32)) {
         std::cout << "  note: few multigrid levels for " << nx << "x" << ny
@@ -243,7 +280,6 @@ void Solver::computeDt(){
         1.f / (2.f * cfg.nu * (invDx2 + invDy2)) :
         1e9f;
 
-    // Safety factor covers the velocity growth in between the recomputations
     dt = cfg.dtSafety * std::min(dtAdv, dtDiff);
 
     if (!(dt > 0.f) || std::isnan(dt) || std::isinf(dt))
@@ -254,6 +290,9 @@ void Solver::predictor() {
     const int nx = cfg.nx, ny = cfg.ny;
     const float dtNu = dt * cfg.nu;
     const float dtConv = dt;
+    // Body force. Both are zero when gravity is off, so nothing below changes.
+    const float dtGx = dt * gx;
+    const float dtGy = dt * gy;
     const float* __restrict uPtr = u.data();
     const float* __restrict vPtr = v.data();
     float* __restrict uStar = u_star.data();
@@ -268,6 +307,8 @@ void Solver::predictor() {
     const __m256 invDy2Vec = _mm256_set1_ps(invDy2);
     const __m256 dtConvVec = _mm256_set1_ps(dtConv);
     const __m256 dtNuVec   = _mm256_set1_ps(dtNu);
+    const __m256 dtGxVec   = _mm256_set1_ps(dtGx);
+    const __m256 dtGyVec   = _mm256_set1_ps(dtGy);
 
     #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny - 1; ++j) {
@@ -337,12 +378,17 @@ void Solver::predictor() {
                 _mm256_add_ps(
                     d2udx2,
                     d2udy2);
+            // The gravity term is added before the mask, never after: a closed
+            // face has to come out of here as an exact zero, that invariant is
+            // what lets the whole stencil stay branch-free
             const __m256 res =
                 _mm256_add_ps(
-                    _mm256_sub_ps(
-                        uij,
-                        _mm256_mul_ps(dtConvVec, conv)),
-                    _mm256_mul_ps(dtNuVec, diff));
+                    _mm256_add_ps(
+                        _mm256_sub_ps(
+                            uij,
+                            _mm256_mul_ps(dtConvVec, conv)),
+                        _mm256_mul_ps(dtNuVec, diff)),
+                    dtGxVec);
             // Multiplying by the mask zeroes the closed faces without a branch
             _mm256_storeu_ps(
                 uStarRow + i,
@@ -380,7 +426,8 @@ void Solver::predictor() {
             uStarRow[i] = uMask[i] * (
                 u_ij
                 - dtConv * (u_ij*dudx + v_n*dudy)
-                + dtNu * (d2udx2 + d2udy2));
+                + dtNu * (d2udx2 + d2udy2)
+                + dtGx);
         }
     }
 
@@ -428,7 +475,8 @@ void Solver::predictor() {
             uStarRow[i] = uMask[i] * (
                 u_ij
                 - dtConv * (u_ij*dudx + v_n*dudy)
-                + dtNu * (d2udx2 + d2udy2));
+                + dtNu * (d2udx2 + d2udy2)
+                + dtGx);
         }
     }
 
@@ -501,12 +549,15 @@ void Solver::predictor() {
                 _mm256_add_ps(
                     d2vdx2,
                     d2vdy2);
+            // Same as for u: gravity goes inside the mask, not outside it
             const __m256 res =
                 _mm256_add_ps(
-                    _mm256_sub_ps(
-                        vij,
-                        _mm256_mul_ps(dtConvVec, conv)),
-                    _mm256_mul_ps(dtNuVec, diff));
+                    _mm256_add_ps(
+                        _mm256_sub_ps(
+                            vij,
+                            _mm256_mul_ps(dtConvVec, conv)),
+                        _mm256_mul_ps(dtNuVec, diff)),
+                    dtGyVec);
             _mm256_storeu_ps(
                 vStarRow + i,
                 _mm256_mul_ps(res, _mm256_loadu_ps(vMask + i)));
@@ -543,7 +594,8 @@ void Solver::predictor() {
             vStarRow[i] = vMask[i] * (
                 v_ij
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
-                + dtNu * (d2vdx2 + d2vdy2));
+                + dtNu * (d2vdx2 + d2vdy2)
+                + dtGy);
         }
 
         for (int pass = 0; pass < 2; ++pass) {
@@ -581,7 +633,8 @@ void Solver::predictor() {
             vStarRow[iCol] = vMask[iCol] * (
                 v_ij
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
-                + dtNu * (d2vdx2 + d2vdy2));
+                + dtNu * (d2vdx2 + d2vdy2)
+                + dtGy);
         }
     }
 
@@ -643,6 +696,12 @@ void Solver::solvePoisson() {
 
             rhsPtr[rowP + i] = div * invDt;
         }
+    }
+
+    if (cfg.gravityEnabled) {
+        const float outletCoef = 2.f * invDx2;
+        for (int j = 0; j < ny; ++j)
+            rhsPtr[idxP(nx - 1, j)] -= outletCoef * phiOutlet(j);
     }
 
     const int cycles = std::max(1, cfg.mgIterations);
@@ -743,7 +802,8 @@ void Solver::corrector() {
             u[idxU(nx, j)] = 0.0f;
         } else {
             u[idxU(nx, j)] =
-                u_star[idxU(nx, j)] + outletFactor * p[idxP(nx - 1, j)];
+                u_star[idxU(nx, j)] +
+                outletFactor * (p[idxP(nx - 1, j)] - phiOutlet(j));
         }
     }
 
@@ -791,9 +851,6 @@ float Solver::maxVelocity() const {
 void Solver::projectRestartState() {
     const int nx = cfg.nx, ny = cfg.ny;
 
-    // Averaged cell velocities interpolated back onto the faces are not
-    // divergence free, so one projection is run before the first real step.
-    // Same size assignment on both sides, so this is a memcpy, not a realloc.
     u_star = u;
     v_star = v;
 
@@ -898,11 +955,6 @@ void Solver::saveVTK(int stepNum) const {
     constexpr size_t BUFFER_WORDS = 4096;
     std::array<uint32_t, BUFFER_WORDS> buffer;
     size_t bufferPos = 0;
-
-    // A fresh run keeps solution_<step>.vtk. A continuation hangs the very
-    // same step number off the frame it was seeded from, so the name says
-    // where it came from and how far it got:
-    // solution_200.vtk -> solution_200_300.vtk, solution_200_400.vtk, ...
     std::filesystem::path filename = outputPath;
     filename /= framePrefix + "_" + std::to_string(stepNum) + ".vtk";
 
@@ -960,7 +1012,16 @@ void Solver::saveVTK(int stepNum) const {
         const int row = j * nx;
 
         for (int i = 0; i < nx; ++i){
-            writeFloat(p[row + i] * cfg.ro);
+            // Solid cells have a zero diagonal and never take part in the
+            // solve, so their pressure is a permanent zero. Without gravity
+            // that sits in the middle of the fluid range and nobody notices;
+            // with it the fluid is offset by the hydrostatic head and the body
+            // would punch a visible hole through the pressure map. So the body
+            // is filled with the hydrostatic value it would have had. Nothing
+            // reads these cells back, this is purely what ParaView sees.
+            const float value =
+                solidMask[row + i] ? phiCell(i, j) : p[row + i];
+            writeFloat(value * cfg.ro);
         }
     }
     flushFloatBuffer();
@@ -1028,7 +1089,6 @@ void Solver::saveVTK(int stepNum) const {
     flushFloatBuffer();
     fout << "\n";
 
-    // Kinematic, unlike SCALARS pressure above, which is scaled to Pa
     fout << "pRaw 1 " << pCount << " float\n";
     for (size_t id = 0; id < pCount; ++id)
         writeFloat(p[id]);

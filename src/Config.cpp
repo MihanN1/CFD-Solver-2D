@@ -60,6 +60,17 @@ void Config::readFromConsole() {
     std::cin >> nu;
     std::cout << "Enter density ro. Make sure that the gas/liquid is incompressible(meaning for air speed its less than 0.3M)(kg/m^3): ";
     std::cin >> ro;
+    std::cout << "Enable gravity? (0 = no, 1 = yes): ";
+    std::cin >> gravityEnabled;
+    if (gravityEnabled) {
+        std::cout << "Enter gravitational acceleration (m/s^2, 9.81 on Earth): ";
+        std::cin >> gravityAccel;
+        std::cout << "Enter gravity direction (degrees clockwise from straight"
+                     " down: 0 = down, 90 = towards the inlet, 180 = up): ";
+        std::cin >> gravityAngle;
+        std::cout << "Note: at constant density gravity only adds hydrostatic"
+                     " pressure, the velocity field is unchanged.\n";
+    }
     std::cout << "Enter CFL number (recommended 0.3-0.5): ";
     std::cin >> CFL;
     std::cout << "Enter total simulation time(seconds): ";
@@ -108,6 +119,12 @@ void Config::print() const {
     std::cout << "  U0               = " << U0 << " m/s\n";
     std::cout << "  nu               = " << nu << " m^2/s\n";
     std::cout << "  ro               = " << ro << " kg/m^3\n";
+    std::cout << "  gravity          = " << (gravityEnabled ? "ON" : "OFF") << "\n";
+    if (gravityEnabled) {
+        std::cout << "  gravityAccel     = " << gravityAccel << " m/s^2\n";
+        std::cout << "  gravityAngle     = " << gravityAngle
+                  << " deg (clockwise, 0 = down)\n";
+    }
     std::cout << "  CFL              = " << CFL << "\n";
     std::cout << "  totalTime        = " << totalTime << " s\n";
     std::cout << "  dtUpdateInterval = " << dtUpdateInterval << " steps\n";
@@ -130,9 +147,6 @@ void Config::print() const {
 std::string Config::serialize() const {
     std::ostringstream out;
 
-    // max_digits10 is the shortest decimal form that round-trips back to the
-    // exact same binary value, so a continuation resumes from bit-identical
-    // parameters instead of something 1e-7 off
     out << std::setprecision(std::numeric_limits<float>::max_digits10)
         << "Lx=" << Lx << "\n"
         << "Ly=" << Ly << "\n"
@@ -141,6 +155,12 @@ std::string Config::serialize() const {
         << "U0=" << U0 << "\n"
         << "nu=" << nu << "\n"
         << "ro=" << ro << "\n"
+        // Frames written before gravity existed simply do not carry these keys,
+        // and setParam is never called for them, so the defaults leave gravity
+        // off. Old frames stay loadable, new frames stay readable by old builds.
+        << "gravityEnabled=" << (gravityEnabled ? 1 : 0) << "\n"
+        << "gravityAccel=" << gravityAccel << "\n"
+        << "gravityAngle=" << gravityAngle << "\n"
         << "CFL=" << CFL << "\n"
         << "dtUpdateInterval=" << dtUpdateInterval << "\n"
         << "dtSafety=" << dtSafety << "\n"
@@ -159,9 +179,6 @@ std::string Config::serialize() const {
     out << std::setprecision(std::numeric_limits<double>::max_digits10)
         << "totalTime=" << totalTime << "\n";
 
-    // Paths go last and unquoted: the reader splits on the first '=' only, so
-    // spaces and drive letters survive. A newline inside a path would not, but
-    // neither would it survive the command line.
     out << "outputDir=" << outputDir << "\n"
         << "geometryFile=" << geometryFile << "\n";
 
@@ -194,6 +211,9 @@ bool Config::setParam(const std::string& key, const std::string& value) {
     else if (lower == "slicerotation")    sliceRotation = std::strtof(value.c_str(), nullptr);
     else if (lower == "invertsection")    invertSection = (std::atoi(value.c_str()) != 0);
     else if (lower == "ro")               ro = std::strtof(value.c_str(), nullptr);
+    else if (lower == "gravityenabled")   gravityEnabled = (std::atoi(value.c_str()) != 0);
+    else if (lower == "gravityaccel")     gravityAccel = std::strtof(value.c_str(), nullptr);
+    else if (lower == "gravityangle")     gravityAngle = std::strtof(value.c_str(), nullptr);
     else if (lower == "usecuda")          useCuda = (std::atoi(value.c_str()) != 0);
     else if (lower == "restart")          restart = (std::atoi(value.c_str()) != 0);
     else if (lower == "restartfile")      restartFile = value;
@@ -278,6 +298,15 @@ bool Config::modifyParam(const std::string& name) {
     } else if (lower == "ro") {
         std::cout << "New ro(kg/m^3): ";
         std::cin >> ro;
+    } else if (lower == "gravityenabled") {
+        std::cout << "New gravityEnabled (0 = no, 1 = yes): ";
+        std::cin >> gravityEnabled;
+    } else if (lower == "gravityaccel") {
+        std::cout << "New gravityAccel (m/s^2): ";
+        std::cin >> gravityAccel;
+    } else if (lower == "gravityangle") {
+        std::cout << "New gravityAngle (deg clockwise, 0 = down): ";
+        std::cin >> gravityAngle;
     } else if (lower == "usecuda") {
         std::cout << "New useCuda (0 = no, 1 = yes): ";
         std::cin >> useCuda;
