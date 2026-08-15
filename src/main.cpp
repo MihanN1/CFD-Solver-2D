@@ -23,6 +23,14 @@ static void printUsage(const char* exe) {
         "      sliceRotation invertSection ro useCuda restart restartFile addTime\n"
         "      gravityEnabled gravityAccel gravityAngle\n"
         "\n"
+        "Rules:\n"
+        "  key=value, no spaces around '='  nx=256      not  nx = 256\n"
+        "  keys are case insensitive        NX=256, --nx=256 also work\n"
+        "  decimal separator is a dot       nu=0.002    not  nu=0,002\n"
+        "  switches take 1 or 0             useCuda=1   (true/false, yes/no too)\n"
+        "  no units inside the value        totalTime=2 not  totalTime=2s\n"
+        "  quote paths with spaces          \"geometryFile=C:\\my models\\a.stl\"\n"
+        "\n"
         "Example:\n"
         "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "
                        "totalTime=2 saveInterval=25\n"
@@ -33,6 +41,32 @@ static void printUsage(const char* exe) {
                        "saveInterval=5\n";
 }
 
+// argv arrives already split by the shell, so "nx 256" shows up as a bare
+// "nx" and a bare "256". Say which of the two happened instead of one
+// "Malformed argument" for everything.
+static std::string describeMalformed(const std::string& arg) {
+    if (arg.empty())
+        return "not a right way to write an empty argument: every argument is "
+               "key=value, e.g. nx=256.";
+    if (arg.front() == '=')
+        return "not a right way to write '" + arg +
+               "': the key in front of '=' is missing, e.g. nx=256.";
+
+    const std::string known = Config::canonicalKey(arg);
+    if (!known.empty())
+        return "not a right way to write '" + arg + "': " + known +
+               " needs its value glued to it, with no spaces around '='. "
+               "Write " + known + "=<value>.";
+
+    const std::string guess = Config::suggestKey(arg);
+    if (!guess.empty())
+        return "not a right way to write '" + arg + "': arguments are key=value "
+               "with no spaces. Did you mean " + guess + "=<value>?";
+
+    return "not a right way to write '" + arg + "': arguments are key=value "
+           "with no spaces, e.g. nx=256. Run with --help for the list of keys.";
+}
+
 int main(int argc, char** argv) {
     std::cout << "=== CFD-Solver-2D ===\n\n";
 
@@ -40,24 +74,50 @@ int main(int argc, char** argv) {
     std::vector<std::pair<std::string, std::string>> overrides;
 
     if (argc > 1) {
+        // --help wins wherever it sits on the line, even behind a broken
+        // argument, which is exactly when it tends to be needed.
         for (int a = 1; a < argc; ++a) {
             const std::string arg = argv[a];
-            if (arg == "-h" || arg == "--help") {
+            if (arg == "-h" || arg == "--help" || arg == "/?") {
                 printUsage(argv[0]);
                 return 0;
             }
+        }
+
+        // Every bad argument is collected, so one run reports all of them
+        // instead of one per attempt.
+        std::vector<std::string> problems;
+
+        for (int a = 1; a < argc; ++a) {
+            const std::string arg = argv[a];
             const size_t eq = arg.find('=');
             if (eq == std::string::npos || eq == 0) {
-                std::cerr << "Malformed argument: " << arg << "\n";
-                printUsage(argv[0]);
-                return 1;
+                problems.push_back(describeMalformed(arg));
+                continue;
             }
-            if (!cfg.setParam(arg.substr(0, eq), arg.substr(eq + 1))) {
-                std::cerr << "Unknown parameter: " << arg.substr(0, eq) << "\n";
-                printUsage(argv[0]);
-                return 1;
+            const std::string key = arg.substr(0, eq);
+            const std::string value = arg.substr(eq + 1);
+
+            std::string error, warning;
+            if (!cfg.setParam(key, value, error, &warning)) {
+                problems.push_back(error);
+                continue;
             }
-            overrides.emplace_back(arg.substr(0, eq), arg.substr(eq + 1));
+            if (!warning.empty())
+                std::cout << "Warning: " << warning << "\n";
+            overrides.emplace_back(key, value);
+        }
+
+        if (!problems.empty()) {
+            std::cerr << "\n" << problems.size()
+                      << (problems.size() == 1 ? " argument is wrong:\n"
+                                               : " arguments are wrong:\n");
+            for (const std::string& problem : problems)
+                std::cerr << "  " << problem << "\n";
+            std::cerr << "\nNothing has been started. Fix the line and run it "
+                         "again.\n\n";
+            printUsage(argv[0]);
+            return 1;
         }
         cfg.print();
     } else {

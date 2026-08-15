@@ -172,14 +172,20 @@ The implementation prioritizes computational performance without changing the nu
 ```text
 CFD-Solver-2D/
 ├── .vscode/
-├── output/
+├── out/
+│   ├── build/
+│   │   ├── x64Debug(or Release)
+│   │   │   ├── bin
+│   │   │   │   ├── Debug <-build here
+│   │   │   │   │   ├── output/ <-vtk here
+│   │   │   │   │   └── cfd_app.exe <-will be renamed to fluid_solver.exe, as there will be other solvers. other files arent really necessary to explain
 ├── logo/
 │   ├── toxic-mark-32.png
 │   ├── toxic-mark-64.png
 │   ├── toxic-mark-128.png
 │   ├── toxic-mark-256.png
 │   ├── toxic-mark-512.png
-│   ├── toxic-mark-1024.png
+│   └── toxic-mark-1024.png
 ├── src/
 │   ├── main.cpp
 │   ├── Config.cpp
@@ -197,10 +203,9 @@ CFD-Solver-2D/
 │   ├── Multigrid.hpp
 │   ├── MultigridCuda.cuh
 │   └── tiny_obj_loader.h
-├── models/
+├── models/ <- actially not really needed, but the models could be stored here. we store them here for tests.
 ├── lib/
 │   └── stl_reader/
-├── build/
 ├── CMakeLists.txt
 ├── LICENSE
 └── README.md
@@ -263,6 +268,111 @@ Configure:
 - Slice orientation
 
 After confirmation the simulation starts immediately.
+
+Every answer is read as a whole line and checked before it is accepted: a value
+that does not fit is refused with the reason and the same question is asked
+again, so one bad answer can no longer zero out everything after it. Pressing
+Enter keeps the value shown in brackets, and `nx=256` typed straight into the
+confirmation screen works too.
+
+## Non-interactive mode (`key=value`)
+
+Pass at least one argument and the program stops asking questions: it takes the
+whole configuration from the command line, prints it once and starts. That is
+the only switch there is - there is no `--batch` flag, `argc > 1` *is* the flag.
+
+```powershell
+.\install\bin\cfd_app.exe                        # interactive, as above
+.\install\bin\cfd_app.exe --help                 # the keys and the rules
+.\install\bin\cfd_app.exe nx=256 ny=128 nu=2e-3  # non-interactive
+```
+
+What changes in this mode:
+
+- no questions and no confirmation screen, the run starts immediately;
+- nothing is waited for at the end, the process just exits, so the whole run
+  fits in a loop or a batch file;
+- anything not given on the line keeps its default from `Config.hpp`;
+- on a continuation a rejected value is fatal instead of being asked again.
+
+### How to write the arguments
+
+| Rule | Right | Wrong |
+|---|---|---|
+| no spaces around `=` | `nx=256` | `nx = 256`, `nx 256` |
+| keys are case insensitive, leading dashes allowed | `nx=256`, `NX=256`, `--nx=256` | - |
+| decimal separator is a dot | `nu=0.002`, `nu=2e-3` | `nu=0,002` |
+| switches take 1 or 0 (`true/false`, `yes/no`, `on/off` also work) | `useCuda=1` | `useCuda=yeah` |
+| no units inside the value | `totalTime=2` | `totalTime=2s` |
+| counts are whole numbers | `saveInterval=25` | `saveInterval=25.5` |
+| quote the whole token when the path has spaces | `"geometryFile=C:\my models\wing.stl"` | `geometryFile=C:\my models\wing.stl` |
+
+Nothing is parsed leniently any more. A value that does not fit is refused by
+name, every bad argument on the line is reported in one go, and the run does not
+start:
+
+```text
+2 arguments are wrong:
+  not a right way to write nu=0,002: the decimal separator is a dot, write nu=0.002
+  not a right way to write useCuda=yeah: useCuda is a switch, write useCuda=1 or useCuda=0 (true/false, yes/no and on/off work too)
+
+Nothing has been started. Fix the line and run it again.
+```
+
+A misspelled key gets the nearest real one: `saveinterwal=5` answers
+*did you mean saveInterval?*
+
+Values that are legal but suspicious are kept and warned about instead:
+`CFL` above 1, `dtSafety` above 1, `omega` within 0.05 of 2, `mgTolerance`
+above 0.1, `nu=0`.
+
+### Keys and defaults
+
+| Key | Type | Default | Accepted |
+|---|---|---|---|
+| `Lx` `Ly` | float, m | 1.0 | > 0 |
+| `nx` `ny` | int | 50 | >= 8 |
+| `U0` | float, m/s | 1.0 | any finite |
+| `nu` | float, m^2/s | 0.01 | >= 0 |
+| `ro` | float, kg/m^3 | 1.225 | > 0 |
+| `gravityEnabled` | switch | 0 | 1 / 0 |
+| `gravityAccel` | float, m/s^2 | 9.81 | >= 0 |
+| `gravityAngle` | float, deg CW from down | 0 | any finite |
+| `CFL` | float | 0.5 | > 0, warns above 1 |
+| `totalTime` | double, s | 10.0 | > 0 |
+| `dtUpdateInterval` | int, steps | 5 | >= 1 |
+| `dtSafety` | float | 0.9 | > 0, warns above 1 |
+| `omega` | float | 1.85 | 0 < omega < 2 |
+| `smootherOmega` | float | 1.15 | 0 < omega < 2 |
+| `mgIterations` | int, V-cycles/step | 2 | >= 1 |
+| `mgTolerance` | float, relative | 1e-4 | 0 < tol <= 1 |
+| `mgMinCoarseSize` | int, cells/axis | 8 | >= 2 |
+| `useCuda` | switch | 1 | 1 / 0, ignored on a CPU-only build |
+| `saveInterval` | int, steps | 20 | >= 1 |
+| `outputDir` | path | `output` | created on the first frame, empty = current directory |
+| `geometryFile` | path or `none` | `none` | `none` is the verification circle |
+| `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
+| `invertSection` | switch | 0 | 1 / 0 |
+| `restart` | switch | 0 | 1 / 0 |
+| `restartFile` | path | empty | a `.vtk` frame or the folder holding them |
+| `addTime` | double, s | 0.0 | counts forward from the frame |
+
+Duplicated keys are applied in order, so the last one on the line wins. On a
+continuation every key given on the line is applied on top of the frame,
+whatever its position - see *Continuing a run*.
+
+### Parameter sweeps
+
+The point of the mode: no keypress anywhere in here.
+
+```powershell
+foreach ($n in 0.01, 0.005, 0.002, 0.001) {
+    .\install\bin\cfd_app.exe nx=256 ny=128 nu=$n totalTime=5 outputDir="out_nu_$n"
+}
+```
+
+The exit code is 0 on a finished run and 1 on anything refused, so a sweep can
+be stopped on the first bad line.
 
 ## Gravity
 

@@ -18,10 +18,6 @@ struct Config {
     // Density
     float ro = 1.225;   // kg/m^3
 
-    // Gravity (optional). The direction is degrees measured clockwise from
-    // "straight down", because in a 2D domain the flow direction is the one
-    // thing that cannot be turned, so everything else turns around it:
-    // 0 = down, 90 = towards the inlet, 180 = up, 270 = along the flow.
     bool gravityEnabled = false;
     float gravityAccel = 9.81f;   // m/s^2
     float gravityAngle = 0.0f;    // degrees, clockwise, 0 = down
@@ -55,11 +51,33 @@ struct Config {
 
     // Methods
     void readFromConsole();
+
+    // One prompt = one whole line = one setParam, so a bad answer cannot
+    // poison the stream for every prompt after it. Enter keeps the current
+    // value. Returns false only when the input stream is dead.
+    bool ask(const std::string& key, const std::string& prompt);
+
+    // Current value of a key as text, for the [default] shown in the prompt.
+    std::string currentValue(const std::string& key) const;
+
     void print() const;
     bool modifyParam(const std::string& name);
     bool confirm();   // returns true if confirmed, false if modified
 
     bool setParam(const std::string& key, const std::string& value);
+
+    // Same, but says what exactly is wrong with the value instead of quietly
+    // turning it into a zero. *warning is filled when the value is legal but
+    // almost certainly not what was meant; the assignment still happens then.
+    bool setParam(const std::string& key,
+                  const std::string& value,
+                  std::string& error,
+                  std::string* warning = nullptr);
+
+    // "nx" for "NX", "--nx", "'nx'". Empty when it is not a parameter at all.
+    static std::string canonicalKey(const std::string& key);
+    // Nearest parameter name for a typo, empty when nothing is close enough.
+    static std::string suggestKey(const std::string& key);
 
     std::string serialize() const;
 };

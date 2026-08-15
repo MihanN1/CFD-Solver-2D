@@ -1,5 +1,8 @@
 #include "Config.hpp"
+#include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cmath>
 #include <cstdlib>
 #include <iomanip>
 #include <iostream>
@@ -7,19 +10,6 @@
 #include <sstream>
 
 namespace {
-std::string readGeometryPath() {
-    std::string path;
-    std::getline(std::cin >> std::ws, path);
-
-    if (path.size() >= 2 &&
-        ((path.front() == '"' && path.back() == '"') ||
-         (path.front() == '\'' && path.back() == '\''))) {
-        path = path.substr(1, path.size() - 2);
-    }
-
-    return path;
-}
-
 std::string toLower(const std::string& s) {
     std::string out = s;
     for (char& c : out) {
@@ -27,82 +17,365 @@ std::string toLower(const std::string& s) {
     }
     return out;
 }
+
+// --- values, wherever they come from ---------------------------------------
+// strtof and atoi report nothing at all: "nu=0,002" quietly became 0.0 and the
+// run went on inviscid, "useCuda=true" turned CUDA off. std::cin >> value was
+// worse: it set failbit, left the junk in the buffer and every prompt after it
+// answered itself. Everything below refuses the value instead and says how it
+// should have been written.
+
+constexpr double kTiny = 1e-30;            // "anything except zero"
+constexpr double kHuge = 1e30;             // "no upper limit worth naming"
+constexpr double kIntMax = 2147483647.0;
+
+// Every key the command line, the prompts and the frame header accept, in the
+// spelling print() and serialize() use. Keep in sync with printUsage().
+const char* const kKeys[] = {
+    "Lx", "Ly", "nx", "ny", "U0", "nu", "ro",
+    "gravityEnabled", "gravityAccel", "gravityAngle",
+    "CFL", "totalTime", "dtUpdateInterval", "dtSafety",
+    "omega", "smootherOmega",
+    "mgIterations", "mgTolerance", "mgMinCoarseSize",
+    "useCuda", "saveInterval", "outputDir",
+    "geometryFile", "sliceAngleX", "sliceAngleZ", "sliceRotation",
+    "invertSection",
+    "restart", "restartFile", "addTime",
+};
+
+std::string trimSpace(const std::string& s) {
+    size_t b = 0, e = s.size();
+    while (b < e && std::isspace(static_cast<unsigned char>(s[b]))) ++b;
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) --e;
+    return s.substr(b, e - b);
+}
+
+// argv on Windows can keep the quotes the shell did not eat, and a path typed
+// into a prompt usually arrives with them too.
+std::string stripQuotes(const std::string& s) {
+    if (s.size() >= 2 &&
+        ((s.front() == '"' && s.back() == '"') ||
+         (s.front() == '\'' && s.back() == '\'')))
+        return s.substr(1, s.size() - 2);
+    return s;
+}
+
+std::string cleanValue(const std::string& raw) {
+    return trimSpace(stripQuotes(trimSpace(raw)));
+}
+
+std::string badValue(const std::string& key,
+                     const std::string& value,
+                     const std::string& why) {
+    return "not a right way to write " + key + "=" + value + ": " + why;
+}
+
+bool parseNumber(const std::string& key, const std::string& raw, bool integer,
+                 double& out, std::string& error) {
+    const std::string text = cleanValue(raw);
+
+    if (text.empty()) {
+        error = badValue(key, text,
+                         "the value is missing, write " + key + "=<number>");
+        return false;
+    }
+    if (text.find(',') != std::string::npos) {
+        std::string dotted = text;
+        std::replace(dotted.begin(), dotted.end(), ',', '.');
+        error = badValue(key, text,
+                         "the decimal separator is a dot, write " + key + "=" +
+                         dotted);
+        return false;
+    }
+
+    errno = 0;
+    char* end = nullptr;
+    const double parsed = std::strtod(text.c_str(), &end);
+
+    if (end == text.c_str()) {
+        error = badValue(key, text, "that is not a number");
+        return false;
+    }
+    while (*end != '\0' && std::isspace(static_cast<unsigned char>(*end)))
+        ++end;
+    if (*end != '\0') {
+        error = badValue(key, text,
+                         std::string("'") + end + "' is stuck to the number; "
+                         "units and extra characters are not part of the value");
+        return false;
+    }
+    if (errno == ERANGE || !std::isfinite(parsed)) {
+        error = badValue(key, text, "that number is out of range");
+        return false;
+    }
+    if (integer) {
+        double whole = 0.0;
+        if (std::modf(parsed, &whole) != 0.0) {
+            error = badValue(key, text,
+                             key + " counts things, so it has to be a whole "
+                             "number");
+            return false;
+        }
+        if (parsed < -kIntMax || parsed > kIntMax) {
+            error = badValue(key, text, "that number is out of range");
+            return false;
+        }
+    }
+    out = parsed;
+    return true;
+}
+
+bool inRange(const std::string& key, const std::string& raw, double value,
+             double lo, double hi, const char* rule, std::string& error) {
+    if (value >= lo && value <= hi)
+        return true;
+    error = badValue(key, cleanValue(raw), rule);
+    return false;
+}
+
+bool assignFloat(float& target, const std::string& key, const std::string& raw,
+                 double lo, double hi, const char* rule, std::string& error) {
+    double v = 0.0;
+    if (!parseNumber(key, raw, false, v, error)) return false;
+    if (!inRange(key, raw, v, lo, hi, rule, error)) return false;
+    target = static_cast<float>(v);
+    return true;
+}
+
+bool assignDouble(double& target, const std::string& key, const std::string& raw,
+                  double lo, double hi, const char* rule, std::string& error) {
+    double v = 0.0;
+    if (!parseNumber(key, raw, false, v, error)) return false;
+    if (!inRange(key, raw, v, lo, hi, rule, error)) return false;
+    target = v;
+    return true;
+}
+
+bool assignInt(int& target, const std::string& key, const std::string& raw,
+               double lo, double hi, const char* rule, std::string& error) {
+    double v = 0.0;
+    if (!parseNumber(key, raw, true, v, error)) return false;
+    if (!inRange(key, raw, v, lo, hi, rule, error)) return false;
+    target = static_cast<int>(v);
+    return true;
+}
+
+bool assignBool(bool& target, const std::string& key, const std::string& raw,
+                std::string& error) {
+    const std::string text = toLower(cleanValue(raw));
+    if (text == "1" || text == "true" || text == "yes" || text == "on") {
+        target = true;
+        return true;
+    }
+    if (text == "0" || text == "false" || text == "no" || text == "off") {
+        target = false;
+        return true;
+    }
+    error = badValue(key, cleanValue(raw),
+                     key + " is a switch, write " + key + "=1 or " + key +
+                     "=0 (true/false, yes/no and on/off work too)");
+    return false;
+}
+
+int editDistance(const std::string& a, const std::string& b) {
+    std::vector<int> prev(b.size() + 1), cur(b.size() + 1);
+    for (size_t j = 0; j <= b.size(); ++j)
+        prev[j] = static_cast<int>(j);
+    for (size_t i = 1; i <= a.size(); ++i) {
+        cur[0] = static_cast<int>(i);
+        for (size_t j = 1; j <= b.size(); ++j) {
+            const int cost = (a[i - 1] == b[j - 1]) ? 0 : 1;
+            cur[j] = std::min({prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost});
+        }
+        prev.swap(cur);
+    }
+    return prev[b.size()];
+}
+}
+
+std::string Config::canonicalKey(const std::string& key) {
+    std::string name = cleanValue(key);
+    while (!name.empty() && (name.front() == '-' || name.front() == '/'))
+        name.erase(name.begin());
+
+    const std::string lower = toLower(name);
+    for (const char* known : kKeys)
+        if (toLower(known) == lower)
+            return known;
+    return std::string();
+}
+
+std::string Config::suggestKey(const std::string& key) {
+    const std::string exact = canonicalKey(key);
+    if (!exact.empty())
+        return exact;
+
+    std::string name = cleanValue(key);
+    while (!name.empty() && (name.front() == '-' || name.front() == '/'))
+        name.erase(name.begin());
+    const std::string lower = toLower(name);
+    if (lower.empty())
+        return std::string();
+
+    std::string best;
+    int bestDistance = 0;
+    for (const char* known : kKeys) {
+        const int d = editDistance(lower, toLower(known));
+        if (best.empty() || d < bestDistance) {
+            best = known;
+            bestDistance = d;
+        }
+    }
+    const int limit = std::max(2, static_cast<int>(lower.size()) / 3);
+    return bestDistance <= limit ? best : std::string();
+}
+
+std::string Config::currentValue(const std::string& key) const {
+    const std::string wanted = canonicalKey(key);
+    if (wanted.empty())
+        return std::string();
+
+    // Not part of serialize(), they describe the run and not the physics.
+    if (wanted == "restart")
+        return restart ? "1" : "0";
+    if (wanted == "restartFile")
+        return restartFile;
+    if (wanted == "addTime") {
+        std::ostringstream out;
+        out << addTime;
+        return out.str();
+    }
+
+    std::istringstream text(serialize());
+    std::string line;
+    while (std::getline(text, line)) {
+        const size_t eq = line.find('=');
+        if (eq == std::string::npos)
+            continue;
+        if (canonicalKey(line.substr(0, eq)) != wanted)
+            continue;
+
+        const std::string value = line.substr(eq + 1);
+        // serialize() prints at full float precision, which reads terribly in
+        // a prompt ("0.00999999978"). Round it back to what print() shows.
+        char* end = nullptr;
+        const double number = std::strtod(value.c_str(), &end);
+        if (end != value.c_str() && *end == '\0') {
+            std::ostringstream out;
+            out << number;
+            return out.str();
+        }
+        return value;
+    }
+    return std::string();
+}
+
+bool Config::ask(const std::string& key, const std::string& prompt) {
+    const std::string canon = canonicalKey(key);
+    const std::string name = canon.empty() ? key : canon;
+
+    for (;;) {
+        std::cout << prompt;
+        const std::string shown = currentValue(name);
+        if (!shown.empty())
+            std::cout << " [" << shown << "]";
+        std::cout << ": ";
+
+        std::string line;
+        if (!std::getline(std::cin, line)) {
+            // Ctrl+Z, Ctrl+D, or a script that ran out of input. Reading on a
+            // dead stream returns instantly, so asking anything else would
+            // just scroll the remaining questions past without an answer.
+            std::cout << "\nEnd of input. Keeping the rest of the "
+                         "configuration as it is.\n";
+            return false;
+        }
+
+        line = trimSpace(line);
+        if (line.empty())
+            return true;   // Enter keeps what is already there
+
+        std::string error, warning;
+        if (setParam(name, line, error, &warning)) {
+            if (!warning.empty())
+                std::cout << "  Warning: " << warning << "\n";
+            return true;
+        }
+        std::cout << "  " << error << "\n";
+    }
 }
 
 void Config::readFromConsole() {
     std::cout << "=== CFD-Solver-2D Configuration ===\n";
+    std::cout << "Press Enter to keep the value shown in brackets.\n\n";
     std::cout << "Start a new simulation or continue an old one?\n";
     std::cout << "  0 = new simulation\n";
-    std::cout << "  1 = continue from a saved .vtk\n> ";
-    std::cin >> restart;
+    std::cout << "  1 = continue from a saved .vtk\n";
+    if (!ask("restart", "Your choice"))
+        return;
     if (restart) {
-        // Everything else comes out of the file, so there is nothing left to
-        // ask here. main() restores the configuration and then drops into the
-        // usual confirm() loop, so some parameters can be changed for some
-        // experiments or something, i dont really care but its cool ahhaha
-        std::cout << "Enter path to the .vtk to continue from"
-                     " (or the folder with the frames, newest one wins): ";
-        restartFile = readGeometryPath();
+        while (restartFile.empty()) {
+            if (!ask("restartFile",
+                     "Enter path to the .vtk to continue from (or the folder "
+                     "with the frames, newest one wins)"))
+                return;
+        }
         std::cout << "Configuration will be restored from that frame.\n";
         return;
     }
-    std::cout << "Enter domain width Lx (m): ";
-    std::cin >> Lx;
-    std::cout << "Enter domain height Ly (m): ";
-    std::cin >> Ly;
-    std::cout << "Enter number of cells in x-direction nx: ";
-    std::cin >> nx;
-    std::cout << "Enter number of cells in y-direction ny: ";
-    std::cin >> ny;
-    std::cout << "Enter inlet velocity U0 (m/s): ";
-    std::cin >> U0;
-    std::cout << "Enter kinematic viscosity nu (m^2/s): ";
-    std::cin >> nu;
-    std::cout << "Enter density ro. Make sure that the gas/liquid is incompressible(meaning for air speed its less than 0.3M)(kg/m^3): ";
-    std::cin >> ro;
-    std::cout << "Enable gravity? (0 = no, 1 = yes): ";
-    std::cin >> gravityEnabled;
+    if (!ask("Lx", "Enter domain width Lx (m)")) return;
+    if (!ask("Ly", "Enter domain height Ly (m)")) return;
+    if (!ask("nx", "Enter number of cells in x-direction nx")) return;
+    if (!ask("ny", "Enter number of cells in y-direction ny")) return;
+    if (!ask("U0", "Enter inlet velocity U0 (m/s)")) return;
+    if (!ask("nu", "Enter kinematic viscosity nu (m^2/s)")) return;
+    if (!ask("ro", "Enter density ro. Make sure that the gas/liquid is "
+                   "incompressible (meaning for air speed its less than 0.3M) "
+                   "(kg/m^3)")) return;
+    if (!ask("gravityEnabled", "Enable gravity? (0 = no, 1 = yes)")) return;
     if (gravityEnabled) {
-        std::cout << "Enter gravitational acceleration (m/s^2, 9.81 on Earth): ";
-        std::cin >> gravityAccel;
-        std::cout << "Enter gravity direction (degrees clockwise from straight"
-                     " down: 0 = down, 90 = towards the inlet, 180 = up): ";
-        std::cin >> gravityAngle;
+        if (!ask("gravityAccel",
+                 "Enter gravitational acceleration (m/s^2, 9.81 on Earth)"))
+            return;
+        if (!ask("gravityAngle",
+                 "Enter gravity direction (degrees clockwise from straight "
+                 "down: 0 = down, 90 = towards the inlet, 180 = up)"))
+            return;
         std::cout << "Note: at constant density gravity only adds hydrostatic"
                      " pressure, the velocity field is unchanged.\n";
     }
-    std::cout << "Enter CFL number (recommended 0.3-0.5): ";
-    std::cin >> CFL;
-    std::cout << "Enter total simulation time(seconds): ";
-    std::cin >> totalTime;
-    std::cout << "Enter steps between dt recomputations (recommended 5): ";
-    std::cin >> dtUpdateInterval;
-    std::cout << "Enter SOR relaxation parameter omega (1.6-1.85): ";
-    std::cin >> omega;
-    std::cout << "Enter SOR relaxation parameter smootherOmega (for the coarsest multigrid level, 1.0-1.3 recommended): ";
-    std::cin >> smootherOmega;
-    std::cout << "Enter multigrid V-cycles per step (2 by default, 4-10 max recommended): ";
-    std::cin >> mgIterations;
-    std::cout << "Enter multigrid relative residual tolerance (1e-4 HEAVILY recommended): ";
-    std::cin >> mgTolerance;
-    std::cout << "Enter minimum coarse grid size (8 recommended): ";
-    std::cin >> mgMinCoarseSize;
-    std::cout << "Enter VTK save interval in steps (1 = every step, 20 recommended): ";
-    std::cin >> saveInterval;
-    std::cout << "Enter path to 3D model (or 'none' for circle): ";
-    geometryFile = readGeometryPath();
-    std::cout << "Enter around the axis going towards the observer (degrees, default 0): ";
-    std::cin >> sliceAngleX;
-    std::cout << "Enter around a vertical axis (degrees, default 0): ";
-    std::cin >> sliceAngleZ;
-    std::cout << "Enter rotation in the simulation plane (degrees, default 0): ";
-    std::cin >> sliceRotation;
-    std::cout << "Mirror the section? (0 = no, 1 = yes): ";
-    std::cin >> invertSection;
+    if (!ask("CFL", "Enter CFL number (recommended 0.3-0.5)")) return;
+    if (!ask("totalTime", "Enter total simulation time (seconds)")) return;
+    if (!ask("dtUpdateInterval",
+             "Enter steps between dt recomputations (recommended 5)")) return;
+    if (!ask("omega", "Enter SOR relaxation parameter omega (1.6-1.85)")) return;
+    if (!ask("smootherOmega",
+             "Enter SOR relaxation parameter smootherOmega (for the coarsest "
+             "multigrid level, 1.0-1.3 recommended)")) return;
+    if (!ask("mgIterations",
+             "Enter multigrid V-cycles per step (2 by default, 4-10 max "
+             "recommended)")) return;
+    if (!ask("mgTolerance",
+             "Enter multigrid relative residual tolerance (1e-4 HEAVILY "
+             "recommended)")) return;
+    if (!ask("mgMinCoarseSize",
+             "Enter minimum coarse grid size (8 recommended)")) return;
+    if (!ask("saveInterval",
+             "Enter VTK save interval in steps (1 = every step, 20 "
+             "recommended)")) return;
+    if (!ask("geometryFile",
+             "Enter path to 3D model (or 'none' for circle)")) return;
+    if (!ask("sliceAngleX",
+             "Enter around the axis going towards the observer (degrees)"))
+        return;
+    if (!ask("sliceAngleZ", "Enter around a vertical axis (degrees)")) return;
+    if (!ask("sliceRotation",
+             "Enter rotation in the simulation plane (degrees)")) return;
+    if (!ask("invertSection", "Mirror the section? (0 = no, 1 = yes)")) return;
+    if (!ask("useCuda",
+             "Use cuda? (0 = no, 1 = yes, ignored on a CPU-only build)"))
+        return;
     std::cout << "Configuration read.\n";
-    std::cout << "Use cuda? (0 = no, 1 = yes, ignored on a CPU-only build): ";
-    std::cin >> useCuda;
-    std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
 }
 void Config::print() const {
     std::cout << "\n--- Current Configuration ---\n";
@@ -186,160 +459,163 @@ std::string Config::serialize() const {
 }
 
 bool Config::setParam(const std::string& key, const std::string& value) {
-    const std::string lower = toLower(key);
+    std::string ignored;
+    return setParam(key, value, ignored, nullptr);
+}
 
-    if (lower == "lx")                    Lx = std::strtof(value.c_str(), nullptr);
-    else if (lower == "ly")               Ly = std::strtof(value.c_str(), nullptr);
-    else if (lower == "nx")               nx = std::atoi(value.c_str());
-    else if (lower == "ny")               ny = std::atoi(value.c_str());
-    else if (lower == "u0")               U0 = std::strtof(value.c_str(), nullptr);
-    else if (lower == "nu")               nu = std::strtof(value.c_str(), nullptr);
-    else if (lower == "cfl")              CFL = std::strtof(value.c_str(), nullptr);
-    else if (lower == "totaltime")        totalTime = std::strtod(value.c_str(), nullptr);
-    else if (lower == "dtupdateinterval") dtUpdateInterval = std::atoi(value.c_str());
-    else if (lower == "dtsafety")         dtSafety = std::strtof(value.c_str(), nullptr);
-    else if (lower == "omega")            omega = std::strtof(value.c_str(), nullptr);
-    else if (lower == "smootheromega")    smootherOmega = std::strtof(value.c_str(), nullptr);
-    else if (lower == "mgiterations")     mgIterations = std::atoi(value.c_str());
-    else if (lower == "mgtolerance")      mgTolerance = std::strtof(value.c_str(), nullptr);
-    else if (lower == "mgmincoarsesize")  mgMinCoarseSize = std::atoi(value.c_str());
-    else if (lower == "saveinterval")     saveInterval = std::atoi(value.c_str());
-    else if (lower == "outputdir")        outputDir = value;
-    else if (lower == "geometryfile")     geometryFile = value;
-    else if (lower == "sliceanglex")      sliceAngleX = std::strtof(value.c_str(), nullptr);
-    else if (lower == "sliceanglez")      sliceAngleZ = std::strtof(value.c_str(), nullptr);
-    else if (lower == "slicerotation")    sliceRotation = std::strtof(value.c_str(), nullptr);
-    else if (lower == "invertsection")    invertSection = (std::atoi(value.c_str()) != 0);
-    else if (lower == "ro")               ro = std::strtof(value.c_str(), nullptr);
-    else if (lower == "gravityenabled")   gravityEnabled = (std::atoi(value.c_str()) != 0);
-    else if (lower == "gravityaccel")     gravityAccel = std::strtof(value.c_str(), nullptr);
-    else if (lower == "gravityangle")     gravityAngle = std::strtof(value.c_str(), nullptr);
-    else if (lower == "usecuda")          useCuda = (std::atoi(value.c_str()) != 0);
-    else if (lower == "restart")          restart = (std::atoi(value.c_str()) != 0);
-    else if (lower == "restartfile")      restartFile = value;
-    else if (lower == "addtime")          addTime = std::strtod(value.c_str(), nullptr);
-    else return false;
+bool Config::setParam(const std::string& key,
+                      const std::string& value,
+                      std::string& error,
+                      std::string* warning) {
+    error.clear();
+    if (warning)
+        warning->clear();
 
+    const std::string k = canonicalKey(key);
+    if (k.empty()) {
+        const std::string guess = suggestKey(key);
+        error = badValue(trimSpace(key), cleanValue(value),
+                         guess.empty()
+                             ? "there is no such parameter, run with --help "
+                               "for the list"
+                             : "there is no such parameter. Did you mean " +
+                                   guess + "?");
+        return false;
+    }
+
+    bool ok = false;
+    if      (k == "Lx") ok = assignFloat(Lx, k, value, kTiny, kHuge,
+             "the domain width must be a positive length in metres", error);
+    else if (k == "Ly") ok = assignFloat(Ly, k, value, kTiny, kHuge,
+             "the domain height must be a positive length in metres", error);
+    else if (k == "nx") ok = assignInt(nx, k, value, 8, kIntMax,
+             "the grid needs at least 8 cells per axis, the multigrid has "
+             "nothing to coarsen below that", error);
+    else if (k == "ny") ok = assignInt(ny, k, value, 8, kIntMax,
+             "the grid needs at least 8 cells per axis, the multigrid has "
+             "nothing to coarsen below that", error);
+    else if (k == "U0") ok = assignFloat(U0, k, value, -kHuge, kHuge,
+             "the inlet velocity must be a finite number", error);
+    else if (k == "nu") ok = assignFloat(nu, k, value, 0.0, kHuge,
+             "viscosity cannot be negative (0 means inviscid)", error);
+    else if (k == "ro") ok = assignFloat(ro, k, value, kTiny, kHuge,
+             "density must be positive", error);
+    else if (k == "gravityEnabled") ok = assignBool(gravityEnabled, k, value, error);
+    else if (k == "gravityAccel") ok = assignFloat(gravityAccel, k, value, 0.0, kHuge,
+             "this is a magnitude, it cannot be negative; to point gravity the "
+             "other way use gravityAngle=180", error);
+    else if (k == "gravityAngle") ok = assignFloat(gravityAngle, k, value, -kHuge, kHuge,
+             "the angle must be a finite number of degrees", error);
+    else if (k == "CFL") ok = assignFloat(CFL, k, value, kTiny, kHuge,
+             "the CFL number must be positive (0.3-0.5 is the usual range)", error);
+    else if (k == "totalTime") ok = assignDouble(totalTime, k, value, kTiny, kHuge,
+             "the simulated time must be positive", error);
+    else if (k == "dtUpdateInterval") ok = assignInt(dtUpdateInterval, k, value, 1, kIntMax,
+             "dt is recomputed every N steps, so N is at least 1", error);
+    else if (k == "dtSafety") ok = assignFloat(dtSafety, k, value, kTiny, kHuge,
+             "this is the fraction of the stable dt that is actually taken, so "
+             "it must be positive (0.9 = 90%)", error);
+    else if (k == "omega") ok = assignFloat(omega, k, value, kTiny, 2.0 - 1e-6,
+             "SOR only converges for 0 < omega < 2", error);
+    else if (k == "smootherOmega") ok = assignFloat(smootherOmega, k, value, kTiny, 2.0 - 1e-6,
+             "SOR only converges for 0 < smootherOmega < 2", error);
+    else if (k == "mgIterations") ok = assignInt(mgIterations, k, value, 1, kIntMax,
+             "at least one V-cycle per pressure solve", error);
+    else if (k == "mgTolerance") ok = assignFloat(mgTolerance, k, value, kTiny, 1.0,
+             "this is a relative residual, so it lives between 0 and 1 "
+             "(1e-4 recommended)", error);
+    else if (k == "mgMinCoarseSize") ok = assignInt(mgMinCoarseSize, k, value, 2, kIntMax,
+             "the coarsest grid needs at least 2 cells per axis", error);
+    else if (k == "useCuda") ok = assignBool(useCuda, k, value, error);
+    else if (k == "saveInterval") ok = assignInt(saveInterval, k, value, 1, kIntMax,
+             "a frame is written every N steps, so N is at least 1", error);
+    else if (k == "outputDir")    { outputDir = cleanValue(value); ok = true; }
+    else if (k == "geometryFile") { geometryFile = cleanValue(value); ok = true; }
+    else if (k == "sliceAngleX") ok = assignFloat(sliceAngleX, k, value, -kHuge, kHuge,
+             "the angle must be a finite number of degrees", error);
+    else if (k == "sliceAngleZ") ok = assignFloat(sliceAngleZ, k, value, -kHuge, kHuge,
+             "the angle must be a finite number of degrees", error);
+    else if (k == "sliceRotation") ok = assignFloat(sliceRotation, k, value, -kHuge, kHuge,
+             "the angle must be a finite number of degrees", error);
+    else if (k == "invertSection") ok = assignBool(invertSection, k, value, error);
+    else if (k == "restart")       ok = assignBool(restart, k, value, error);
+    else if (k == "restartFile")  { restartFile = cleanValue(value); ok = true; }
+    else if (k == "addTime") ok = assignDouble(addTime, k, value, -kHuge, kHuge,
+             "addTime must be a finite number of seconds", error);
+
+    if (!ok)
+        return false;
+
+    // Legal, but almost certainly not what was meant. The value is kept and
+    // the caller decides whether anybody is listening.
+    if (warning) {
+        const std::string shown = k + "=" + cleanValue(value);
+        if (k == "CFL" && CFL > 1.0f)
+            *warning = shown + " is above 1; advection here is explicit, so "
+                               "the run will most likely blow up";
+        else if (k == "dtSafety" && dtSafety > 1.0f)
+            *warning = shown + " takes a bigger step than the stability "
+                               "estimate allows";
+        else if ((k == "omega" && omega >= 1.95f) ||
+                 (k == "smootherOmega" && smootherOmega >= 1.95f))
+            *warning = shown + " is very close to 2, where SOR stops being "
+                               "reliable";
+        else if (k == "mgTolerance" && mgTolerance > 0.1f)
+            *warning = shown + " is a very loose tolerance; the pressure solve "
+                               "will stop long before the field is divergence "
+                               "free";
+        else if (k == "nu" && nu == 0.0f)
+            *warning = shown + " is inviscid; nothing damps the smallest scales";
+    }
     return true;
 }
 
 bool Config::modifyParam(const std::string& name) {
-    const std::string lower = toLower(name);
-    bool usedFormattedInput = true;
-
-    if (lower == "lx") {
-        std::cout << "New Lx: ";
-        std::cin >> Lx;
-    } else if (lower == "ly") {
-        std::cout << "New Ly: ";
-        std::cin >> Ly;
-    } else if (lower == "nx") {
-        std::cout << "New nx: ";
-        std::cin >> nx;
-    } else if (lower == "ny") {
-        std::cout << "New ny: ";
-        std::cin >> ny;
-    } else if (lower == "u0") {
-        std::cout << "New U0: ";
-        std::cin >> U0;
-    } else if (lower == "nu") {
-        std::cout << "New nu: ";
-        std::cin >> nu;
-    } else if (lower == "cfl") {
-        std::cout << "New CFL: ";
-        std::cin >> CFL;
-    } else if (lower == "totaltime") {
-        std::cout << "New totalTime: ";
-        std::cin >> totalTime;
-    } else if (lower == "dtupdateinterval") {
-        std::cout << "New dtUpdateInterval (steps between dt recomputations): ";
-        std::cin >> dtUpdateInterval;
-    } else if (lower == "dtsafety") {
-        std::cout << "New dtSafety (0..1): ";
-        std::cin >> dtSafety;
-    } else if (lower == "omega") {
-        std::cout << "New omega: ";
-        std::cin >> omega;
-    } else if (lower == "smootheromega") {
-        std::cout << "New smootherOmega (1.0-1.3 recommended): ";
-        std::cin >> smootherOmega;
-    } else if (lower == "mgiterations") {
-        std::cout << "New mgIterations: ";
-        std::cin >> mgIterations;
-    } else if (lower == "mgtolerance") {
-        std::cout << "New mgTolerance (relative residual): ";
-        std::cin >> mgTolerance;
-    } else if (lower == "mgmincoarsesize") {
-        std::cout << "New mgMinCoarseSize: ";
-        std::cin >> mgMinCoarseSize;
-    } else if (lower == "saveinterval") {
-        std::cout << "New saveInterval (steps): ";
-        std::cin >> saveInterval;
-    } else if (lower == "outputdir") {
-        std::cout << "New outputDir: ";
-        outputDir = readGeometryPath();
-        usedFormattedInput = false;
-    } else if (lower == "geometryfile") {
-        std::cout << "New geometryFile: ";
-        geometryFile = readGeometryPath();
-        usedFormattedInput = false;
-    } else if (lower == "sliceanglex") {
-        std::cout << "New sliceAngleX (deg): ";
-        std::cin >> sliceAngleX;
-    } else if (lower == "sliceanglez") {
-        std::cout << "New sliceAngleZ (deg): ";
-        std::cin >> sliceAngleZ;
-    } else if (lower == "invertsection") {
-        std::cout << "New invertSection: ";
-        std::cin >> invertSection;
-    } else if (lower == "slicerotation") {
-        std::cout << "New sliceRotation (deg): ";
-        std::cin >> sliceRotation;
-    } else if (lower == "ro") {
-        std::cout << "New ro(kg/m^3): ";
-        std::cin >> ro;
-    } else if (lower == "gravityenabled") {
-        std::cout << "New gravityEnabled (0 = no, 1 = yes): ";
-        std::cin >> gravityEnabled;
-    } else if (lower == "gravityaccel") {
-        std::cout << "New gravityAccel (m/s^2): ";
-        std::cin >> gravityAccel;
-    } else if (lower == "gravityangle") {
-        std::cout << "New gravityAngle (deg clockwise, 0 = down): ";
-        std::cin >> gravityAngle;
-    } else if (lower == "usecuda") {
-        std::cout << "New useCuda (0 = no, 1 = yes): ";
-        std::cin >> useCuda;
-    } else if (lower == "restartfile") {
-        std::cout << "New restartFile: ";
-        restartFile = readGeometryPath();
-        usedFormattedInput = false;
-    } else if (lower == "addtime") {
-        std::cout << "New addTime (seconds to add on top of the frame): ";
-        std::cin >> addTime;
-    } else {
-        std::cout << "Unknown parameter: " << name << "\n";
+    const std::string canon = canonicalKey(name);
+    if (canon.empty()) {
+        const std::string guess = suggestKey(name);
+        std::cout << "There is no parameter called '" << trimSpace(name) << "'";
+        if (!guess.empty())
+            std::cout << ". Did you mean " << guess << "?";
+        std::cout << "\n";
         return false;
     }
-    if (usedFormattedInput) {
-        std::cin.ignore(std::numeric_limits<std::streamsize>::max(), '\n');
-    }
-    std::cout << "Parameter updated.\n";
-    return true;
+    // confirm() reprints the whole configuration on the next turn, so there is
+    // nothing to announce here.
+    return ask(canon, "New " + canon);
 }
 bool Config::confirm() {
     print();
-    std::cout << "\nTo change a parameter, type its name (e.g., 'nx') and press Enter.\n";
+    std::cout << "\nTo change a parameter, type its name (e.g. 'nx'), or the\n"
+                 "whole thing at once ('nx=256'), and press Enter.\n";
     std::cout << "To confirm all parameters and proceed, just press Enter (empty line).\n";
     std::cout << "> ";
 
     std::string input;
-    std::getline(std::cin, input);
+    if (!std::getline(std::cin, input)) {
+        std::cout << "\nEnd of input, going with the configuration above.\n";
+        return true;
+    }
+    input = trimSpace(input);
 
     if (input.empty()) {
         return true;   // confirmed
-    } else {
-        modifyParam(input);
-        return false;  // not confirmed yet, loop again
     }
+
+    // "nx=256" is set right here, without a second prompt, which is also what
+    // anyone who has used the command line will type first.
+    const size_t eq = input.find('=');
+    if (eq != std::string::npos && eq > 0) {
+        std::string error, warning;
+        if (setParam(input.substr(0, eq), input.substr(eq + 1), error, &warning)) {
+            if (!warning.empty())
+                std::cout << "Warning: " << warning << "\n";
+        } else {
+            std::cout << error << "\n";
+        }
+        return false;
+    }
+
+    modifyParam(input);
+    return false;  // not confirmed yet, loop again
 }

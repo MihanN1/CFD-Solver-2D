@@ -78,6 +78,10 @@ Mesh::Mesh(const Config& cfg, const std::vector<uint8_t>* presetSolid)
     buildSolid();
 
     if (!geometryLoaded || sectionContour.empty()) {
+        if (!cfg.geometryFile.empty() && lowercase(cfg.geometryFile) != "none")
+            std::cerr << "Warning: geometry '" << cfg.geometryFile
+                      << "' produced no section, falling back to the "
+                         "verification circle.\n";
         const double cx = cfg.Lx / 2.0;
         const double cy = cfg.Ly / 2.0;
         const double radius = 0.1 * std::min(cfg.Lx, cfg.Ly);

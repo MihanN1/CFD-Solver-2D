@@ -397,8 +397,13 @@ bool loadRestart(const std::filesystem::path& file,
                 out.dt = std::strtof(value.c_str(), nullptr);
             else if (key == "formatVersion")
                 continue;
-            else
-                out.cfg.setParam(key, value);
+            else {
+                std::string why;
+                if (!out.cfg.setParam(key, value, why))
+                    std::cerr << "Warning: the frame carries " << key << "="
+                              << value << ", which this build refuses (" << why
+                              << "). The default is used instead.\n";
+            }
         }
     } else {
         // Nothing but the geometry can be recovered, so at least keep the
