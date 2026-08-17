@@ -77,7 +77,7 @@ Possible future extensions include:
 - ✅ ParaView compatible
 - ✅ Full run state embedded in every frame
 - ✅ Continue a stopped simulation from any frame
-- ✅ Frames are 40% smaller than they used to be, losslessly; older frames still load, newer ones need a current build
+- ✅ Compact frames, about 19 bytes a cell, with nothing in them stored twice
 
 ---
 
@@ -167,9 +167,9 @@ Implemented optimizations include:
 - Parallel execution
 - GPU acceleration
 - Multigrid-accelerated pressure solver
-- One residual sweep per pressure solve removed, it was computed and thrown away every time
+- One residual sweep per pressure solve, not two
 - Frames packed against their own contents instead of repeating them
-- Semi-coarsening now catches a two-to-one cell aspect ratio, which is the most common one there is
+- Semi-coarsening down to isotropy, including a two-to-one aspect ratio
 
 The implementation prioritizes computational performance without changing the numerical formulation.
 
@@ -500,6 +500,14 @@ use this is to let the first run print the list, then continue with the motion
 you want. Two cells that touch only at a corner count as one body, since the
 flow cannot squeeze through that corner either.
 
+> **Known issue.** All of the above is what the solver does with a mask that
+> already has several bodies in it, and it is what a continuation gets, since
+> the mask then comes out of the frame. Getting there from a *model* does not
+> work yet: the section keeps only its largest contour, so a model that cuts
+> into two shapes loses one, and a model with a hole gets the hole filled.
+> Object numbering and contour generation are both being reworked, and this is
+> fixed closer to the 1.3 release.
+
 `rim` is the distance from the centroid to the farthest cell, i.e. the radius
 the rim speed is computed at, because degrees per second is not a number you
 can compare to `U0` on sight. The solver does that comparison for you:
@@ -673,9 +681,9 @@ facePack   1 <n> unsigned_char  the raw face velocities, stored as the
                                 predict — see "What a frame is made of"
 ```
 
-A frame without face velocities — one written before the `RestartData` block existed, or one whose packed block failed its checksum — has them rebuilt from the cell averages and the state projected once. That projection used to land at `div = 3.9` and no number of V-cycles moved it, because nothing about it was a convergence problem: the reconstruction fills *every* face, including the ones held shut against a wall, and those came out as whatever the cell average beside them happened to be. The Poisson solve then dutifully accounted for that flow through the wall, and the corrector wiped the same faces back to the wall value, putting the divergence straight back. Masking the reconstructed field before the solve — which is what the predictor does on every ordinary step — is what makes it a projection of a legal field. It now lands at `3.6e-5`.
+A frame without face velocities — one written before the `RestartData` block existed, or one whose packed block fails its checksum — has them rebuilt from the cell averages and the state projected once. The reconstruction is masked before that projection: interpolation fills *every* face, the ones held shut against a wall included, and a projection of a field that flows through walls is not a projection of anything. Masking first is what the predictor does on every ordinary step.
 
-Pointing `restartFile` at a folder takes the newest frame in it. "Newest" is the file timestamp, with the step in the file name breaking ties — a run short enough to write its whole output inside one second gives every frame the same timestamp, and without the tie-break the folder order decided which one continued, which is to say nothing did.
+Pointing `restartFile` at a folder takes the newest frame in it, by file timestamp, with the step in the file name breaking ties — a run short enough to write its whole output inside one second gives every frame the same timestamp.
 
 `FIELD` is the only legacy VTK block that lets each array declare its own tuple
 count, which is the whole reason it is used — `(nx+1)*ny` simply does not fit
@@ -684,9 +692,6 @@ the `SCALARS pressure` array ParaView reads is the same field times `ro`, so
 the reader divides it back out rather than the frame carrying it twice. What is
 left costs about 12% more file size, and it is the difference between a frame
 you can look at and a frame you can resume.
-
-Frames written before this layout carry `uFace`, `vFace` and `pRaw` spelled out
-as plain float arrays, and are read exactly as they always were.
 
 The configuration is serialized in the same `key=value` form the command line
 already speaks, so reading it back is `setParam()` on each line, and unknown
@@ -903,13 +908,13 @@ Called every 5 steps, not every step, since it's a full sweep over the grid and 
 
 ### When the estimate is not an estimate
 
-Both limits are *upper bounds from stability*. Neither says the step is a good idea, only that the scheme will not explode at it — and a bound can be vacuous. Run a slow flow in a thin fluid, `U0 = 0.001 m/s` and `ν = 1e-6 m²/s`, and the CFL limit lands at 15 s while the viscous one lands at 97 s. Ask for one second of that and the whole simulation is **one step**. That is not a bug: at a Courant number of 0.03 and a viscous number of 0.001, one step of a process whose own timescale is 2000 s is a perfectly accurate answer. It is just not a film. So the startup line now prints both limits and the step count they imply, and says plainly when the run fits in a couple of steps — the fix for that is more `totalTime` or a finer grid, not a smaller `dt`.
+Both limits are *upper bounds from stability*. Neither says the step is a good idea, only that the scheme will not explode at it — and a bound can be vacuous. A slow flow in a thin fluid, `U0 = 0.001 m/s` and `ν = 1e-6 m²/s`, puts the CFL limit at 15 s and the viscous one at 97 s, so a one second run is a single step. At a Courant number of 0.03 that step is perfectly accurate; it is just not a film. The startup line prints both limits and the step count they imply, and says so when the run fits in a couple of steps — what fixes that is more `totalTime` or a finer grid, not a smaller `dt`.
 
-What *was* broken is what happened when the estimate stopped being a number at all.
+Two cases are not estimates at all, and both stop the run rather than substituting a number nobody chose:
 
-**A field that has gone to `NaN` was invisible to the reduction.** `maxps` returns its second operand when either input is a NaN and `std::max` drops it the same way, so the maximum sailed past it, `dt` came out as the hardcoded fallback `1e-6`, and the run ground on writing frames of `NaN` until the every-tenth-step check happened to look. The Courant reduction now carries a `_CMP_UNORD_Q` accumulator beside the max, and a field that is no longer finite stops the run on the spot with a line saying so.
+**The field is no longer finite.** `maxps` returns its second operand when either input is a NaN and `std::max` drops it the same way, so a `NaN` sails straight through a maximum. The Courant reduction carries a `_CMP_UNORD_Q` accumulator beside the max to catch it.
 
-**And `1e-6` was never an answer.** It is a number with no relationship to the grid, the fluid or the run. The one other way to reach it is a `dt` that comes out zero or infinite, which means the grid spacing or the viscosity are outside what a float can express — `Lx=1e-20` overflows `1/dx²` to infinity and sends the viscous limit to zero. That now stops the run and prints `dx`, `dy` and `ν`, which is the actual problem, instead of quietly substituting a step size nobody chose.
+**`dt` comes out zero or infinite.** That means the grid spacing or the viscosity are outside what a float can express — `Lx=1e-20` overflows `1/dx²` and sends the viscous limit to zero. The run stops and prints `dx`, `dy` and `ν`, which is the actual problem.
 
 One rule at the other end of the run: **no step is ever shorter than half of `dt`.** The last stretch up to `totalTime` rarely divides evenly, and the naive thing — take full steps, then whatever is left — can leave a final step of nanoseconds. That step is not wrong, but the Poisson right-hand side is `div/dt`, so the frame it writes has a pressure map scaled by a factor of millions, and the last frame of a run is one people open. So when the remainder is between one and two `dt`, it is split in half instead. The leftover after the final step is then set to zero outright rather than accumulated, because `currentTime` adds up single-precision steps and lands a few ulps short of `totalTime` — which used to be enough on its own to trigger one more absurd step, on roughly half of all runs.
 
@@ -1195,11 +1200,9 @@ A face normal to a wall stays shut, exactly as before, because the body is not g
 
 The value that puts `u_wall` on the wall is the mirrored one, `2·u_wall − u_fluid`. It is the standard ghost-cell reflection, and here it costs nothing extra: the pairing machinery already exists for free-slip (below), the no-slip version is the same list with a different expression on it, and the wall velocity is evaluated at the cell edge the wall actually is rather than at either face's own position. On a body thin enough to have fluid on both sides, one buried face serves two walls and takes the average of the two, which is the same code path with the same index twice.
 
-It does not cost stability either, which is the thing that would have made it a bad trade. The mirror raises the diagonal of the viscous operator at a near-wall face from `2/dy²` to `3/dy²`, but it drops the corresponding off-diagonal by the same amount, so the Gershgorin bound on the spectrum — and therefore the diffusive `dt` limit — is exactly where it was. The convective term gets the same half-cell distance for the same reason, which is what it should have been using all along.
+It costs no stability. The mirror raises the diagonal of the viscous operator at a near-wall face from `2/dy²` to `3/dy²` and drops the corresponding off-diagonal by the same amount, so the Gershgorin bound on the spectrum — and with it the diffusive `dt` limit — does not move. The convective term picks up the same half-cell distance, which is the distance it should be differencing over.
 
-Measured: a body whose surface slides at 1 m/s through fluid otherwise at rest used to drag the row of fluid touching it to a mean of 0.156 m/s. It now reaches 0.247. The whole boundary layer readjusts, so it is not a clean doubling at any one point — but it is the right direction and the right size, and the wall finally holds the fluid it is supposed to be holding.
-
-The predictor and corrector are unchanged: they still write `uMask*(...) + uWall`, which resets the buried faces to the plain wall value every step, and the mirror is re-applied at the top of the next one from the field as it then stands. Same lifecycle as free-slip, same place in the loop.
+The predictor and corrector write `uMask*(...) + uWall`, which resets the buried faces to the plain wall value every step, and the mirror is re-applied at the top of the next one from the field as it then stands. Same lifecycle as free-slip, same place in the loop.
 
 So a horizontal stretch of wall is driven through the `u` faces inside the body, a vertical stretch through the `v` faces, and every staircase in between gets both. The predictor and corrector change by one term:
 
@@ -1261,34 +1264,28 @@ One cell class gets special treatment on the way out. Solid cells have a zero di
 
 The velocity of the same cells gets the same treatment for the same reason. A cell centre value is the average of its two faces, and inside a body those faces hold the mirrored value the no-slip condition needs — an artefact of the stencil, not a speed anything moves at — while on the rim one of them is normal to the wall and held shut. Either way the average is not a velocity. Solid cells are written with the surface velocity they actually impose instead: zero for a body that does not move, and for one that does, the thing that makes a spinning body look like a spinning body and a sliding one like a belt. Again: output only, never read back.
 
-### What a frame is made of, and what it stopped repeating
+### What a frame is made of
 
-A frame used to cost 32 bytes a cell. Roughly a third of that was the file describing the same numbers twice.
+About 19 bytes a cell, and nothing in it is stored twice.
 
-| Array | Was | Is | |
-|---|---|---|---|
-| `pressure`, float, Pa | 4 | 4 | what ParaView colours |
-| `solid`, mask | 4 | **1** | it only ever holds 0 or 1 |
-| `velocity`, 3×float | 12 | 12 | what ParaView glyphs |
-| `pRaw`, float | 4 | **0** | gone |
-| `uFace` + `vFace`, float | 8.1 | **2.2** | packed |
-| `configText` | ~0.1 | ~0.1 | the run's own settings |
-| **total** | **32.3** | **19.4** | **−40%** |
+| Array | Bytes/cell | |
+|---|---|---|
+| `pressure`, float, Pa | 4 | what ParaView colours |
+| `velocity`, 3×float | 12 | what ParaView glyphs |
+| `solid`, `unsigned_char` | 1 | the mask holds 0 or 1, and `bit` is not a type ParaView reads reliably |
+| `facePack` | ~2.2 | the staggered face velocities |
+| `configText` | ~0.1 | the run's own settings |
 
-`solid` was an `int32` per cell for a value with two possible states. One byte is still 8× more room than it needs, but `unsigned_char` is a type the legacy VTK reader has always understood and a `bit` array is not something ParaView reads reliably, so that is where it stops.
+There is no pressure array for the restart to read: `SCALARS pressure` is the same field multiplied by `ro`, bit for bit, so the reader divides `ro` back out — taking the density from the frame's own configuration text rather than from the run being started, in case that changed.
 
-`pRaw` was the pressure the restart reads back, in kinematic units. The `pressure` array above it is the same field multiplied by `ro`. Not approximately — *bit for bit*, since one is written as `value * cfg.ro` and the other as `value`. So it is not written any more and the reader divides `ro` back out, taking the density from the frame's own configuration text rather than from the run being started, in case that changed.
+The face velocities cannot be dropped the same way. The cell velocity is an average and averages do not invert. But they are *nearly* determined by it: along a row, `u_cell[i] = (u[i] + u[i+1])/2` gives `u[i+1] = 2·u_cell[i] − u[i]`, and marching that from the inlet face reproduces the whole row to about 3e-6 m/s on a grid 256 wide. Close, and not close enough — the error accumulates along the march and lands as a divergence blip of the same order as the solver's own convergence.
 
-`uFace` and `vFace` are the interesting one, because they are genuinely needed — the cell velocity is an average, and averages do not invert. But they are *nearly* determined by it. Along a row, `u_cell[i] = (u[i] + u[i+1])/2` gives `u[i+1] = 2·u_cell[i] − u[i]`, and marching that from the inlet face reproduces the whole row to about 3e-6 m/s on a grid 256 wide. Close, and not close enough: the error accumulates along the march and lands as a divergence blip of the same order as the solver's own convergence.
-
-So the frame stores the march's **mistake** instead of the answer. For each face, predict it, subtract the prediction's bit pattern from the true one, and write that difference as a zigzag varint. An exact prediction costs one zero byte; one ulp out either way costs one byte; the occasional real miss costs five. About one face in eight is predicted exactly and the whole block comes out at 2.2 bytes a cell against 8.1 — and it is **lossless**, every bit, because the reader adds the delta back before predicting the next face from the corrected value. Nothing accumulates, and there is no drift to bound.
+So the frame stores the march's **mistake** rather than the answer. For each face: predict it, subtract the prediction's bit pattern from the true one, write the difference as a zigzag varint. An exact prediction costs one zero byte, one ulp out either way costs one byte, a real miss costs five. About one face in eight is predicted exactly, the block comes out at 2.2 bytes a cell against the 8.1 the raw arrays need, and it is **lossless** — the reader adds each delta back before predicting the next face from the corrected value, so nothing accumulates and there is no drift to bound.
 
 Three things make it safe to rely on:
 
-- The prediction is `2.0f*cell − previous` and nothing else. Multiplying a float by two is exact in binary floating point, so there is no rounding before the subtraction and no compiler is free to contract it into something that rounds differently — an FMA gives the identical answer. Writer and reader call the same inline function.
-- The two lines the march starts from, `u` at `i = 0` and `v` at `j = 0`, are written out in full rather than derived. That is one column and one row, a fraction of a percent, and it means the reader never has to reproduce how the inlet or the bottom wall were set on the run that wrote the frame.
-- A 32-bit FNV-1a over the faces goes in the block header. If it does not match — a truncated file, a bad byte, a prediction that somehow differed — the reader says so and falls back to rebuilding the faces from the cell averages with one projection, which is the path frames without the block already take. It cannot silently restart from something subtly wrong.
+- The prediction is `2.0*cell − previous` in double, and nothing else. In float it would overflow above 1.7e38 unless the compiler contracted it into an FMA, and whether it does depends on `-mfma`; doubling a float is exact in double whatever the compiler does, and the single conversion back rounds once. Writer and reader call the same inline function.
+- The two lines the march starts from, `u` at `i = 0` and `v` at `j = 0`, are written out in full rather than derived. That is one column and one row, a fraction of a percent, and the reader never has to reproduce how the inlet or the bottom wall were set on the run that wrote the frame.
+- A 32-bit FNV-1a over the faces goes in the block header. On a mismatch — a truncated file, a bad byte — the reader says so and falls back to rebuilding the faces from the cell averages with one projection. It cannot silently restart from something subtly wrong.
 
-**Old frames still load; new frames need a current build.** A current build reading an older frame finds `uFace`, `vFace` and `pRaw` spelled out and uses them, so nothing that was ever written stops being restartable — verified bit for bit.
-
-The other direction does **not** work, and it is worth being precise about why rather than claiming otherwise. Skipping an unknown `FIELD` array is something an older reader does happily, so the packed block alone would have degraded gracefully. `solid` is the problem: it went from `int32` to one byte a cell, and an older reader consumes four bytes per cell for it, desynchronises inside the file and reports whatever binary garbage it lands on. That cannot be rescued after the fact, because the configuration text that would carry a version marker sits at the *end* of the frame, long past where the parse already went wrong. So `formatVersion` is now `2` and the reader reports a frame written by a build newer than itself — which does nothing for the builds that already exist, but means the next change to the layout is announced instead of guessed at.
+**Frames carry a `formatVersion`, currently 2.** A build reads every frame at or below its own version: version 1 spelled `uFace`, `vFace` and `pRaw` out as plain float arrays and had `solid` as `int32`, and those load as they always did. The reverse does not hold — a version 1 reader takes four bytes a cell for `solid`, desynchronises inside the file, and cannot be rescued after the fact, because the configuration text that carries the version sits at the *end* of the frame. The version is there so that a reader can name the problem instead of reporting whatever binary garbage it lands on.
