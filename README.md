@@ -9,6 +9,7 @@ CFD‑Solver‑2D is an educational/research project that implements a finite‑
 - Full numerical solver with VTK output for post-processing in ParaView.
 - STL/OBJ loading, central plane section extraction, geometry masking, profile rotation, mirroring, and robust contour reconstruction.
 - Optional gravity as a uniform body force, pointing in any direction.
+- Optional wall behaviour: every body in the mask is found and numbered on its own, and each one can spin, drag its surface, or be made frictionless, independently of the rest.
 
 The project is designed to simulate external incompressible flow around arbitrary 2D profiles such as cylinders, airfoils, valves, turbine blades, and similar engineering geometries.
 
@@ -23,7 +24,6 @@ Possible future extensions include:
 - Compressible flow solver
 - Cavity flow
 - Moving objects (NO idea how to do it for now, but ill figure that out)
-- Moving WALLS
 - Flow start coordinates and width of the flow
 - Multiphase(multiple liquids/gases)
 - MAY add several other solvers(deforming solver + thermal solver) and merge all of em into one
@@ -46,6 +46,8 @@ Possible future extensions include:
 - ✅ Correct residual evaluation
 - ✅ Immersed boundary method
 - ✅ Optional gravity / uniform body force, direction free
+- ✅ Moving walls: rotation and sliding, set per object
+- ✅ Free-slip walls, set per object
 - ✅ Restarting sim from a given save
 
 ---
@@ -62,6 +64,7 @@ Possible future extensions include:
 - ✅ Automatic scaling and centering
 - ✅ Rotation and mirroring
 - ✅ Polygon rasterization using even-odd filling
+- ✅ Automatic detection and numbering of separate bodies
 
 ---
 
@@ -89,7 +92,7 @@ We solve the 2D incompressible Navier–Stokes equations (kinematic pressure, ρ
 
 ![](https://latex.codecogs.com/svg.image?\frac{\partial%20v}{\partial%20t}+u\frac{\partial%20v}{\partial%20x}+v\frac{\partial%20v}{\partial%20y}=-\frac{\partial%20p}{\partial%20y}+\nu\nabla^{2}v+g_{y})
 
-where the body force **g** is zero unless gravity is enabled.
+where the body force **g** is zero unless gravity is enabled — and even then the solver never discretizes it, because at constant density it is exactly a pressure offset. See *Gravity* under §4.
 
 **Continuity (incompressibility):**
 
@@ -106,7 +109,7 @@ using a multigrid V-cycle with red/black SOR as its smoother.
 
 3. **Corrector** – update velocities with the pressure gradient.
 
-Boundary conditions: no-slip on solid walls, constant velocity at inlet, zero-gradient at outlet, free-slip at top/bottom. The outlet also carries the only Dirichlet condition on pressure, and gravity changes what that condition holds — see *Gravity* under §4.
+Boundary conditions: no-slip on solid walls, constant velocity at inlet, zero-gradient at outlet, free-slip at top/bottom. No-slip means "the fluid matches the wall", and the wall is allowed to be moving — or to be frictionless, see *Walls* below and §7. The outlet also carries the only Dirichlet condition on pressure, and it holds `p = 0` whatever gravity is doing — see *Gravity* under §4.
 
 ### Geometry section
 
@@ -151,6 +154,7 @@ The solver contains numerous low-level optimizations while preserving numerical 
 Implemented optimizations include:
 
 - Precomputed reciprocal grid spacing
+- Precomputed wall velocities on the closed faces
 - Elimination of repeated divisions
 - Cached row offsets for structured-grid indexing
 - Reduced address arithmetic
@@ -219,6 +223,8 @@ CFD-Solver-2D/
 - CMake 3.28+
 - CUDA Toolkit (optional, for the GPU pressure solver)
 - OpenMP (optional, picked up automatically when present)
+- A CPU with AVX2 (optional, the vector kernels; without it every one of them
+  falls back to the scalar loop it already carries)
 - ParaView (optional, for looking at the output)
 
 There are no other dependencies. `tiny_obj_loader` and `stl_reader` are
@@ -247,6 +253,18 @@ cmake --build build --config Release
 cmake --install build --config Release --prefix install
 ```
 
+Three switches, all on by default, all safe to turn off — the build works with
+any combination of them:
+
+| Option | Off means |
+|---|---|
+| `-DCFD_ENABLE_CUDA=OFF` | CPU multigrid only, no toolkit needed |
+| `-DCFD_ENABLE_OPENMP=OFF` | single-threaded, bit-identical to the threaded build |
+| `-DCFD_ENABLE_AVX2=OFF` | scalar kernels instead of the vector ones |
+
+CUDA is also dropped automatically when no toolkit is found, unless
+`-DCFD_ENABLE_CUDA_EXPLICIT=ON` says to treat that as an error instead.
+
 ---
 
 # Run
@@ -266,6 +284,7 @@ Configure:
 - Pressure solver parameters
 - Geometry
 - Slice orientation
+- Walls (optional: rotation, sliding and free-slip, per object)
 
 After confirmation the simulation starts immediately.
 
@@ -353,6 +372,7 @@ above 0.1, `nu=0`.
 | `geometryFile` | path or `none` | `none` | `none` is the verification circle |
 | `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
 | `invertSection` | switch | 0 | 1 / 0 |
+| `wallMotion` | list | empty | `<object>:rot=,slideX=,slideY=,slip=`, see below |
 | `restart` | switch | 0 | 1 / 0 |
 | `restartFile` | path | empty | a `.vtk` frame or the folder holding them |
 | `addTime` | double, s | 0.0 | counts forward from the frame |
@@ -399,6 +419,154 @@ command line it is the same three keys:
 short version: at constant density it cannot change the velocity field, only
 the pressure. That is not a limitation of this implementation, it is what the
 equations say.
+
+## Walls: moving and slipping
+
+Off by default. A moving wall is a wall whose *surface* has a velocity while
+the body itself stays exactly where it is: a spinning cylinder, a conveyor
+belt, the lid of a driven cavity. Gravity is the term that cannot change the
+flow; this is the opposite — it is the cheapest way there is to put
+circulation into one, and it is what the Magnus effect is made of. A rotating
+cylinder in a stream develops real lift, a rotating valve or blade drags its
+boundary layer around with it, and a belt drives a shear layer with no inlet
+involved at all.
+
+Every separate body in the mask is found and numbered on its own, and each one
+takes its own motion:
+
+| Setting | Unit | Means |
+|---|---|---|
+| `rot` | degrees/s, counter-clockwise | the surface turns about that body's own centroid |
+| `slideX` `slideY` | m/s | the surface is dragged in a straight line |
+| `slip` | switch | free-slip instead of no-slip: the fluid slides along the wall and the wall exerts no drag |
+
+`rot` and the two `slide` components add up, because together they are just the
+rigid-body velocity field **v = slide + ω × (x − centre)**. Counter-clockwise
+means what it looks like in ParaView: with `rot=720` the top of the body runs
+towards the inlet at two turns a second.
+
+`slip` is exclusive with all three, and asking for both is refused rather than
+half-applied. A free-slip wall carries no tangential stress *by definition* —
+that is what free-slip means — and tangential stress is the only thing a
+spinning or sliding surface has to push the fluid with. `1:rot=90,slip=1` is
+not a combination, it is a contradiction, so it stops the run and says so.
+Different objects can of course do different things.
+
+```powershell
+.\install\bin\cfd_app.exe "wallMotion=1:rot=720"
+.\install\bin\cfd_app.exe "wallMotion=1:rot=720;2:slideX=-1.5,slideY=0.4"
+.\install\bin\cfd_app.exe "wallMotion=1:slip=1;2:rot=-45"
+.\install\bin\cfd_app.exe wallMotion=1:rot=720,2:slideX=-1.5
+```
+
+Objects are separated by `;` and settings by `,` — and either separator opens a
+new object as long as the number and its colon come first, which is what the
+third line uses. PowerShell eats a bare `;`, so the semicolon form has to be
+quoted and the comma form does not. Everything else is the same as any other
+key: no spaces around `=`, dots for decimals, names case insensitive.
+
+**Where the numbers come from.** The mask is flood-filled into numbered bodies
+before the run starts, and the list is printed with the rest of the mesh
+information:
+
+```text
+  Number of solid cells = 117
+  Number of objects = 2 (these numbers are what wallMotion takes)
+    object 1: 76 cells, centre (0.5, 0.346628) m, rim 0.109486 m
+    object 2: 41 cells, centre (1.04992, 0.679688) m, rim 0.0781845 m
+```
+
+Numbering follows the scan order of the grid — bottom row first, left to
+right, a body taking its number from the first of its cells the scan reaches —
+so the same mask always produces the same numbers, and *the mask comes out of
+the frame on a continuation*, which means the
+numbers therefore still mean the same bodies after a restart. The usual way to
+use this is to let the first run print the list, then continue with the motion
+you want. Two cells that touch only at a corner count as one body, since the
+flow cannot squeeze through that corner either.
+
+`rim` is the distance from the centroid to the farthest cell, i.e. the radius
+the rim speed is computed at, because degrees per second is not a number you
+can compare to `U0` on sight. The solver does that comparison for you:
+
+```text
+Walls:
+  object 1 at (0.5, 0.346628) m: rot = 720 deg/s -> rim speed 1.37584 m/s, slide = (0, 0) m/s
+    surface moves at 1.37584x the inlet velocity
+  object 2 at (1.04992, 0.679688) m: rot = 0 deg/s -> rim speed 0 m/s, slide = (-1.5, 0.4) m/s
+    surface moves at 1.55242x the inlet velocity
+```
+
+**What it does and does not do.** The tangential part of the surface velocity
+drives the flow. The normal part is dropped, and it has to be: the mask does
+not move, so a surface pushing into its own body would be creating mass on one
+side and destroying it on the other. For rotation that costs nothing at all —
+spin about the centroid is tangential everywhere by definition. For sliding it
+is the entire difference between *the surface slides* and *the body moves*,
+and the second one is `Moving objects`, still on the list at the top of this
+file. §7 has the discrete version of the same argument.
+
+**Measured.** 128×64, `Lx=2 Ly=1 nu=0.005 U0=1`, the verification circle,
+mean pressure over the ring of fluid just outside the body:
+
+```text
+                       above     below     below - above
+static cylinder      -0.15518  -0.15517       0.00001 Pa
+rot = 1440 deg/s     +0.02670  -0.52826      -0.55496 Pa
+```
+
+The static body is symmetric to the fifth decimal, as it has to be. Spinning
+counter-clockwise, the top surface runs against the stream and the bottom runs
+with it, so the flow is slowed above and sped up below, and the pressure
+follows: half a Pascal more of it on top than underneath, pressing the body
+down. That is the Magnus force, on the correct side, at a believable size.
+Divergence over the same runs stayed at `2·10⁻⁵` against `1·10⁻⁵` for the
+static body, i.e. nothing leaked.
+
+**One side effect worth knowing.** The wall velocity is a velocity like any
+other, so it goes into the CFL limit. On that run `|u|max` went from 1.40 to
+2.16, the wall now being the fastest thing in the domain, and `dt` halved from
+`4.2·10⁻³` to `2.0·10⁻³` s. (2.16 is below the 2.50 m/s rim speed printed at
+startup, and should be: the faces that carry the motion are the ones buried
+inside the body, a cell in from the outermost one the rim is measured to.) A
+wall spun much faster than the flow buys its physics with step count, and the
+solver says so at startup when the surface is more than a few times `U0`.
+
+**Free-slip, and what it is for.** No-slip is the physically right condition
+for a viscous fluid on a real wall, and it is the default. Free-slip is what
+you want when the wall is not really a wall: a symmetry plane, a fluid-fluid
+interface standing in for a free surface, or a body you want present as an
+*obstacle* without the boundary layer it would really grow. It is also the
+cheap way to ask how much of a wake is displacement and how much is friction —
+run the same geometry twice and difference them.
+
+Measured on a flat, grid-aligned wall (a rectangular block, `nu=0.005`), the
+tangential velocity in the first five fluid cells above it:
+
+```text
+no-slip     +0.0540  +0.1250  +0.2116  +0.3121  +0.4247
+slip        +0.4218  +0.4471  +0.4958  +0.5644  +0.6484
+```
+
+No-slip pins the fluid to the wall and grows a boundary layer out of it. Free
+slip lets it past at 0.42 and the profile is nearly flat across the first two
+cells — what is left is the outer shear of the channel, not wall friction.
+
+On a *staircase* body the effect is real but partial: the same measurement on
+the crown of the circle gives `0.311 → 0.592`, a large reduction and not a
+removal. The steps either side of the crown present vertical faces, and those
+are no-penetration faces, which free-slip does not and must not touch. That
+residual is the staircase approximating a smooth circle, not the slip
+condition; it goes away as the mask gets finer, and it is the same error the
+immersed boundary already has without slip.
+
+A body one cell thick can only be driven along itself. The tangential value
+lives on the faces *inside* the body, and a one-cell-tall bar has buried `u`
+faces but no buried `v` faces at all — so it drags in `x` and ignores `slideY`
+and, being flat, very nearly ignores `rot` too. A single isolated cell has
+neither kind and cannot drive anything. Both are found, numbered and reported
+like any other object; they just have nothing to push with. §7 explains which
+face is which.
 
 # Continuing a run
 
@@ -455,6 +623,7 @@ Continue from `solution_200_400.vtk` and the next series is
 | `U0`, `nu` | allowed, but it is a discontinuity in the physics, not a continuation of the same problem |
 | `ro` | free — it only scales the pressure on the way out to Pa, the frame stores the kinematic field |
 | `gravityEnabled`, `gravityAccel`, `gravityAngle` | free — changing them shifts the hydrostatic part of the pressure and leaves the velocity where it was |
+| `wallMotion` | free — the mask comes out of the frame, so the object numbers still mean the same bodies. Spinning a wall up mid-run is a step change in the boundary condition, not a discontinuity in the state |
 
 Continuing from the last frame of a run and letting it go further produces
 **bit-identical** results to never having stopped at all.
@@ -596,7 +765,7 @@ Alright. Building it up from the physics, because every design choice in the cod
 
 ## The one-paragraph version
 
-Pressure has no equation of its own; it's whatever makes the flow divergence-free. So each step you advance momentum ignoring pressure, measure the divergence you created, solve a Poisson equation for the pressure that cancels it, and subtract its gradient. The grid is staggered so pressure gradients and divergences land exactly where they're needed and the chessboard mode can't survive. The Poisson operator encodes every boundary condition in its coefficients, which guarantees it's exactly `div ∘ grad` and therefore that the projection actually projects. Multigrid solves it in `O(N)` by exploiting the fact that SOR smooths error fast but converges slowly — so you smooth on every grid size at once. Everything else is SIMD, threads, and not allocating memory in the inner loop. Gravity, if you switch it on, is one extra term in the predictor that the projection then cancels exactly — which is the correct answer at constant density, and §4 explains why.
+Pressure has no equation of its own; it's whatever makes the flow divergence-free. So each step you advance momentum ignoring pressure, measure the divergence you created, solve a Poisson equation for the pressure that cancels it, and subtract its gradient. The grid is staggered so pressure gradients and divergences land exactly where they're needed and the chessboard mode can't survive. The Poisson operator encodes every boundary condition in its coefficients, which guarantees it's exactly `div ∘ grad` and therefore that the projection actually projects. Multigrid solves it in `O(N)` by exploiting the fact that SOR smooths error fast but converges slowly — so you smooth on every grid size at once. Everything else is SIMD, threads, and not allocating memory in the inner loop. Gravity, if you switch it on, never enters the solve at all: at constant density it is exactly a pressure offset, so the solver works in the reduced pressure and puts the hydrostatic part back on the way out — §4 explains why that is the correct answer and not a shortcut. Wall behaviour is the mirror image: the faces buried inside a body are handed the surface velocity instead of zero — or the neighbouring fluid value, which is free-slip — and the operator does not change one coefficient either way. §7.
 
 ---
 
@@ -709,6 +878,8 @@ One refinement: the Courant number is computed **per cell** from that cell's own
 
 Called every 5 steps, not every step, since it's a full sweep over the grid and velocities don't change much in 5 steps.
 
+One rule at the other end of the run: **no step is ever shorter than half of `dt`.** The last stretch up to `totalTime` rarely divides evenly, and the naive thing — take full steps, then whatever is left — can leave a final step of nanoseconds. That step is not wrong, but the Poisson right-hand side is `div/dt`, so the frame it writes has a pressure map scaled by a factor of millions, and the last frame of a run is one people open. So when the remainder is between one and two `dt`, it is split in half instead. The leftover after the final step is then set to zero outright rather than accumulated, because `currentTime` adds up single-precision steps and lands a few ulps short of `totalTime` — which used to be enough on its own to trigger one more absurd step, on roughly half of all runs.
+
 ### `predictor` — momentum without pressure
 
 For each `u` face, evaluate the right-hand side and step forward:
@@ -719,7 +890,7 @@ dudy = (vn  > 0) ? (uij − ubot )*invDy : (utop   − uij)*invDy;
 d2x  = (uright − 2*uij + uleft)*invDx2;                          // central
 d2y  = (utop   − 2*uij + ubot )*invDy2;
 
-uStar = uij − dt*(uij*dudx + vn*dudy) + dt*ν*(d2x + d2y) + dt*gx;
+uStar = uij − dt*(uij*dudx + vn*dudy) + dt*ν*(d2x + d2y);
 ```
 
 **Convection uses upwind** — the derivative is taken on the side the flow is *coming from*. If fluid moves right, what's arriving at this face came from the left, so ask the left neighbour. Using a centred difference here would be unstable: it lets information propagate against the flow, which is physically wrong and numerically explosive.
@@ -730,9 +901,10 @@ uStar = uij − dt*(uij*dudx + vn*dudy) + dt*ν*(d2x + d2y) + dt*gx;
 
 `vn` is the vertical velocity *at the u-face*, which doesn't exist there, so it's the average of the four surrounding `v` faces. This is the one place staggering makes you interpolate.
 
-`dt*gx` is gravity, and it is zero unless gravity is enabled. It goes *inside*
-the mask multiply, never outside — a closed face has to leave the predictor as
-an exact zero, and §8 explains what breaks if it doesn't.
+There is no gravity term in there, and that is deliberate — the next heading is
+about why. What the real line does carry is the mask multiply and the wall
+value that rides with it, so a closed face leaves the predictor holding exactly
+its boundary velocity; §7.
 
 Then `v` gets the mirror-image treatment.
 
@@ -754,26 +926,35 @@ equation is *literally* the gravity-free one. So the flow is whatever it was,
 and the pressure gains a hydrostatic term. This is why a swimming pool doesn't
 develop currents.
 
-And it holds **discretely**, not just on paper, for two reasons that are both
-already true in this solver:
+**So the solver solves for `P` and never touches `g`.** That is the entire
+implementation. `p` in the code *is* the reduced pressure: the predictor has no
+body-force term, the Poisson operator has no gravity in it, the outlet keeps
+its plain `p = 0`, and the multigrid never learns that gravity exists.
+`phiCell()` adds `Φ` back in the two places that write pressure out — the VTK
+scalar and the `pRaw` restart block — and `setInitialState()` takes it off
+again when a frame is read back in. `gx` and `gy` appear nowhere else.
 
-- the body force on a face, `dt·gx`, is exactly the discrete gradient of a
-  linear `Φ` across that face, because `Φ[i] − Φ[i−1] = gx·dx` with no
-  truncation error at all — a linear function is differenced exactly;
-- the Laplacian is exactly `div ∘ grad`, face by face, including at the
-  boundaries (§5).
+Measured. 128×64, `nu=0.005`, `g = 9.81` straight down, 98 steps:
 
-So the projection reconstructs `Φ` and subtracts precisely what the predictor
-added. Measured: turning gravity on changes `|u|` by `5·10⁻⁷` on a field of
-order 1, which is float roundoff, and changes `p` by exactly `ρΦ`.
+```text
+uFace and vFace, gravity on vs off     bit-identical
+p(on) − p(off) against ρΦ              max error 1.05·10⁻⁶ Pa
+```
 
-**Where it does *not* cancel: the outlet.** The outlet is the only Dirichlet
-condition in the operator, and it holds `p = 0` on the face. The hydrostatic
-field wants `p = Φ` there, and those are different demands. Left alone, the
-outlet is pinned to a pressure the field cannot reach, and the mismatch drives
-a jet of order `√(g·Ly)` — with `g = 9.81` and `Ly = 1` that is several times
-the inlet velocity. It doesn't look like a bug, it looks like gravity working,
-which is the worst way for a bug to look. Measured, on the run above:
+Not "small" — *identical*, the same bytes, because gravity does not enter a
+single arithmetic operation of the solve. And the pressure differs by exactly
+the hydrostatic head, to the last digit a float of order 6 Pa has.
+
+**Why not the obvious way.** The first version did the obvious thing: a `dt·gx`
+term in the predictor for the projection to cancel. It works, and it drags two
+problems in behind it.
+
+The outlet is the only Dirichlet condition in the operator and it holds
+`p = 0` on the face, while the hydrostatic field wants `Φ` there. Those are
+different demands. Left alone the outlet is pinned to a pressure the field
+cannot reach, and the mismatch drives a jet of order `√(g·Ly)` — with `g = 9.81`
+and `Ly = 1`, several times the inlet velocity. It doesn't look like a bug, it
+looks like gravity working, which is the worst way for a bug to look:
 
 ```
 |u|max, gravity off                    1.386   (steady)
@@ -781,37 +962,30 @@ which is the worst way for a bug to look. Measured, on the run above:
 |u|max, gravity on, outlet corrected   1.386   (identical to gravity off)
 ```
 
-The fix is to tell the outlet the truth. The ghost value becomes `2Φ − p`
-instead of `−p`, so the face average is `Φ` rather than zero. Expanding that,
-the coefficients are unchanged and the whole difference is one extra term,
-`2Φ/dx²`, which moves to the right-hand side — and the corrector applies the
-matching gradient, `+2·dt·(p − Φ)/dx` instead of `+2·dt·p/dx`. Two small
-additions, both of which vanish identically when gravity is off.
+Correcting it took a `2Φ/dx²` term on the right-hand side and a matching
+`+2·dt·(p − Φ)/dx` in the corrector. And even corrected, `Φ` was still sitting
+inside `‖rhs‖`, which is what the multigrid measures its *relative* residual
+against — so the same `mgTolerance` bought a looser solve with gravity on than
+without, and divergence went from `8·10⁻⁵` to `6·10⁻⁴` purely from stopping a
+cycle early.
 
-The coefficients staying untouched matters: every coarse grid solves for the
-*error*, whose boundary condition is homogeneous no matter what the fine one
-is. The inhomogeneity belongs on the finest level's right-hand side and
-nowhere else, which is also why the CUDA path needed no changes at all — the
-fine RHS is the one thing that crosses the bus each step anyway.
+Working in `P` from the start deletes all of it. No predictor term, no outlet
+special case, no inflated `‖rhs‖`, and no large number added at one end of the
+step and subtracted at the other in single precision. Six sites in the
+predictor and one boundary condition became one inline function called twice on
+the way out, and the CUDA path never had anything to say about it either way.
 
-**One side effect worth knowing.** The multigrid stops on the *relative*
-residual `‖r‖/‖rhs‖`, and the hydrostatic term inflates `‖rhs‖`. So the same
-`mgTolerance` buys a looser solve than it does without gravity — on the run
-above, divergence went from `8·10⁻⁵` to `6·10⁻⁴` purely from stopping a cycle
-early. Tightening `mgTolerance` to `1e-6` brings it back to `7.6·10⁻⁵`, at or
-below the gravity-free value. The solver prints the ratio at startup when the
-hydrostatic head is more than a few times `U0²`, so you don't have to work it
-out yourself.
-
-**So why implement it at all?** Because the body force is the hook. Gravity
-starts driving flow the moment density stops being constant — a second phase,
-or a Boussinesq buoyancy term from a thermal solver, both of which are on the
-list at the top of this file. When that happens the term becomes
-`g·(ρ(x) − ρ₀)/ρ₀` and the cancellation stops being exact, which is the entire
-point. Everything else — the config plumbing, the six predictor sites, the
-outlet condition — is already correct and stays put. And in the meantime the
-pressure field in ParaView is a real pressure field, hydrostatic head included,
-rather than one with gravity quietly left out of it.
+**So why implement it at all?** Because what survives is the part that will
+still be needed when the cancellation stops working. Gravity starts driving
+flow the moment density stops being constant — a second phase, or a Boussinesq
+buoyancy term from a thermal solver, both of which are on the list at the top
+of this file. Then the force is `g·(ρ(x) − ρ₀)/ρ₀`, `Φ` is no longer a potential
+for it, `P = p − Φ` no longer removes it, and it has to come back into the
+predictor as a real body force — that time earning its place. The direction
+convention, the config plumbing, the restart handling and the output path are
+already right and stay put. And in the meantime the pressure field in ParaView
+is a real pressure field, hydrostatic head included, rather than one with
+gravity quietly left out of it.
 
 ### `solvePoisson` — build the right-hand side, then solve
 
@@ -877,7 +1051,7 @@ u[nx,j] = u*[nx,j] + 2·dt·p[nx−1,j]·invDx;
 
 Two payoffs: (a) with one real Dirichlet condition the matrix is non-singular, so no pinning and no drift; (b) the outlet velocity is *corrected by the pressure*, so the solver balances outflow against inflow by itself. Measured mass error: 0.00000%.
 
-Being the only Dirichlet condition also makes it the only place gravity has to be told anything: `0` becomes `Φ`, the ghost becomes `2Φ − p`, and the extra `2Φ/dx²` lands in the right-hand side. The coefficients above do not change. See *Gravity* in §4.
+Being the only Dirichlet condition also makes it the only place a body force would have to be told anything — which is exactly why gravity is not implemented as one. See *Gravity* in §4.
 
 ### The identity
 
@@ -966,19 +1140,70 @@ A face is open only if fluid sits on both sides. The corrector zeroes velocity o
 
 On coarse multigrid levels, a cell is solid only if **all** the fine cells it covers are solid, so a partially-blocked coarse cell still carries fluid and the body stays visible at every level.
 
+### Numbering the bodies
+
+Nothing above cares how many obstacles there are — the mask is just cells. Wall motion does, because two bodies can spin differently, so the mask is flood-filled once into numbered components before the run starts, 8-connected. Diagonal connectivity is the right choice here for the same reason the mask works at all: two cells meeting at a corner leave no face for the flow to pass through, so calling them two obstacles would be a lie about the geometry as well as a nuisance to configure. The fill is an explicit stack, not recursion, because a body can be the whole grid.
+
+Each component keeps its cell count, its centroid — the axis rotation turns about — and the distance to its farthest cell, which is the radius `rot` is turned into a rim speed at.
+
+### Wall behaviour, discretely
+
+Closed faces come in two kinds, and this is the whole trick:
+
+| Closed `u` face | Solid on | Is | Holds |
+|---|---|---|---|
+| `i` | one side | a vertical wall, and this face is *normal* to it | **0** |
+| `i` | both sides | a face buried in the body | the wall's **x** velocity |
+
+A face normal to a wall stays shut, exactly as before, because the body is not going anywhere. A face inside the body looks useless — no fluid cell owns it — but it is not: the fluid `u` face one row above reads it as `u_bot` in `d²u/dy²` and in the upwind term. That read *is* the no-slip condition along that stretch of horizontal wall, and its value is what the fluid shears against. Set it to zero and the wall is stationary; set it to the surface velocity and the wall drags. `v` faces mirror it: the ones inside the body are what the fluid to the left and right of a vertical wall shears against.
+
+So a horizontal stretch of wall is driven through the `u` faces inside the body, a vertical stretch through the `v` faces, and every staircase in between gets both. The predictor and corrector change by one term:
+
+```cpp
+uStar = uMask*( ... ) + uWall;     // uWall is nonzero only on the buried faces
+u     = uMask*( ... ) + uWall;
+```
+
+`uWall` and `vWall` are built once, next to the masks, because neither the geometry nor the motion changes during a run.
+
+**Why the Poisson operator does not change.** A coefficient is zero when the corrector does not own the face — and it still does not own it, whatever value that face now holds. So `L` is the same matrix, the identity `L = div ∘ grad` is untouched, the projection still projects, and the CUDA path needed no changes at all. The RHS in *fluid* cells does not move either: every face a fluid cell owns that touches solid is a face normal to a wall, and those are still zero.
+
+**Why nothing leaks.** A rigid-body velocity is discretely divergence-free, exactly, with no truncation error. `u = slideX − ω(y − cy)` depends only on `y`, and both vertical faces of a cell sit at the same `y`, so `∂u/∂x` differences to a hard zero; `v` depends only on `x` and the same happens vertically. Filling a body with its own motion therefore creates no mass anywhere inside it, and by the discrete divergence theorem none crosses its boundary either. This is also the discrete version of *why the normal component is dropped*: keeping it would be the statement that the mask moves, and the mask does not.
+
+**Free-slip is the same table with one entry changed.** No-slip fixes the buried face at a value the fluid must match. Free-slip wants the opposite — no tangential stress, `∂u_t/∂n = 0` — which discretely means the buried face has to hold *whatever the fluid face across the wall currently holds*, so the difference the viscous stencil takes across the wall is zero and the upwind term through it is zero too. It is exactly the treatment the domain's own top and bottom walls have always had (`u_bot = u_ij` at `j = 0`), applied to a body.
+
+That value is not a constant, so it cannot live in `uWall`. What is constant is *which* face mirrors *which*, so that pairing is what gets precomputed: one list of `(buried face, the open faces beside it)` per axis, built once after the masks, refreshed at the top of every step. A buried face with fluid on one side takes it exactly; on a body thin enough to have fluid on both sides it takes the average, which is the same expression with the same index twice, so there is one code path and no branch.
+
+The mirrored values never reach the pressure solve. The predictor writes `uMask*(...) + uWall` into `u*`, and on a buried face the mask is zero — so `u*` holds the wall value, not the mirrored one, and the divergence, the right-hand side and the operator are exactly as they were. Free-slip is purely a change to what the *viscous and convective* stencils read across a wall, which is precisely what it means physically. And no-penetration is untouched: the faces normal to a wall are still shut, because free-slip removes friction, not the wall.
+
+**The one thing that does need cleaning.** Solid cells have a zero diagonal and are never solved, so their residual is just their right-hand side — and `‖rhs‖`, which the whole grid's relative tolerance is measured against, is summed over every cell. A boundary solid cell has one face at zero and another at the wall velocity, so its divergence is not zero, and left alone a spinning body would inflate `‖rhs‖` and quietly loosen the tolerance everywhere (the same trap gravity fell into, one section up). So the RHS is multiplied by a fluid-cell mask on the way out. Without moving walls that multiply changes nothing — the divergence in a solid cell is already exactly zero — which is why it can be there unconditionally.
+
 ---
 
 ## 8. The speed layer
 
 Everything above is the algorithm. This part is just making it run fast without changing a single number.
 
-**Branch-free hot loops.** Every velocity on a closed face is held at exactly zero as an *invariant*. So the stencil can be evaluated unconditionally — the worst it ever reads is a legitimate zero — and the result multiplied by a float mask. No branch, no scalar fallback near the body.
+**Branch-free hot loops.** Every velocity on a closed face is held at a value that does not change during the run — zero, or the wall's own velocity if that wall moves. So the stencil can be evaluated unconditionally, the worst it ever reads being a legitimate boundary value, and the result multiplied by a float mask and offset by a float wall array. No branch, no scalar fallback near the body, and no `ω × r` evaluated per face per step — the two arrays are built once, next to the masks.
+
+That add is unconditional, which is the deliberate part: one extra load and one extra `_mm256_add_ps` per face beats a branch, and with nothing moving the array is all zeros and the arithmetic is exact. On 256×128 the cost does not come out of the run-to-run noise (0.561–0.564 s before, 0.560–0.565 s after), and the fields are identical — literally, except that a closed face now holds `+0` where it used to hold `−0`, which nothing in the solver can tell apart.
 
 **Halo padding.** Each pressure array is allocated with `max(nx,8)` extra floats at *both* ends, with the logical pointer offset into the middle. So `p[id−1]`, `p[id+nx]` etc. are always valid memory, even for the very first and last cell. An 8-wide AVX load at the edge reads into the halo (which is zero, and whose coefficients are zero anyway) instead of segfaulting. This is what makes the branch-free vector code *safe*, not just fast.
 
 **Red/black SOR with masked stores.** Every neighbour of a red cell is black, so all red cells can update simultaneously. The naive version strides by 2, which kills SIMD. Instead: compute the update for all 8 lanes, then store only the current colour with `_mm256_maskstore_ps`. Half the arithmetic is discarded, but every load and store stays contiguous — a big net win on a memory-bound kernel. Since vectors always start at even `i`, the lane mask is one of exactly two constants.
 
 **OpenMP.** Rows go to different threads. Red/black makes this race-free with no locks. One fork/join per `smooth()` call, and levels under 32 rows run serially — they're a few hundred cells visited by every cycle, and barrier traffic there costs more than the arithmetic.
+
+**And all of it is optional.** Every vector kernel in here already had a scalar
+loop after it, for the last `nx % 8` cells of a row — so the fallback for a CPU
+without AVX2 is not a second implementation, it is the same loop starting at
+`i = 0` instead of where the vector one stopped. The red/black smoother is the
+neat case: its remainder loop already strides by 2 from the right parity, so
+skipping the vector part turns it into a plain red/black sweep with nothing
+else changed. Guarded on `__AVX2__`, so `-march=native` picks the fast path up
+by itself. Measured against the vector build on a moving-wall run, the two
+agree to `2·10⁻⁷` relative on velocity and `6·10⁻⁶` on pressure — float
+rounding from a different summation order, not a different algorithm.
 
 **CUDA.** Same algorithm, one thread per cell. The whole hierarchy is allocated once, the stencil is uploaded once (it's a function of geometry, and geometry is static), and the pressure field **stays resident on the GPU between time steps** — which means last step's solution is a free warm start. Only the RHS crosses the bus each step. Kernels run on the default stream, which serialises them, so the chain `smooth → residual → restrict → recurse → prolongate → smooth` needs no explicit synchronisation.
 
@@ -989,3 +1214,5 @@ Everything above is the algorithm. This part is just making it run fast without 
 `saveVTK` byte-swaps values into a 16 KB stack buffer and writes binary legacy VTK straight out — no temporary arrays, no per-cell copies. Pressure is stored internally as `p/ρ` (kinematic), so it's multiplied by `ro` on the way out to give Pascals. Btw kinematic pressure is much easier to use cause if u divide regular pressure by density u get m^2/s^2, not some kg/(m*s^2)
 
 One cell class gets special treatment on the way out. Solid cells have a zero diagonal and never take part in the solve, so their pressure sits at a permanent zero. Without gravity that zero is somewhere in the middle of the fluid range and nobody notices. With it the fluid is offset by the hydrostatic head, and the body would punch a visible hole straight through the pressure map — so solid cells are written with the hydrostatic value they would have had. Nothing ever reads them back; this is purely what ParaView sees.
+
+The velocity of the same cells gets the same treatment for the same reason. A cell centre value is the average of its two faces, and on the rim of a moving body one of those faces is normal to the wall and therefore held shut — so the average would draw the surface at half speed, in a direction that is not the one it moves in. Solid cells are written with the surface velocity they actually impose instead, which makes a spinning body look like a spinning body and a sliding one like a belt. Again: output only, never read back.

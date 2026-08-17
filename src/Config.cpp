@@ -39,7 +39,7 @@ const char* const kKeys[] = {
     "mgIterations", "mgTolerance", "mgMinCoarseSize",
     "useCuda", "saveInterval", "outputDir",
     "geometryFile", "sliceAngleX", "sliceAngleZ", "sliceRotation",
-    "invertSection",
+    "invertSection", "wallMotion",
     "restart", "restartFile", "addTime",
 };
 
@@ -191,6 +191,130 @@ int editDistance(const std::string& a, const std::string& b) {
     }
     return prev[b.size()];
 }
+}
+
+bool parseWallMotion(const std::string& text,
+                     std::vector<WallMotion>& out,
+                     std::string& error) {
+    out.clear();
+    error.clear();
+
+    const std::string body = cleanValue(text);
+    if (body.empty())
+        return true;
+
+    std::vector<std::string> tokens;
+    for (size_t pos = 0; pos < body.size();) {
+        size_t end = body.find_first_of(",;", pos);
+        if (end == std::string::npos)
+            end = body.size();
+        tokens.push_back(trimSpace(body.substr(pos, end - pos)));
+        pos = end + 1;
+    }
+
+    int current = -1;
+    for (std::string token : tokens) {
+        if (token.empty())
+            continue;
+
+        const size_t colon = token.find(':');
+        if (colon != std::string::npos) {
+            const std::string idText = trimSpace(token.substr(0, colon));
+            double id = 0.0;
+            std::string why;
+            if (!parseNumber("object", idText, true, id, why) || id < 1.0) {
+                error = badValue("wallMotion", body,
+                                 "'" + idText + "' is not an object number; "
+                                 "objects are numbered from 1 and the number "
+                                 "comes first, e.g. 1:rot=90");
+                return false;
+            }
+            for (const WallMotion& done : out) {
+                if (done.object != static_cast<int>(id))
+                    continue;
+                error = badValue("wallMotion", body,
+                                 "object " + idText + " is listed twice; put "
+                                 "everything that object does in one place");
+                return false;
+            }
+            out.push_back(WallMotion());
+            out.back().object = static_cast<int>(id);
+            current = static_cast<int>(out.size()) - 1;
+            token = trimSpace(token.substr(colon + 1));
+            if (token.empty())
+                continue;
+        }
+
+        if (current < 0) {
+            error = badValue("wallMotion", body,
+                             "'" + token + "' comes before any object number; "
+                             "the list starts with <number>:, e.g. 1:rot=90");
+            return false;
+        }
+
+        const size_t eq = token.find('=');
+        if (eq == std::string::npos || eq == 0) {
+            double stray = 0.0;
+            std::string why;
+            const bool bareNumber =
+                parseNumber("wallMotion", token, false, stray, why);
+            error = badValue("wallMotion", body,
+                             bareNumber
+                                 ? "'" + token + "' is a bare number; a comma "
+                                   "separates settings here, so the decimal "
+                                   "separator inside one is a dot"
+                                 : "'" + token + "' is not a setting; every "
+                                   "setting is name=value, e.g. rot=90");
+            return false;
+        }
+
+        const std::string name = toLower(trimSpace(token.substr(0, eq)));
+        const std::string value = token.substr(eq + 1);
+
+        if (name == "slip") {
+            if (!assignBool(out[current].slip, name, value, error))
+                return false;
+            continue;
+        }
+
+        double parsed = 0.0;
+        if (!parseNumber(name, value, false, parsed, error))
+            return false;
+
+        if (name == "rot" || name == "rotation")
+            out[current].rotation = static_cast<float>(parsed);
+        else if (name == "slidex")
+            out[current].slideX = static_cast<float>(parsed);
+        else if (name == "slidey")
+            out[current].slideY = static_cast<float>(parsed);
+        else {
+            error = badValue("wallMotion", body,
+                             "'" + name + "' is not a wall setting; there are "
+                             "rot (degrees/s, counter-clockwise), slideX and "
+                             "slideY (m/s), and slip (1 = free-slip instead of "
+                             "no-slip)");
+            return false;
+        }
+    }
+
+    // A free-slip wall exerts no tangential stress by definition, so it has
+    // nothing to drag the fluid with. Asking for both is a contradiction, not
+    // a combination, and it is better said now than silently half-applied.
+    for (const WallMotion& done : out) {
+        if (!done.slip)
+            continue;
+        if (done.rotation == 0.0f && done.slideX == 0.0f && done.slideY == 0.0f)
+            continue;
+        error = badValue("wallMotion", body,
+                         "object " + std::to_string(done.object) +
+                         " is asked to slip and to move its surface at the "
+                         "same time; slip=1 switches the tangential coupling "
+                         "off, which is the only thing rot and slide act "
+                         "through. Pick one");
+        return false;
+    }
+
+    return true;
 }
 
 std::string Config::canonicalKey(const std::string& key) {
@@ -372,6 +496,14 @@ void Config::readFromConsole() {
     if (!ask("sliceRotation",
              "Enter rotation in the simulation plane (degrees)")) return;
     if (!ask("invertSection", "Mirror the section? (0 = no, 1 = yes)")) return;
+    if (!ask("wallMotion",
+             "Wall behaviour, empty for stationary no-slip walls. Object "
+             "numbers are printed with the mesh right after this; '1:rot=90' "
+             "spins object 1 at 90 degrees/s counter-clockwise, "
+             "'1:slideX=0.5' drags its surface along +x, '1:slip=1' gives it "
+             "free-slip instead of no-slip, '1:rot=90;2:slip=1' does both "
+             "objects"))
+        return;
     if (!ask("useCuda",
              "Use cuda? (0 = no, 1 = yes, ignored on a CPU-only build)"))
         return;
@@ -413,6 +545,8 @@ void Config::print() const {
     std::cout << "  sliceAngleZ      = " << sliceAngleZ << " deg\n";
     std::cout << "  invertSection    = " << invertSection << "\n";
     std::cout << "  sliceRotation    = " << sliceRotation << " deg\n";
+    std::cout << "  wallMotion       = "
+              << (wallMotion.empty() ? "none" : wallMotion) << "\n";
     std::cout << " CUDA? Yes/No:       " << (useCuda ? "Yes" : "No") << "\n";
     std::cout << "--------------------------------\n";
 }
@@ -453,7 +587,8 @@ std::string Config::serialize() const {
         << "totalTime=" << totalTime << "\n";
 
     out << "outputDir=" << outputDir << "\n"
-        << "geometryFile=" << geometryFile << "\n";
+        << "geometryFile=" << geometryFile << "\n"
+        << "wallMotion=" << wallMotion << "\n";
 
     return out.str();
 }
@@ -538,6 +673,12 @@ bool Config::setParam(const std::string& key,
     else if (k == "sliceRotation") ok = assignFloat(sliceRotation, k, value, -kHuge, kHuge,
              "the angle must be a finite number of degrees", error);
     else if (k == "invertSection") ok = assignBool(invertSection, k, value, error);
+    else if (k == "wallMotion") {
+        std::vector<WallMotion> parsed;
+        ok = parseWallMotion(value, parsed, error);
+        if (ok)
+            wallMotion = cleanValue(value);
+    }
     else if (k == "restart")       ok = assignBool(restart, k, value, error);
     else if (k == "restartFile")  { restartFile = cleanValue(value); ok = true; }
     else if (k == "addTime") ok = assignDouble(addTime, k, value, -kHuge, kHuge,

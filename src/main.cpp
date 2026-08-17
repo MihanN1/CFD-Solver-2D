@@ -21,7 +21,7 @@ static void printUsage(const char* exe) {
         "      omega smootherOmega mgIterations mgTolerance mgMinCoarseSize\n"
         "      saveInterval outputDir geometryFile sliceAngleX sliceAngleZ\n"
         "      sliceRotation invertSection ro useCuda restart restartFile addTime\n"
-        "      gravityEnabled gravityAccel gravityAngle\n"
+        "      gravityEnabled gravityAccel gravityAngle wallMotion\n"
         "\n"
         "Rules:\n"
         "  key=value, no spaces around '='  nx=256      not  nx = 256\n"

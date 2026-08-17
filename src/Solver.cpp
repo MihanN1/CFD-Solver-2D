@@ -6,13 +6,16 @@
 #include <filesystem>
 #include <iomanip>
 #include <algorithm>
+#ifdef __AVX2__
 #include <immintrin.h>
+#endif
 #include <array>
 #include <limits>
 #include <sstream>
 #include <utility>
 
 namespace {
+#ifdef __AVX2__
 // Largest of the 8 lanes
 float horizontalMax(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
@@ -37,6 +40,7 @@ float horizontalSum(__m256 v) {
 __m256 absMask() {
     return _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
 }
+#endif
 }
 
 Solver::Solver(const Config& cfg, const Mesh& mesh)
@@ -123,14 +127,29 @@ void Solver::buildFaceMasks(){
     vFluidMask.assign(static_cast<size_t>(nx) * (ny + 1), 0);
     uFluidMaskF.assign(static_cast<size_t>(nx + 1) * ny, 0.0f);
     vFluidMaskF.assign(static_cast<size_t>(nx) * (ny + 1), 0.0f);
+    uWall.assign(static_cast<size_t>(nx + 1) * ny, 0.0f);
+    vWall.assign(static_cast<size_t>(nx) * (ny + 1), 0.0f);
 
     // u faces
     for (int j = 0; j < ny; ++j){
         const int row = j * nx;
+        const float yFace = (j + 0.5f) * dy;
         for (int i = 1; i < nx; ++i){
-            const bool fluid = !solidMask[row + i] && !solidMask[row + i - 1];
+            const bool solidLeft = solidMask[row + i - 1] != 0;
+            const bool solidRight = solidMask[row + i] != 0;
+            const bool fluid = !solidLeft && !solidRight;
             uFluidMask[idxU(i, j)] = fluid ? 1 : 0;
             uFluidMaskF[idxU(i, j)] = fluid ? 1.0f : 0.0f;
+
+            // Solid on one side only means this face is normal to a wall and
+            // the body does not move, so it stays shut. Solid on both sides
+            // means the face lies inside the body, where its only job is to
+            // be the tangential value the fluid above and below shears against.
+            if (wallsMove && solidLeft && solidRight) {
+                const WallField& wall = wallField[mesh.objectId[row + i]];
+                uWall[idxU(i, j)] =
+                    wall.slideX - wall.omega * (yFace - wall.cy);
+            }
         }
     }
 
@@ -139,10 +158,158 @@ void Solver::buildFaceMasks(){
         const int row = j * nx;
         const int rowBot = (j - 1) * nx;
         for (int i = 0; i < nx; ++i){
-            const bool fluid = !solidMask[row + i] && !solidMask[rowBot + i];
+            const bool solidTop = solidMask[row + i] != 0;
+            const bool solidBot = solidMask[rowBot + i] != 0;
+            const bool fluid = !solidTop && !solidBot;
             vFluidMask[idxV(i, j)] = fluid ? 1 : 0;
             vFluidMaskF[idxV(i, j)] = fluid ? 1.0f : 0.0f;
+
+            if (wallsMove && solidTop && solidBot) {
+                const WallField& wall = wallField[mesh.objectId[row + i]];
+                vWall[idxV(i, j)] =
+                    wall.slideY + wall.omega * ((i + 0.5f) * dx - wall.cx);
+            }
         }
+    }
+}
+
+void Solver::buildSlipFaces() {
+    const int nx = cfg.nx;
+    const int ny = cfg.ny;
+
+    uSlipFaces.clear();
+    vSlipFaces.clear();
+    if (!wallsSlip)
+        return;
+
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        for (int i = 1; i < nx; ++i) {
+            if (!solidMask[row + i] || !solidMask[row + i - 1])
+                continue;
+            if (!wallField[mesh.objectId[row + i]].slip)
+                continue;
+
+            const int below =
+                (j > 0 && uFluidMask[idxU(i, j - 1)]) ? idxU(i, j - 1) : -1;
+            const int above =
+                (j + 1 < ny && uFluidMask[idxU(i, j + 1)]) ? idxU(i, j + 1) : -1;
+            if (below < 0 && above < 0)
+                continue;
+
+            SlipFace mirror;
+            mirror.face = idxU(i, j);
+            mirror.first = (below >= 0) ? below : above;
+            mirror.second = (above >= 0) ? above : below;
+            uSlipFaces.push_back(mirror);
+        }
+    }
+
+    for (int j = 1; j < ny; ++j) {
+        const int row = j * nx;
+        const int rowBot = (j - 1) * nx;
+        for (int i = 0; i < nx; ++i) {
+            if (!solidMask[row + i] || !solidMask[rowBot + i])
+                continue;
+            if (!wallField[mesh.objectId[row + i]].slip)
+                continue;
+
+            const int left =
+                (i > 0 && vFluidMask[idxV(i - 1, j)]) ? idxV(i - 1, j) : -1;
+            const int right =
+                (i + 1 < nx && vFluidMask[idxV(i + 1, j)]) ? idxV(i + 1, j) : -1;
+            if (left < 0 && right < 0)
+                continue;
+
+            SlipFace mirror;
+            mirror.face = idxV(i, j);
+            mirror.first = (left >= 0) ? left : right;
+            mirror.second = (right >= 0) ? right : left;
+            vSlipFaces.push_back(mirror);
+        }
+    }
+}
+
+void Solver::applySlipFaces() {
+    for (const SlipFace& mirror : uSlipFaces)
+        u[mirror.face] = 0.5f * (u[mirror.first] + u[mirror.second]);
+    for (const SlipFace& mirror : vSlipFaces)
+        v[mirror.face] = 0.5f * (v[mirror.first] + v[mirror.second]);
+}
+
+void Solver::resolveWallMotion() {
+    wallField.assign(mesh.objects.size() + 1, WallField());
+    wallsMove = false;
+    wallsSlip = false;
+
+    for (size_t id = 1; id < wallField.size(); ++id) {
+        wallField[id].cx = static_cast<float>(mesh.objects[id - 1].cx);
+        wallField[id].cy = static_cast<float>(mesh.objects[id - 1].cy);
+    }
+
+    if (cfg.wallMotion.empty())
+        return;
+
+    std::vector<WallMotion> motions;
+    std::string error;
+    if (!parseWallMotion(cfg.wallMotion, motions, error)) {
+        std::cout << "\n!!! " << error << "\n    No wall moves.\n";
+        return;
+    }
+
+    constexpr float degToRad = 3.14159265358979f / 180.0f;
+    for (const WallMotion& motion : motions) {
+        if (static_cast<size_t>(motion.object) >= wallField.size()) {
+            std::cout << "\n!!! wallMotion moves object " << motion.object
+                      << ", but this geometry has " << mesh.objects.size()
+                      << (mesh.objects.size() == 1 ? " object" : " objects")
+                      << ". That part of the line does nothing.\n";
+            continue;
+        }
+        WallField& wall = wallField[motion.object];
+        wall.omega = motion.rotation * degToRad;
+        wall.slideX = motion.slideX;
+        wall.slideY = motion.slideY;
+        wall.slip = motion.slip;
+        if (wall.omega != 0.0f || wall.slideX != 0.0f || wall.slideY != 0.0f)
+            wallsMove = true;
+        if (wall.slip)
+            wallsSlip = true;
+    }
+
+    if (!wallsMove && !wallsSlip)
+        return;
+
+    const float inlet = std::fabs(cfg.U0);
+    std::cout << "Walls:\n";
+    for (size_t id = 1; id < wallField.size(); ++id) {
+        const WallField& wall = wallField[id];
+        if (wall.slip) {
+            std::cout << "  object " << id
+                      << ": free-slip, the fluid slides along it and it "
+                         "exerts no drag\n";
+            continue;
+        }
+        if (wall.omega == 0.0f && wall.slideX == 0.0f && wall.slideY == 0.0f)
+            continue;
+
+        const float rim =
+            std::fabs(wall.omega) *
+            static_cast<float>(mesh.objects[id - 1].radius);
+        const float surface = rim + std::hypot(wall.slideX, wall.slideY);
+
+        std::cout << "  object " << id << " at (" << wall.cx << ", " << wall.cy
+                  << ") m: rot = " << wall.omega / degToRad << " deg/s"
+                  << " -> rim speed " << rim << " m/s, slide = ("
+                  << wall.slideX << ", " << wall.slideY << ") m/s\n";
+        if (inlet > 0.0f)
+            std::cout << "    surface moves at " << surface / inlet
+                      << "x the inlet velocity\n";
+        if (inlet > 0.0f && surface > 5.0f * inlet)
+            std::cout << "    note: the wall is now the fastest thing in the "
+                         "domain, so it sets dt through the\n"
+                         "    CFL condition and the run gets slower in "
+                         "proportion.\n";
     }
 }
 
@@ -152,10 +319,15 @@ void Solver::initFields()
     const int ny = cfg.ny;
 
     solidMask.assign(static_cast<size_t>(nx) * ny, 0);
-    for (int id = 0; id < nx * ny; ++id)
+    fluidCellMaskF.assign(static_cast<size_t>(nx) * ny, 0.0f);
+    for (int id = 0; id < nx * ny; ++id) {
         solidMask[id] = mesh.solid[id] ? 1 : 0;
+        fluidCellMaskF[id] = mesh.solid[id] ? 0.0f : 1.0f;
+    }
 
+    resolveWallMotion();
     buildFaceMasks();
+    buildSlipFaces();
     multigrid.setUseCuda(cfg.useCuda);
     multigrid.setGeometry(solidMask);
 
@@ -185,6 +357,24 @@ void Solver::initFields()
 
     // Runs in both cases: on a restart this is what applies a changed U0
     applyBC();
+
+    // The closed faces of a frame carry the motion of the run that wrote it,
+    // which is not necessarily this one, and a fresh run has zeros there. Both
+    // are stamped over before anything reads them, so step 0 already shows the
+    // walls moving and the first dt already accounts for them.
+    if (wallsMove) {
+        for (int j = 0; j < ny; ++j)
+            for (int i = 1; i < nx; ++i) {
+                const int id = idxU(i, j);
+                u[id] = uFluidMaskF[id] * u[id] + uWall[id];
+            }
+        for (int j = 1; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                const int id = idxV(i, j);
+                v[id] = vFluidMaskF[id] * v[id] + vWall[id];
+            }
+    }
+    applySlipFaces();
 
     std::cout << "Fields initialized. Multigrid levels: "
               << multigrid.levelCount()
@@ -247,15 +437,19 @@ void Solver::computeDt(){
     const int nx = cfg.nx;
     const int ny = cfg.ny;
 
+#ifdef __AVX2__
     const __m256 invDxVec = _mm256_set1_ps(invDx);
     const __m256 invDyVec = _mm256_set1_ps(invDy);
     const __m256 signMask = absMask();
+#endif
 
     float maxCourant = 0.0f;
 
     #pragma omp parallel
     {
+#ifdef __AVX2__
         __m256 localVec = _mm256_setzero_ps();
+#endif
         float localScalar = 0.0f;
 
         #pragma omp for schedule(static) nowait
@@ -266,6 +460,7 @@ void Solver::computeDt(){
             const int rowVTop = (j + 1) * nx;
 
             int i = 0;
+#ifdef __AVX2__
             for (; i + 8 <= nx; i += 8)
             {
                 const __m256 uL = _mm256_and_ps(signMask,
@@ -284,6 +479,7 @@ void Solver::computeDt(){
 
                 localVec = _mm256_max_ps(localVec, courant);
             }
+#endif
 
             for (; i < nx; ++i)
             {
@@ -296,7 +492,11 @@ void Solver::computeDt(){
             }
         }
 
+#ifdef __AVX2__
         const float localMax = std::max(horizontalMax(localVec), localScalar);
+#else
+        const float localMax = localScalar;
+#endif
         #pragma omp critical
         {
             maxCourant = std::max(maxCourant, localMax);
@@ -328,6 +528,7 @@ void Solver::predictor() {
     float* __restrict uStar = u_star.data();
     float* __restrict vStar = v_star.data();
 
+#ifdef __AVX2__
     const __m256 zero    = _mm256_setzero_ps();
     const __m256 two     = _mm256_set1_ps(2.f);
     const __m256 quarter = _mm256_set1_ps(0.25f);
@@ -337,6 +538,7 @@ void Solver::predictor() {
     const __m256 invDy2Vec = _mm256_set1_ps(invDy2);
     const __m256 dtConvVec = _mm256_set1_ps(dtConv);
     const __m256 dtNuVec   = _mm256_set1_ps(dtNu);
+#endif
 
     #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny - 1; ++j) {
@@ -347,8 +549,10 @@ void Solver::predictor() {
         const float* __restrict vRow = vPtr + j * nx;
         const float* __restrict vTop = vPtr + (j + 1) * nx;
         const float* __restrict uMask = uFluidMaskF.data() + rowU;
+        const float* __restrict uWallRow = uWall.data() + rowU;
         float* __restrict uStarRow = uStar + rowU;
         int i = 1;
+#ifdef __AVX2__
         for (; i + 8 <= nx; i += 8) {
             const __m256 uij =
                 _mm256_loadu_ps(uRow + i);
@@ -414,8 +618,11 @@ void Solver::predictor() {
                     _mm256_mul_ps(dtNuVec, diff));
             _mm256_storeu_ps(
                 uStarRow + i,
-                _mm256_mul_ps(res, _mm256_loadu_ps(uMask + i)));
+                _mm256_add_ps(
+                    _mm256_mul_ps(res, _mm256_loadu_ps(uMask + i)),
+                    _mm256_loadu_ps(uWallRow + i)));
         }
+#endif
         for (; i < nx; ++i) {
             const float u_ij = uRow[i];
             const float v_n = 0.25f * (
@@ -448,7 +655,8 @@ void Solver::predictor() {
             uStarRow[i] = uMask[i] * (
                 u_ij
                 - dtConv * (u_ij*dudx + v_n*dudy)
-                + dtNu * (d2udx2 + d2udy2));
+                + dtNu * (d2udx2 + d2udy2))
+                + uWallRow[i];
         }
     }
 
@@ -463,6 +671,7 @@ void Solver::predictor() {
         const float* __restrict vRow = vPtr + j * nx;
         const float* __restrict vTop = vPtr + (j + 1) * nx;
         const float* __restrict uMask = uFluidMaskF.data() + rowU;
+        const float* __restrict uWallRow = uWall.data() + rowU;
         float* __restrict uStarRow = uStar + rowU;
         for (int i = 1; i < nx; ++i) {
             const float u_ij = uRow[i];
@@ -496,7 +705,8 @@ void Solver::predictor() {
             uStarRow[i] = uMask[i] * (
                 u_ij
                 - dtConv * (u_ij*dudx + v_n*dudy)
-                + dtNu * (d2udx2 + d2udy2));
+                + dtNu * (d2udx2 + d2udy2))
+                + uWallRow[i];
         }
     }
 
@@ -509,8 +719,10 @@ void Solver::predictor() {
         const float* __restrict uRow = uPtr + j * (nx + 1);
         const float* __restrict uBot = uPtr + (j - 1) * (nx + 1);
         const float* __restrict vMask = vFluidMaskF.data() + rowV;
+        const float* __restrict vWallRow = vWall.data() + rowV;
         float* __restrict vStarRow = vStar + rowV;
         int i = 1;
+#ifdef __AVX2__
         for (; i + 8 <= nx - 1; i += 8) {
             const __m256 vij =
                 _mm256_loadu_ps(vRow + i);
@@ -574,8 +786,11 @@ void Solver::predictor() {
                     _mm256_mul_ps(dtNuVec, diff));
             _mm256_storeu_ps(
                 vStarRow + i,
-                _mm256_mul_ps(res, _mm256_loadu_ps(vMask + i)));
+                _mm256_add_ps(
+                    _mm256_mul_ps(res, _mm256_loadu_ps(vMask + i)),
+                    _mm256_loadu_ps(vWallRow + i)));
         }
+#endif
         for (; i < nx - 1; ++i) {
             const float v_ij = vRow[i];
             const float u_e = 0.25f * (
@@ -608,7 +823,8 @@ void Solver::predictor() {
             vStarRow[i] = vMask[i] * (
                 v_ij
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
-                + dtNu * (d2vdx2 + d2vdy2));
+                + dtNu * (d2vdx2 + d2vdy2))
+                + vWallRow[i];
         }
 
         for (int pass = 0; pass < 2; ++pass) {
@@ -646,7 +862,8 @@ void Solver::predictor() {
             vStarRow[iCol] = vMask[iCol] * (
                 v_ij
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
-                + dtNu * (d2vdx2 + d2vdy2));
+                + dtNu * (d2vdx2 + d2vdy2))
+                + vWallRow[iCol];
         }
     }
 
@@ -666,11 +883,14 @@ void Solver::predictor() {
 void Solver::solvePoisson() {
     const int nx = cfg.nx, ny = cfg.ny;
     const float invDt = 1.f / dt;
+#ifdef __AVX2__
     const __m256 invDxVec = _mm256_set1_ps(invDx);
     const __m256 invDyVec = _mm256_set1_ps(invDy);
     const __m256 invDtVec = _mm256_set1_ps(invDt);
+#endif
     const float* __restrict uStar = u_star.data();
     const float* __restrict vStar = v_star.data();
+    const float* __restrict cellMask = fluidCellMaskF.data();
     float* __restrict rhsPtr = rhs.data();
 
     double rhsSqSum = 0.0;
@@ -681,8 +901,10 @@ void Solver::solvePoisson() {
         const int rowU = j * (nx + 1);
         const int rowV = j * nx;
         const int rowVTop = (j + 1) * nx;
-        __m256 sqAcc = _mm256_setzero_ps();
+        float rowSum = 0.0f;
         int i = 0;
+#ifdef __AVX2__
+        __m256 sqAcc = _mm256_setzero_ps();
         for (; i + 8 <= nx; i += 8){
             const __m256 uR =
                 _mm256_loadu_ps(uStar + rowU + i + 1);
@@ -700,17 +922,24 @@ void Solver::solvePoisson() {
                     _mm256_mul_ps(
                         _mm256_sub_ps(vT, vB),
                         invDyVec));
-            const __m256 val = _mm256_mul_ps(div, invDtVec);
+            // A solid cell is not solved for, and the walls of a moving body
+            // put a divergence inside it that would otherwise be counted in
+            // ||rhs|| and loosen the tolerance the whole grid is judged by.
+            const __m256 val =
+                _mm256_mul_ps(
+                    _mm256_mul_ps(div, invDtVec),
+                    _mm256_loadu_ps(cellMask + rowP + i));
             _mm256_storeu_ps(rhsPtr + rowP + i, val);
             sqAcc = _mm256_add_ps(sqAcc, _mm256_mul_ps(val, val));
         }
-        float rowSum = horizontalSum(sqAcc);
+        rowSum = horizontalSum(sqAcc);
+#endif
         for (; i < nx; ++i){
             const float div =
                 (uStar[rowU + i + 1] - uStar[rowU + i]) * invDx +
                 (vStar[rowVTop + i] - vStar[rowV + i]) * invDy;
 
-            const float val = div * invDt;
+            const float val = div * invDt * cellMask[rowP + i];
             rhsPtr[rowP + i] = val;
             rowSum += val * val;
         }
@@ -732,9 +961,11 @@ void Solver::solvePoisson() {
 
 void Solver::corrector() {
     const int nx = cfg.nx, ny = cfg.ny;
+#ifdef __AVX2__
     const __m256 invDxVec = _mm256_set1_ps(invDx);
     const __m256 invDyVec = _mm256_set1_ps(invDy);
     const __m256 dtVec    = _mm256_set1_ps(dt);
+#endif
     const float* __restrict pPtr = p.data();
     const float* __restrict uStar = u_star.data();
     const float* __restrict vStar = v_star.data();
@@ -745,7 +976,10 @@ void Solver::corrector() {
     for (int j = 0; j < ny; ++j) {
         const int rowP = j * nx;
         const int rowU = j * (nx + 1);
+        const float* __restrict uMask = uFluidMaskF.data() + rowU;
+        const float* __restrict uWallRow = uWall.data() + rowU;
         int i = 1;
+#ifdef __AVX2__
         for (; i + 8 <= nx; i += 8){
             const __m256 pRight =
                 _mm256_loadu_ps(pPtr + rowP + i);
@@ -763,16 +997,17 @@ void Solver::corrector() {
                     _mm256_mul_ps(dtVec, dpdx));
             _mm256_storeu_ps(
                 uPtr + rowU + i,
-                _mm256_mul_ps(
-                    res,
-                    _mm256_loadu_ps(uFluidMaskF.data() + rowU + i)));
+                _mm256_add_ps(
+                    _mm256_mul_ps(res, _mm256_loadu_ps(uMask + i)),
+                    _mm256_loadu_ps(uWallRow + i)));
         }
+#endif
         for (; i < nx; ++i){
             const float res =
                 uStar[rowU + i]
                 - dt * (pPtr[rowP + i] - pPtr[rowP + i - 1]) * invDx;
 
-            uPtr[rowU + i] = uFluidMaskF[rowU + i] * res;
+            uPtr[rowU + i] = uMask[i] * res + uWallRow[i];
         }
     }
 
@@ -781,7 +1016,10 @@ void Solver::corrector() {
         const int rowP = j * nx;
         const int rowPBot = (j - 1) * nx;
         const int rowV = j * nx;
+        const float* __restrict vMask = vFluidMaskF.data() + rowV;
+        const float* __restrict vWallRow = vWall.data() + rowV;
         int i = 0;
+#ifdef __AVX2__
         for (; i + 8 <= nx; i += 8){
             const __m256 pTop =
                 _mm256_loadu_ps(pPtr + rowP + i);
@@ -799,16 +1037,17 @@ void Solver::corrector() {
                     _mm256_mul_ps(dtVec, dpdy));
             _mm256_storeu_ps(
                 vPtr + rowV + i,
-                _mm256_mul_ps(
-                    res,
-                    _mm256_loadu_ps(vFluidMaskF.data() + rowV + i)));
+                _mm256_add_ps(
+                    _mm256_mul_ps(res, _mm256_loadu_ps(vMask + i)),
+                    _mm256_loadu_ps(vWallRow + i)));
         }
+#endif
         for (; i < nx; ++i){
             const float res =
                 vStar[rowV + i]
                 - dt * (pPtr[rowP + i] - pPtr[rowPBot + i]) * invDy;
 
-            vPtr[rowV + i] = vFluidMaskF[rowV + i] * res;
+            vPtr[rowV + i] = vMask[i] * res + vWallRow[i];
         }
     }
 
@@ -924,18 +1163,34 @@ void Solver::run() {
             computeDt();
 
         float stepDt = dt;
-        if (currentTime + stepDt > cfg.totalTime)
-            stepDt = static_cast<float>(cfg.totalTime - currentTime);
+        bool lastStep = false;
+        const double remaining = cfg.totalTime - currentTime;
+        if (remaining <= static_cast<double>(dt)) {
+            stepDt = static_cast<float>(remaining);
+            lastStep = true;
+        } else if (remaining < 2.0 * static_cast<double>(dt)) {
+            // Halving the last stretch beats a full step followed by whatever
+            // is left. The Poisson right-hand side is div/dt, so a step of
+            // nanoseconds writes a frame whose pressure map is scaled by
+            // millions; this way no step is ever shorter than half of dt.
+            stepDt = static_cast<float>(0.5 * remaining);
+        }
         if (!(stepDt > 0.f))
             break;
         const float savedDt = dt;
         dt = stepDt;
 
+        applySlipFaces();
         predictor();
         solvePoisson();
         corrector();
 
         currentTime += dt;
+        // stepDt is a float and the remainder it was cut from is a double, so
+        // accumulating it lands a few ulps short of totalTime and the loop
+        // would run once more for a leftover that is pure rounding.
+        if (lastStep)
+            currentTime = cfg.totalTime;
         step++;
         dt = savedDt;
 
@@ -1062,6 +1317,15 @@ void Solver::saveVTK(int stepNum) const {
                 0.5f * (u[rowU + i] + u[rowU + i + 1]);
             float vv =
                 0.5f * (v[rowV + i] + v[rowVTop + i]);
+            // The faces normal to a wall are held shut, so averaging them
+            // would draw the rim of a spinning body at half speed. Solid cells
+            // get the surface velocity they actually impose instead. Nothing
+            // reads this back; it is purely what ParaView sees.
+            if ((wallsMove || wallsSlip) && solidMask[rowV + i]) {
+                const WallField& wall = wallField[mesh.objectId[rowV + i]];
+                uu = wall.slideX - wall.omega * ((j + 0.5f) * dy - wall.cy);
+                vv = wall.slideY + wall.omega * ((i + 0.5f) * dx - wall.cx);
+            }
             writeFloat(uu);
             writeFloat(vv);
             writeFloat(0.0f);

@@ -2,7 +2,9 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#ifdef __AVX2__
 #include <immintrin.h>
+#endif
 
 static const int PRE_SMOOTH_SWEEPS = 2;
 static const int POST_SMOOTH_SWEEPS = 2;
@@ -19,6 +21,7 @@ int coarseSweeps(int nx, int ny) {
     return (wanted > 400) ? 400 : wanted;
 }
 
+#ifdef __AVX2__
 // Sum of the 8 lanes
 float horizontalSum(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
@@ -28,6 +31,7 @@ float horizontalSum(__m256 v) {
     lo = _mm_add_ss(lo, _mm_shuffle_ps(lo, lo, 0x55));
     return _mm_cvtss_f32(lo);
 }
+#endif
 }
 
 Multigrid::Multigrid(int nx, int ny, float dx, float dy, int minCoarseSize)
@@ -294,10 +298,12 @@ void Multigrid::smoothSOR(
     const float* const coefN    = grid.coefN.data();
     const float* const invDiag  = grid.invDiag.data();
 
+#ifdef __AVX2__
     // Red-black ordering: only every second lane of a vector is written back
     const __m256i laneEven = _mm256_setr_epi32(-1, 0, -1, 0, -1, 0, -1, 0);
     const __m256i laneOdd  = _mm256_setr_epi32(0, -1, 0, -1, 0, -1, 0, -1);
     const __m256 omegaVec  = _mm256_set1_ps(omega);
+#endif
 
     #pragma omp parallel if (ny >= PARALLEL_ROWS_MIN)
     for (int sweep = 0; sweep < sweeps; ++sweep) {
@@ -306,9 +312,10 @@ void Multigrid::smoothSOR(
             for (int j = 0; j < ny; ++j) {
                 const int row = j * nx;
                 const int parity = color ^ (j & 1);
-                const __m256i lane = parity ? laneOdd : laneEven;
 
                 int i = 0;
+#ifdef __AVX2__
+                const __m256i lane = parity ? laneOdd : laneEven;
                 for (; i + 8 <= nx; i += 8) {
                     const int id = row + i;
 
@@ -346,6 +353,9 @@ void Multigrid::smoothSOR(
 
                     _mm256_maskstore_ps(pressure + id, lane, relaxed);
                 }
+#endif
+                // Whatever the vector loop left, and on a build without AVX2
+                // the whole row: same red-black stride, same arithmetic.
                 for (int ii = i + parity; ii < nx; ii += 2) {
                     const int id = row + ii;
                     const float sum =
@@ -380,6 +390,7 @@ void Multigrid::computeResidual(int level) {
         const int row = j * nx;
 
         int i = 0;
+#ifdef __AVX2__
         for (; i + 8 <= nx; i += 8) {
             const int id = row + i;
             const __m256 pCentre =
@@ -412,6 +423,7 @@ void Multigrid::computeResidual(int level) {
                 residual + id,
                 _mm256_sub_ps(_mm256_loadu_ps(rhs + id), Ap));
         }
+#endif
 
         for (; i < nx; ++i) {
             const int id = row + i;
@@ -427,6 +439,8 @@ void Multigrid::computeResidual(int level) {
 
 float Multigrid::computeVectorNorm(const float* values, int count) {
     double total = 0.0;
+    int start = 0;
+#ifdef __AVX2__
     #pragma omp parallel reduction(+ : total) if (count >= 8192)
     {
         __m256 acc = _mm256_setzero_ps();
@@ -438,7 +452,8 @@ float Multigrid::computeVectorNorm(const float* values, int count) {
         }
         total += static_cast<double>(horizontalSum(acc));
     }
-    const int start = (count / 8) * 8;
+    start = (count / 8) * 8;
+#endif
     for (int i = start; i < count; ++i)
         total += static_cast<double>(values[i]) * static_cast<double>(values[i]);
 

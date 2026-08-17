@@ -47,6 +47,36 @@ private:
     std::vector<float> uFluidMaskF;
     std::vector<float> vFluidMaskF;
     std::vector<uint8_t> solidMask;
+    std::vector<float> fluidCellMaskF;
+
+    // Velocity prescribed on the closed faces, resolved once because neither
+    // the geometry nor the motion changes during a run. Zero everywhere when
+    // no wall moves, so every expression below degenerates to the old one.
+    std::vector<float> uWall;
+    std::vector<float> vWall;
+
+    // Rigid surface velocity of one object: u = slide + omega x (x - centre).
+    struct WallField {
+        float omega = 0.0f;   // rad/s, counter-clockwise
+        float cx = 0.0f, cy = 0.0f;
+        float slideX = 0.0f, slideY = 0.0f;
+        bool slip = false;
+    };
+    std::vector<WallField> wallField;   // indexed by mesh object id, 0 unused
+    bool wallsMove = false;
+    bool wallsSlip = false;
+
+    // One buried face of a free-slip wall and the open faces it mirrors, so
+    // that the difference the viscous stencil sees across the wall is zero.
+    // second == first when the wall has fluid on one side only, which is the
+    // usual case; then the average is that face exactly.
+    struct SlipFace {
+        int face;
+        int first;
+        int second;
+    };
+    std::vector<SlipFace> uSlipFaces;
+    std::vector<SlipFace> vSlipFaces;
 
     float dx = 0.0f, dy = 0.0f;
     float invDx = 0.0f, invDy = 0.0f;
@@ -62,8 +92,21 @@ private:
     void solvePoisson();
     void corrector();
     void applyBC();
-    void buildFaceMasks(); // build masks for u and v to identify fluid faces
+    void buildFaceMasks();
     void projectRestartState(); // one projection after an approximate restart
+
+    // Turns cfg.wallMotion into one rigid velocity field per object, checks
+    // the numbers against the geometry and reports what will actually move.
+    void resolveWallMotion();
+
+    // Collects the buried faces of every free-slip object together with the
+    // open faces they mirror. Needs the face masks finished, so it runs after
+    // buildFaceMasks rather than inside it.
+    void buildSlipFaces();
+
+    // Refreshes those faces from the current field, which is what makes the
+    // wall frictionless: the stencil reading across it sees no difference.
+    void applySlipFaces();
 
     float maxDivergence() const;
     float maxVelocity() const;

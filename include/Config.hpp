@@ -2,6 +2,27 @@
 #include <string>
 #include <vector>
 
+// What one solid object does to the fluid touching it. rotation turns the
+// surface about the object's own centroid, slideX/slideY drag it in a straight
+// line; the object itself never moves, only the velocity its walls impose on
+// the fluid. slip replaces no-slip with free-slip and is exclusive with the
+// other three, since a wall that carries no tangential stress cannot drag.
+struct WallMotion {
+    int object = 0;
+    float rotation = 0.0f;   // degrees/s, counter-clockwise
+    float slideX = 0.0f;     // m/s
+    float slideY = 0.0f;     // m/s
+    bool slip = false;
+};
+
+// Reads the wallMotion string. Settings are separated by ';' or ',' and each
+// object opens with "<number>:", so "1:rot=90;2:slideX=0.5" and the same line
+// written with commas both parse. An empty string means nothing moves.
+// Returns false and fills error in exactly the shape setParam uses.
+bool parseWallMotion(const std::string& text,
+                     std::vector<WallMotion>& out,
+                     std::string& error);
+
 struct Config {
     bool restart = false;
     std::string restartFile = "";
@@ -48,6 +69,9 @@ struct Config {
     float sliceAngleZ = 0.0;   // degrees
     float sliceRotation = 0.0;   // degrees
     bool invertSection = false; // doesn't allow to invert the model by default
+
+    // Wall behaviour
+    std::string wallMotion = "";   // "1:rot=90,slideX=0.5;2:slip=1", empty = static no-slip
 
     // Methods
     void readFromConsole();

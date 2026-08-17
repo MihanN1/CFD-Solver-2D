@@ -69,6 +69,7 @@ Mesh::Mesh(const Config& cfg, const std::vector<uint8_t>* presetSolid)
         const int cells = nx * ny;
         for (int id = 0; id < cells; ++id)
             solid[id] = (*presetSolid)[id] ? 1 : 0;
+        labelObjects();
         return;
     }
 
@@ -87,6 +88,8 @@ Mesh::Mesh(const Config& cfg, const std::vector<uint8_t>* presetSolid)
         const double radius = 0.1 * std::min(cfg.Lx, cfg.Ly);
         initCircle(cx, cy, radius);
     }
+
+    labelObjects();
 }
 
 void Mesh::createGrid() {
@@ -635,6 +638,68 @@ void Mesh::buildSolid() {
     }
 }
 
+void Mesh::labelObjects() {
+    objectId.assign(static_cast<std::size_t>(nx) * ny, 0);
+    objects.clear();
+
+    const int cells = nx * ny;
+    std::vector<int> pending;
+
+    for (int seed = 0; seed < cells; ++seed) {
+        if (solid[seed] == 0 || objectId[seed] != 0) {
+            continue;
+        }
+
+        const int label = static_cast<int>(objects.size()) + 1;
+        SolidObject body;
+        double sumX = 0.0;
+        double sumY = 0.0;
+
+        objectId[seed] = label;
+        pending.push_back(seed);
+        while (!pending.empty()) {
+            const int id = pending.back();
+            pending.pop_back();
+            const int i = id % nx;
+            const int j = id / nx;
+
+            ++body.cells;
+            sumX += (i + 0.5) * dx;
+            sumY += (j + 0.5) * dy;
+
+            for (int neighbourJ = std::max(j - 1, 0);
+                 neighbourJ <= std::min(j + 1, ny - 1);
+                 ++neighbourJ) {
+                for (int neighbourI = std::max(i - 1, 0);
+                     neighbourI <= std::min(i + 1, nx - 1);
+                     ++neighbourI) {
+                    const int neighbour = neighbourJ * nx + neighbourI;
+                    if (solid[neighbour] == 0 || objectId[neighbour] != 0) {
+                        continue;
+                    }
+                    objectId[neighbour] = label;
+                    pending.push_back(neighbour);
+                }
+            }
+        }
+
+        body.cx = sumX / body.cells;
+        body.cy = sumY / body.cells;
+        objects.push_back(body);
+    }
+
+    // The rim radius needs the centroid, so it cannot be accumulated above.
+    for (int id = 0; id < cells; ++id) {
+        if (objectId[id] == 0) {
+            continue;
+        }
+        SolidObject& body = objects[objectId[id] - 1];
+        const double offsetX = (id % nx + 0.5) * dx - body.cx;
+        const double offsetY = (id / nx + 0.5) * dy - body.cy;
+        body.radius = std::max(body.radius, std::hypot(offsetX, offsetY));
+    }
+}
+
 void Mesh::initCircle(double cx, double cy, double R) {
     clearSolid();
     for (int j = 0; j < ny; ++j) {
@@ -657,6 +722,20 @@ void Mesh::printInfo() const {
     int count = 0;
     for (int v : solid) if (v) ++count;
     std::cout << "  Number of solid cells = " << count << "\n";
+    std::cout << "  Number of objects = " << objects.size()
+              << " (these numbers are what wallMotion takes)\n";
+    constexpr std::size_t LISTED_OBJECTS = 10;
+    for (std::size_t index = 0;
+         index < std::min(objects.size(), LISTED_OBJECTS);
+         ++index) {
+        const SolidObject& body = objects[index];
+        std::cout << "    object " << index + 1 << ": " << body.cells
+                  << " cells, centre (" << body.cx << ", " << body.cy
+                  << ") m, rim " << body.radius << " m\n";
+    }
+    if (objects.size() > LISTED_OBJECTS)
+        std::cout << "    ... and " << objects.size() - LISTED_OBJECTS
+                  << " more\n";
     std::cout << "  Number of geometry triangles = " << triangles.size() << "\n";
     std::cout << "  Number of section points = " << sectionContour.size() << "\n";
     std::cout << "=========================\n";
