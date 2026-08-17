@@ -35,6 +35,16 @@ private:
     float dt = 0.0f;  // current time step
     float lastResidual = 0.0f;  // relative residual of the last pressure solve
 
+    // The velocity field stopped being a number, which no step size can be
+    // recovered from. run() stops on it instead of grinding out frames of NaN.
+    bool fieldBroken = false;
+    // Steps whose pressure solve ran out of V-cycles before reaching
+    // mgTolerance. The velocity field keeps a divergence of that order, and
+    // nothing said so before: mg res simply sat in the step line.
+    bool poissonShortReported = false;
+    int poissonShortSteps = 0;
+    float poissonWorstResidual = 0.0f;
+
     bool hasRestartState = false;
     bool needsProjection = false;   // u/v were rebuilt from cell averages
     float restartDt = 0.0f;         // dt that was in flight when the frame was written
@@ -78,6 +88,21 @@ private:
     std::vector<SlipFace> uSlipFaces;
     std::vector<SlipFace> vSlipFaces;
 
+    // The same pairing for a no-slip wall, which needs the opposite value on
+    // the buried face. The wall lies halfway between it and the open one, so
+    // leaving the wall velocity on the buried face puts the average of the two
+    // on the wall rather than the wall's own velocity, and every stencil
+    // reading across it sees half the shear there really is. wall is what the
+    // wall imposes at its own position, which is neither face's position.
+    struct MirrorFace {
+        int face;
+        int first;
+        int second;
+        float wall;
+    };
+    std::vector<MirrorFace> uMirrorFaces;
+    std::vector<MirrorFace> vMirrorFaces;
+
     float dx = 0.0f, dy = 0.0f;
     float invDx = 0.0f, invDy = 0.0f;
     float invDx2 = 0.0f, invDy2 = 0.0f;
@@ -88,6 +113,7 @@ private:
 
     void initFields();
     void computeDt();
+
     void predictor();
     void solvePoisson();
     void corrector();
@@ -107,6 +133,11 @@ private:
     // Refreshes those faces from the current field, which is what makes the
     // wall frictionless: the stencil reading across it sees no difference.
     void applySlipFaces();
+
+    // Same two steps for every wall that is not free-slip, and the wall
+    // velocity each pair has to reproduce at the wall itself.
+    void buildMirrorFaces();
+    void applyMirrorFaces();
 
     float maxDivergence() const;
     float maxVelocity() const;

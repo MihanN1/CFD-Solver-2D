@@ -72,10 +72,24 @@ bool readFloats(std::istream& in, std::vector<float>& dst, size_t count) {
     return true;
 }
 
-// solid is int32 on disk and one byte in memory, so it is streamed through the
-// fixed buffer instead of allocating a second full-size array
-bool readSolid(std::istream& in, std::vector<uint8_t>& dst, size_t count) {
+// solid is one byte in memory. Frames written now spell it out as one byte on
+// disk as well and take the first branch; older ones spent an int32 per cell,
+// and those are streamed through the fixed buffer instead of allocating a
+// second full-size array.
+bool readSolid(std::istream& in, std::vector<uint8_t>& dst, size_t count,
+               size_t width) {
     dst.resize(count);
+
+    if (width == 1) {
+        const std::streamsize bytes = static_cast<std::streamsize>(count);
+        in.read(reinterpret_cast<char*>(dst.data()), bytes);
+        if (in.gcount() != bytes)
+            return false;
+        for (size_t k = 0; k < count; ++k)
+            dst[k] = dst[k] ? 1 : 0;
+        return true;
+    }
+
     std::array<uint32_t, BUFFER_WORDS> buffer;
     size_t done = 0;
 
@@ -93,6 +107,96 @@ bool readSolid(std::istream& in, std::vector<uint8_t>& dst, size_t count) {
         done += chunk;
     }
     return true;
+}
+
+// --- packed face velocities ------------------------------------------------
+
+inline uint32_t floatBits(float value) {
+    uint32_t bits;
+    std::memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+
+inline float bitsToFloat(uint32_t bits) {
+    float value;
+    std::memcpy(&value, &bits, sizeof(value));
+    return value;
+}
+
+// The prediction, and the one line the writer and the reader must agree on to
+// the last bit.
+//
+// It is done in double on purpose. In float, 2.0f*cell overflows to infinity
+// for |cell| above 1.7e38 and the result is an infinity - unless the compiler
+// contracts the expression into an FMA, which keeps the exact product and gives
+// a finite answer instead. CMakeLists hands -mfma to the AVX2 build and not to
+// the scalar one, so the two builds disagreed on exactly those values and a
+// frame written by one would not unpack in the other. Doubling a float is exact
+// in double whatever the compiler does with it, and the single conversion back
+// rounds once, so every build agrees again.
+inline float predictNextFace(float cell, float previous) {
+    return static_cast<float>(2.0 * static_cast<double>(cell) -
+                              static_cast<double>(previous));
+}
+
+void appendWord(std::string& out, uint32_t word) {
+    out.push_back(static_cast<char>((word >> 24) & 0xFFu));
+    out.push_back(static_cast<char>((word >> 16) & 0xFFu));
+    out.push_back(static_cast<char>((word >> 8) & 0xFFu));
+    out.push_back(static_cast<char>(word & 0xFFu));
+}
+
+bool takeWord(const std::string& in, size_t& pos, uint32_t& word) {
+    if (pos + 4 > in.size())
+        return false;
+    word = (static_cast<uint32_t>(static_cast<unsigned char>(in[pos])) << 24) |
+           (static_cast<uint32_t>(static_cast<unsigned char>(in[pos + 1])) << 16) |
+           (static_cast<uint32_t>(static_cast<unsigned char>(in[pos + 2])) << 8) |
+            static_cast<uint32_t>(static_cast<unsigned char>(in[pos + 3]));
+    pos += 4;
+    return true;
+}
+
+// Zigzag first, so that a prediction one ulp low and one ulp high both cost a
+// single byte and an exact one costs a zero byte. Everything stays unsigned:
+// the difference of two bit patterns wraps, and it wraps back the same way.
+void appendDelta(std::string& out, uint32_t delta) {
+    const uint32_t sign = (delta & 0x80000000u) ? 0xFFFFFFFFu : 0u;
+    uint32_t zig = (delta << 1) ^ sign;
+    while (zig >= 0x80u) {
+        out.push_back(static_cast<char>((zig & 0x7Fu) | 0x80u));
+        zig >>= 7;
+    }
+    out.push_back(static_cast<char>(zig));
+}
+
+bool takeDelta(const std::string& in, size_t& pos, uint32_t& delta) {
+    uint32_t zig = 0;
+    for (int shift = 0; shift < 35; shift += 7) {
+        if (pos >= in.size())
+            return false;
+        const uint32_t byte = static_cast<unsigned char>(in[pos++]);
+        zig |= (byte & 0x7Fu) << shift;
+        if ((byte & 0x80u) == 0) {
+            const uint32_t sign = (zig & 1u) ? 0xFFFFFFFFu : 0u;
+            delta = (zig >> 1) ^ sign;
+            return true;
+        }
+    }
+    return false;
+}
+
+// FNV-1a over the bit patterns in a fixed byte order, so the frame carries the
+// same checksum wherever it was written
+uint32_t hashFaces(const std::vector<float>& values, uint32_t hash) {
+    for (float value : values) {
+        const uint32_t bits = floatBits(value);
+        for (int shift = 24; shift >= 0; shift -= 8) {
+            hash ^= (bits >> shift) & 0xFFu;
+            hash *= 16777619u;
+        }
+    }
+    return hash;
 }
 
 bool fail(std::string& error, const std::string& message) {
@@ -188,6 +292,7 @@ std::filesystem::path resolveRestartPath(const std::string& path,
     if (std::filesystem::is_directory(given, ec)) {
         std::filesystem::path newest;
         std::filesystem::file_time_type newestTime{};
+        long long newestStep = -1;
 
         for (const std::filesystem::directory_entry& entry :
              std::filesystem::directory_iterator(given, ec)) {
@@ -200,9 +305,24 @@ std::filesystem::path resolveRestartPath(const std::string& path,
                 entry.last_write_time(ec);
             if (ec)
                 continue;
-            if (newest.empty() || written > newestTime) {
+
+            // A short run writes its whole output inside one second and every
+            // frame ends up with the same timestamp, after which the folder
+            // order decides which one continues - which is to say, nothing
+            // does. The step in the name breaks the tie.
+            const std::string stem = entry.path().stem().string();
+            const size_t underscore = stem.find_last_of('_');
+            long long stepInName = -1;
+            if (underscore != std::string::npos &&
+                underscore + 1 < stem.size())
+                stepInName = std::atoll(stem.c_str() + underscore + 1);
+
+            if (newest.empty() ||
+                written > newestTime ||
+                (written == newestTime && stepInName > newestStep)) {
                 newest = entry.path();
                 newestTime = written;
+                newestStep = stepInName;
             }
         }
 
@@ -218,6 +338,136 @@ std::filesystem::path resolveRestartPath(const std::string& path,
         return {};
     }
     return given;
+}
+
+std::string packFaceVelocities(int nx, int ny,
+                               const std::vector<float>& u,
+                               const std::vector<float>& v,
+                               const std::vector<float>& uCell,
+                               const std::vector<float>& vCell) {
+    const size_t cells = static_cast<size_t>(nx) * ny;
+    if (nx < 1 || ny < 1 ||
+        u.size() != static_cast<size_t>(nx + 1) * ny ||
+        v.size() != static_cast<size_t>(nx) * (ny + 1) ||
+        uCell.size() != cells || vCell.size() != cells)
+        return std::string();
+
+    std::string out;
+    out.reserve(cells * 3u + 64u);
+
+    uint32_t checksum = 2166136261u;
+    checksum = hashFaces(u, checksum);
+    checksum = hashFaces(v, checksum);
+    appendWord(out, checksum);
+
+    // The two lines the prediction starts from are spelled out. They are one
+    // column and one row, a fraction of a percent of the block, and they save
+    // the reader from having to reproduce how the inlet and the bottom wall
+    // were set on the run that wrote the frame.
+    for (int j = 0; j < ny; ++j)
+        appendWord(out, floatBits(u[static_cast<size_t>(j) * (nx + 1)]));
+    for (int i = 0; i < nx; ++i)
+        appendWord(out, floatBits(v[i]));
+
+    for (int j = 0; j < ny; ++j) {
+        const size_t rowU = static_cast<size_t>(j) * (nx + 1);
+        const size_t rowC = static_cast<size_t>(j) * nx;
+        float previous = u[rowU];
+        for (int i = 0; i < nx; ++i) {
+            const float predicted = predictNextFace(uCell[rowC + i], previous);
+            previous = u[rowU + i + 1];
+            appendDelta(out, floatBits(previous) - floatBits(predicted));
+        }
+    }
+
+    for (int j = 0; j < ny; ++j) {
+        const size_t rowV = static_cast<size_t>(j) * nx;
+        for (int i = 0; i < nx; ++i) {
+            const float predicted =
+                predictNextFace(vCell[rowV + i], v[rowV + i]);
+            appendDelta(out,
+                        floatBits(v[rowV + nx + i]) - floatBits(predicted));
+        }
+    }
+
+    return out;
+}
+
+namespace {
+// Fails with the outputs emptied, always. loadRestart decides whether a frame
+// is an exact restart by the size of these two, so leaving a half filled array
+// of the right length behind is the one way to make a truncated block look like
+// a complete one - which is exactly what it used to do.
+bool unpackFailed(std::vector<float>& u, std::vector<float>& v) {
+    u.clear();
+    v.clear();
+    return false;
+}
+}
+
+bool unpackFaceVelocities(int nx, int ny,
+                          const std::string& packed,
+                          const std::vector<float>& uCell,
+                          const std::vector<float>& vCell,
+                          std::vector<float>& u,
+                          std::vector<float>& v) {
+    const size_t cells = static_cast<size_t>(nx) * ny;
+    if (nx < 1 || ny < 1 || uCell.size() != cells || vCell.size() != cells)
+        return unpackFailed(u, v);
+
+    u.assign(static_cast<size_t>(nx + 1) * ny, 0.0f);
+    v.assign(static_cast<size_t>(nx) * (ny + 1), 0.0f);
+
+    size_t pos = 0;
+    uint32_t stored = 0;
+    if (!takeWord(packed, pos, stored))
+        return unpackFailed(u, v);
+
+    uint32_t bits = 0;
+    for (int j = 0; j < ny; ++j) {
+        if (!takeWord(packed, pos, bits))
+            return unpackFailed(u, v);
+        u[static_cast<size_t>(j) * (nx + 1)] = bitsToFloat(bits);
+    }
+    for (int i = 0; i < nx; ++i) {
+        if (!takeWord(packed, pos, bits))
+            return unpackFailed(u, v);
+        v[i] = bitsToFloat(bits);
+    }
+
+    // Every face is corrected by its own delta before the next one is predicted
+    // from it, so nothing accumulates along the march
+    uint32_t delta = 0;
+    for (int j = 0; j < ny; ++j) {
+        const size_t rowU = static_cast<size_t>(j) * (nx + 1);
+        const size_t rowC = static_cast<size_t>(j) * nx;
+        float previous = u[rowU];
+        for (int i = 0; i < nx; ++i) {
+            if (!takeDelta(packed, pos, delta))
+                return unpackFailed(u, v);
+            const float predicted = predictNextFace(uCell[rowC + i], previous);
+            previous = bitsToFloat(floatBits(predicted) + delta);
+            u[rowU + i + 1] = previous;
+        }
+    }
+
+    for (int j = 0; j < ny; ++j) {
+        const size_t rowV = static_cast<size_t>(j) * nx;
+        for (int i = 0; i < nx; ++i) {
+            if (!takeDelta(packed, pos, delta))
+                return unpackFailed(u, v);
+            const float predicted =
+                predictNextFace(vCell[rowV + i], v[rowV + i]);
+            v[rowV + nx + i] = bitsToFloat(floatBits(predicted) + delta);
+        }
+    }
+
+    uint32_t checksum = 2166136261u;
+    checksum = hashFaces(u, checksum);
+    checksum = hashFaces(v, checksum);
+    if (checksum != stored)
+        return unpackFailed(u, v);
+    return true;
 }
 
 bool loadRestart(const std::filesystem::path& file,
@@ -243,8 +493,10 @@ bool loadRestart(const std::filesystem::path& file,
     int pointNx = 0, pointNy = 0, pointNz = 0;
     long long declaredCells = -1;
     std::string configText;
-    // Only filled when the frame predates the FIELD block, in which case they
-    // are the fallback the staggered fields get rebuilt from
+    // The cell arrays are what the staggered fields are rebuilt from: exactly,
+    // together with facePack, or approximately when a frame carries neither
+    // that block nor the uFace/vFace arrays older frames spelled out
+    std::string facePack;
     std::vector<float> cellPressure, cellVelocity;
 
     std::string token;
@@ -291,14 +543,18 @@ bool loadRestart(const std::filesystem::path& file,
 
             const size_t count =
                 static_cast<size_t>(out.nx) * out.ny * components;
+            // solid went from int32 to one byte a cell; everything else in a
+            // SCALARS block is still four bytes wide
+            const size_t width =
+                (type == "unsigned_char" || type == "char") ? 1u : 4u;
             if (name == "solid") {
-                if (!readSolid(fin, out.solid, count))
+                if (!readSolid(fin, out.solid, count, width))
                     return fail(error, "Truncated solid array");
-            } else if (name == "pressure") {
+            } else if (name == "pressure" && width == 4) {
                 if (!readFloats(fin, cellPressure, count))
                     return fail(error, "Truncated pressure array");
             } else if (!skipBytes(fin,
-                                  static_cast<std::streamoff>(count * 4))) {
+                                  static_cast<std::streamoff>(count * width))) {
                 return fail(error, "Truncated SCALARS " + name);
             }
         } else if (token == "VECTORS") {
@@ -342,6 +598,13 @@ bool loadRestart(const std::filesystem::path& file,
                             static_cast<std::streamsize>(count))
                             return fail(error, "Truncated configText");
                         out.hasConfigText = true;
+                    } else if (arrayName == "facePack") {
+                        facePack.resize(count);
+                        fin.read(&facePack[0],
+                                 static_cast<std::streamsize>(count));
+                        if (fin.gcount() !=
+                            static_cast<std::streamsize>(count))
+                            return fail(error, "Truncated facePack");
                     } else if (!skipBytes(
                                    fin,
                                    static_cast<std::streamoff>(count))) {
@@ -395,8 +658,13 @@ bool loadRestart(const std::filesystem::path& file,
                 out.step = std::atoi(value.c_str());
             else if (key == "restartDt")
                 out.dt = std::strtof(value.c_str(), nullptr);
-            else if (key == "formatVersion")
-                continue;
+            else if (key == "formatVersion") {
+                if (std::atoi(value.c_str()) > FRAME_FORMAT_VERSION)
+                    std::cout << "  note: this frame was written by a newer "
+                                 "build (frame format " << value
+                              << ", this one reads " << FRAME_FORMAT_VERSION
+                              << "). Whatever it added is ignored.\n";
+            }
             else {
                 std::string why;
                 if (!out.cfg.setParam(key, value, why))
@@ -423,6 +691,33 @@ bool loadRestart(const std::filesystem::path& file,
     out.cfg.ny = out.ny;
     out.cfg.restart = true;
 
+    // Frames written now leave the faces packed against the cell averages
+    // instead of spelling them out, and drop the pressure array entirely
+    // because the pressure the frame already shows is the same field scaled by
+    // the density. Older frames arrive with all three written out and skip
+    // both branches, so one rule covers every vintage from here on.
+    if (out.u.empty() && !facePack.empty() &&
+        cellVelocity.size() == cells * 3) {
+        std::vector<float> uCell(cells), vCell(cells);
+        for (size_t id = 0; id < cells; ++id) {
+            uCell[id] = cellVelocity[3 * id];
+            vCell[id] = cellVelocity[3 * id + 1];
+        }
+        if (!unpackFaceVelocities(out.nx, out.ny, facePack, uCell, vCell,
+                                  out.u, out.v))
+            std::cout << "  note: the packed face velocities in this frame did "
+                         "not check out, so the\n"
+                         "        state is rebuilt from the cell averages and "
+                         "projected once.\n";
+    }
+
+    if (out.p.empty() && cellPressure.size() == cells && out.cfg.ro > 0.0f) {
+        const float invRo = 1.0f / out.cfg.ro;
+        out.p.assign(cells, 0.0f);
+        for (size_t id = 0; id < cells; ++id)
+            out.p[id] = cellPressure[id] * invRo;
+    }
+
     const size_t uCells = static_cast<size_t>(out.nx + 1) * out.ny;
     const size_t vCells = static_cast<size_t>(out.nx) * (out.ny + 1);
     out.exactState =
@@ -436,10 +731,11 @@ bool loadRestart(const std::filesystem::path& file,
                         "Frame has neither a RestartData block nor a usable "
                         "velocity array");
 
-        std::cout << "  note: this frame predates the RestartData block, so "
-                     "the face velocities are\n"
-                     "        reconstructed from the cell averages and the "
-                     "state is projected once.\n";
+        if (facePack.empty())
+            std::cout << "  note: this frame carries no face velocities, so "
+                         "they are reconstructed from the\n"
+                         "        cell averages and the state is projected "
+                         "once.\n";
 
         // Cell centre -> face. Interior faces are the average of their two
         // neighbours, the inlet and outlet faces copy the cell they touch.
@@ -465,12 +761,8 @@ bool loadRestart(const std::filesystem::path& file,
 
         // Pressure is only the multigrid warm start, so an approximate one is
         // fine. It is stored in Pa in the frame and kinematic in the solver.
-        out.p.assign(cells, 0.0f);
-        if (cellPressure.size() == cells && out.cfg.ro > 0.0f) {
-            const float invRo = 1.0f / out.cfg.ro;
-            for (size_t id = 0; id < cells; ++id)
-                out.p[id] = cellPressure[id] * invRo;
-        }
+        if (out.p.size() != cells)
+            out.p.assign(cells, 0.0f);
     }
 
     if (!out.hasConfigText) {

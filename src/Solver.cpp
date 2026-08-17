@@ -78,7 +78,8 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
         std::filesystem::path(".") :
         narrowToPath(cfg.outputDir);
 
-    configHeader = "formatVersion=1\n" + cfg.serialize();
+    configHeader = "formatVersion=" + std::to_string(FRAME_FORMAT_VERSION) +
+                   "\n" + cfg.serialize();
 }
 
 bool Solver::setInitialState(RestartData&& state,
@@ -237,6 +238,100 @@ void Solver::applySlipFaces() {
         v[mirror.face] = 0.5f * (v[mirror.first] + v[mirror.second]);
 }
 
+void Solver::buildMirrorFaces() {
+    const int nx = cfg.nx;
+    const int ny = cfg.ny;
+
+    uMirrorFaces.clear();
+    vMirrorFaces.clear();
+
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        for (int i = 1; i < nx; ++i) {
+            if (!solidMask[row + i] || !solidMask[row + i - 1])
+                continue;
+            const WallField& wall = wallField[mesh.objectId[row + i]];
+            if (wall.slip)
+                continue;
+
+            const int below =
+                (j > 0 && uFluidMask[idxU(i, j - 1)]) ? idxU(i, j - 1) : -1;
+            const int above =
+                (j + 1 < ny && uFluidMask[idxU(i, j + 1)]) ? idxU(i, j + 1) : -1;
+            if (below < 0 && above < 0)
+                continue;
+
+            // The wall is the cell edge between the buried face and the open
+            // one, so its velocity is taken there and not at either face. A
+            // body one cell thick has fluid on both sides and one buried face
+            // to serve both walls, and then the two are averaged.
+            float sum = 0.0f;
+            int walls = 0;
+            if (below >= 0) {
+                sum += wall.slideX - wall.omega * (j * dy - wall.cy);
+                ++walls;
+            }
+            if (above >= 0) {
+                sum += wall.slideX - wall.omega * ((j + 1) * dy - wall.cy);
+                ++walls;
+            }
+
+            MirrorFace mirror;
+            mirror.face = idxU(i, j);
+            mirror.first = (below >= 0) ? below : above;
+            mirror.second = (above >= 0) ? above : below;
+            mirror.wall = sum / static_cast<float>(walls);
+            uMirrorFaces.push_back(mirror);
+        }
+    }
+
+    for (int j = 1; j < ny; ++j) {
+        const int row = j * nx;
+        const int rowBot = (j - 1) * nx;
+        for (int i = 0; i < nx; ++i) {
+            if (!solidMask[row + i] || !solidMask[rowBot + i])
+                continue;
+            const WallField& wall = wallField[mesh.objectId[row + i]];
+            if (wall.slip)
+                continue;
+
+            const int left =
+                (i > 0 && vFluidMask[idxV(i - 1, j)]) ? idxV(i - 1, j) : -1;
+            const int right =
+                (i + 1 < nx && vFluidMask[idxV(i + 1, j)]) ? idxV(i + 1, j) : -1;
+            if (left < 0 && right < 0)
+                continue;
+
+            float sum = 0.0f;
+            int walls = 0;
+            if (left >= 0) {
+                sum += wall.slideY + wall.omega * (i * dx - wall.cx);
+                ++walls;
+            }
+            if (right >= 0) {
+                sum += wall.slideY + wall.omega * ((i + 1) * dx - wall.cx);
+                ++walls;
+            }
+
+            MirrorFace mirror;
+            mirror.face = idxV(i, j);
+            mirror.first = (left >= 0) ? left : right;
+            mirror.second = (right >= 0) ? right : left;
+            mirror.wall = sum / static_cast<float>(walls);
+            vMirrorFaces.push_back(mirror);
+        }
+    }
+}
+
+void Solver::applyMirrorFaces() {
+    for (const MirrorFace& mirror : uMirrorFaces)
+        u[mirror.face] = 2.0f * mirror.wall -
+                         0.5f * (u[mirror.first] + u[mirror.second]);
+    for (const MirrorFace& mirror : vMirrorFaces)
+        v[mirror.face] = 2.0f * mirror.wall -
+                         0.5f * (v[mirror.first] + v[mirror.second]);
+}
+
 void Solver::resolveWallMotion() {
     wallField.assign(mesh.objects.size() + 1, WallField());
     wallsMove = false;
@@ -328,6 +423,7 @@ void Solver::initFields()
     resolveWallMotion();
     buildFaceMasks();
     buildSlipFaces();
+    buildMirrorFaces();
     multigrid.setUseCuda(cfg.useCuda);
     multigrid.setGeometry(solidMask);
 
@@ -375,6 +471,7 @@ void Solver::initFields()
             }
     }
     applySlipFaces();
+    applyMirrorFaces();
 
     std::cout << "Fields initialized. Multigrid levels: "
               << multigrid.levelCount()
@@ -402,6 +499,50 @@ void Solver::initFields()
         if (ReEff > 3000.f)
             std::cout << "  note: Re(effective) is past the laminar range and "
                          "there is no turbulence model here.\n";
+    }
+    // Diffusion is explicit, so its stability limit does not look at the flow
+    // at all: a thick enough fluid pins dt orders of magnitude below the CFL
+    // one and the run turns into millions of steps without a single sign that
+    // anything is wrong. Both limits go on the screen before that happens.
+    if (cfg.nu > 0.0f) {
+        const float dtDiff = 1.f / (2.f * cfg.nu * (invDx2 + invDy2));
+        const float speed = std::fabs(cfg.U0);
+        const float dtAdv =
+            (speed > 0.0f) ? cfg.CFL / (speed * (invDx + invDy)) : dtDiff;
+        const double steps = (cfg.totalTime - currentTime) /
+                             (cfg.dtSafety * std::min(dtAdv, dtDiff));
+
+        // steps is unbounded: a domain small enough to overflow invDx2 sends
+        // dtDiff to zero, and converting an infinite double to long long is
+        // undefined rather than merely wrong
+        std::cout << "Time step: viscous limit " << dtDiff
+                  << " s, advective limit " << dtAdv << " s -> ";
+        if (!(steps < 1e9))
+            std::cout << "more steps than this run can ever take";
+        else
+            std::cout << "about "
+                      << static_cast<long long>(std::max(steps, 1.0))
+                      << " steps";
+        std::cout << " for " << cfg.totalTime - currentTime << " s.\n";
+
+        if (steps < 4.0)
+            std::cout << "  note: neither limit bites at this scale, so the "
+                         "whole run fits in a couple of steps. That is a\n"
+                         "  correct answer to what was asked, but it is not a "
+                         "film: ask for more time, or a finer grid.\n";
+
+        if (dtDiff < dtAdv)
+            std::cout << "  note: viscosity sets dt here, not the flow, and "
+                         "that limit falls with dx^2:\n"
+                         "  halving the cell size quadruples the step count. A "
+                         "coarser grid is the only\n"
+                         "  lever this solver has, the diffusion term is "
+                         "explicit.\n";
+
+        if (steps > 1e6)
+            std::cout << "  note: that is past a million steps. Cut totalTime, "
+                         "coarsen the grid, or expect\n"
+                         "  the run to take hours.\n";
     }
     if (cfg.gravityEnabled) {
         const float head = std::fabs(gx) * cfg.Lx + std::fabs(gy) * cfg.Ly;
@@ -444,13 +585,19 @@ void Solver::computeDt(){
 #endif
 
     float maxCourant = 0.0f;
+    // maxps hands back its second operand when either is a NaN and std::max
+    // drops it the same way, so a field that has stopped being a number would
+    // sail straight through the reduction. It is caught on the way past instead.
+    bool notANumber = false;
 
     #pragma omp parallel
     {
 #ifdef __AVX2__
         __m256 localVec = _mm256_setzero_ps();
+        __m256 localNan = _mm256_setzero_ps();
 #endif
         float localScalar = 0.0f;
+        bool localNotANumber = false;
 
         #pragma omp for schedule(static) nowait
         for (int j = 0; j < ny; ++j)
@@ -478,6 +625,9 @@ void Solver::computeDt(){
                         _mm256_mul_ps(_mm256_max_ps(vB, vT), invDyVec));
 
                 localVec = _mm256_max_ps(localVec, courant);
+                localNan = _mm256_or_ps(
+                    localNan,
+                    _mm256_cmp_ps(courant, courant, _CMP_UNORD_Q));
             }
 #endif
 
@@ -487,19 +637,23 @@ void Solver::computeDt(){
                                             std::fabs(u[rowU + i + 1]));
                 const float maxV = std::max(std::fabs(v[rowV + i]),
                                             std::fabs(v[rowVTop + i]));
-                localScalar = std::max(localScalar,
-                                       maxU * invDx + maxV * invDy);
+                const float courant = maxU * invDx + maxV * invDy;
+                localScalar = std::max(localScalar, courant);
+                localNotANumber = localNotANumber || !(courant == courant);
             }
         }
 
 #ifdef __AVX2__
         const float localMax = std::max(horizontalMax(localVec), localScalar);
+        localNotANumber =
+            localNotANumber || (_mm256_movemask_ps(localNan) != 0);
 #else
         const float localMax = localScalar;
 #endif
         #pragma omp critical
         {
             maxCourant = std::max(maxCourant, localMax);
+            notANumber = notANumber || localNotANumber;
         }
     }
 
@@ -515,8 +669,30 @@ void Solver::computeDt(){
 
     dt = cfg.dtSafety * std::min(dtAdv, dtDiff);
 
-    if (!(dt > 0.f) || std::isnan(dt) || std::isinf(dt))
-        dt = 1e-6f;
+    // A field that has stopped being a number has no step size in it, and the
+    // old fallback of 1e-6 was a number with no relation to the grid, the fluid
+    // or the run: it kept grinding out frames of NaN until the check that only
+    // runs every tenth step happened to look. Same for a dt that came out zero
+    // or infinite, which means the grid or the viscosity are outside what a
+    // float can express, not that 1e-6 is a good idea.
+    if (notANumber || !std::isfinite(maxCourant)) {
+        if (fieldBroken)
+            return;
+        fieldBroken = true;
+        std::cerr << "The velocity field is no longer a number at step " << step
+                  << ", so no step size can be read out of it. Stopping.\n";
+        return;
+    }
+    if (!(dt > 0.f) || !std::isfinite(dt)) {
+        if (fieldBroken)
+            return;
+        fieldBroken = true;
+        std::cerr << "The time step came out as " << dt << " at step " << step
+                  << ". The grid spacing or the viscosity are outside the range"
+                     " a float can\n  hold: dx = " << dx << ", dy = " << dy
+                  << ", nu = " << cfg.nu << ". Stopping.\n";
+        return;
+    }
 }
 
 void Solver::predictor() {
@@ -957,6 +1133,28 @@ void Solver::solvePoisson() {
         cycles,
         cfg.mgTolerance,
         rhsNorm);
+
+    // The opening transient starts from a field the previous step did not
+    // produce, so the first steps run out of cycles on almost every case and
+    // say nothing at all. What matters is running out long after that, or on
+    // most of the run: then the velocity field carries a divergence of that
+    // size the whole way and nothing but the mg column ever said so.
+    if (lastResidual > cfg.mgTolerance && multigrid.cyclesUsed() >= cycles) {
+        ++poissonShortSteps;
+        poissonWorstResidual = std::max(poissonWorstResidual, lastResidual);
+        if (!poissonShortReported && step > 20 &&
+            lastResidual > 10.f * cfg.mgTolerance) {
+            poissonShortReported = true;
+            std::cout << "  note: the pressure solve used all " << cycles
+                      << " V-cycles at step " << step
+                      << " and stopped at a relative residual of "
+                      << lastResidual << ", against mgTolerance "
+                      << cfg.mgTolerance << ".\n"
+                         "  The velocity field keeps a divergence of that "
+                         "order until it converges. Raise mgIterations if the "
+                         "div column\n  in the step lines stays large.\n";
+        }
+    }
 }
 
 void Solver::corrector() {
@@ -1106,8 +1304,18 @@ float Solver::maxVelocity() const {
 void Solver::projectRestartState() {
     const int nx = cfg.nx, ny = cfg.ny;
 
-    u_star = u;
-    v_star = v;
+    // The reconstruction from cell averages fills every face, including the
+    // ones held shut against a wall, and those carry whatever the average
+    // beside them happened to be. Left in, the Poisson solve accounts for that
+    // flow through the wall and the corrector then wipes the same faces to the
+    // wall value, putting the divergence straight back: the projection came out
+    // at div = 3.9 and no number of V-cycles moved it, because nothing about it
+    // was a convergence problem. Masking first is what the predictor does every
+    // step, and it is what makes this a projection of a legal field.
+    for (size_t id = 0; id < u.size(); ++id)
+        u_star[id] = uFluidMaskF[id] * u[id] + uWall[id];
+    for (size_t id = 0; id < v.size(); ++id)
+        v_star[id] = vFluidMaskF[id] * v[id] + vWall[id];
 
     for (int j = 0; j < ny; ++j) {
         u_star[idxU(0, j)] = solidMask[idxP(0, j)] ? 0.0f : cfg.U0;
@@ -1175,12 +1383,13 @@ void Solver::run() {
             // millions; this way no step is ever shorter than half of dt.
             stepDt = static_cast<float>(0.5 * remaining);
         }
-        if (!(stepDt > 0.f))
+        if (!(stepDt > 0.f) || fieldBroken)
             break;
         const float savedDt = dt;
         dt = stepDt;
 
         applySlipFaces();
+        applyMirrorFaces();
         predictor();
         solvePoisson();
         corrector();
@@ -1217,8 +1426,15 @@ void Solver::run() {
 
     if (step % saveInterval != 0)
         saveVTK(step);
-    std::cout << "Simulation finished at t = " << currentTime << " s after "
-              << step << " steps.\n";
+    std::cout << (fieldBroken ? "Simulation stopped at t = "
+                              : "Simulation finished at t = ")
+              << currentTime << " s after " << step << " steps.\n";
+    if (step > 0 && poissonShortSteps * 4 > step)
+        std::cout << "  the pressure solve ran out of V-cycles on "
+                  << poissonShortSteps << " of them, worst relative residual "
+                  << poissonWorstResidual << " against mgTolerance "
+                  << cfg.mgTolerance << ". mgIterations = " << cfg.mgIterations
+                  << " is low for this case.\n";
 }
 
 void Solver::saveVTK(int stepNum) const {
@@ -1272,12 +1488,6 @@ void Solver::saveVTK(int stepNum) const {
         std::memcpy(&x, &value, sizeof(float));
         writeWord(x);
     };
-    auto writeInt = [&](int32_t value){
-        uint32_t x;
-        std::memcpy(&x, &value, sizeof(int32_t));
-        writeWord(x);
-    };
-
     fout << "SCALARS pressure float 1\n" << "LOOKUP_TABLE default\n";
     for (int j = 0; j < ny; ++j){
         const int row = j * nx;
@@ -1295,17 +1505,17 @@ void Solver::saveVTK(int stepNum) const {
     flushFloatBuffer();
     fout << "\n";
 
-    fout << "SCALARS solid int 1\n" << "LOOKUP_TABLE default\n";
-    for (int j = 0; j < ny; ++j){
-        const int row = j * nx;
-
-        for (int i = 0; i < nx; ++i)
-        {
-            writeInt(static_cast<int32_t>(solidMask[row + i]));
-        }
-    }
-    flushFloatBuffer();
+    // One byte a cell instead of an int32, for a mask that only ever holds 0
+    // or 1. solidMask is already exactly that array.
+    fout << "SCALARS solid unsigned_char 1\n" << "LOOKUP_TABLE default\n";
+    fout.write(reinterpret_cast<const char*>(solidMask.data()),
+               static_cast<std::streamsize>(solidMask.size()));
     fout << "\n";
+
+    // Kept, because the restart block below is stored as the difference from
+    // these two and has to be able to reproduce them exactly
+    std::vector<float> uCell(static_cast<size_t>(nx) * ny);
+    std::vector<float> vCell(static_cast<size_t>(nx) * ny);
 
     fout << "VECTORS velocity float\n";
     for (int j = 0; j < ny; ++j){
@@ -1317,15 +1527,18 @@ void Solver::saveVTK(int stepNum) const {
                 0.5f * (u[rowU + i] + u[rowU + i + 1]);
             float vv =
                 0.5f * (v[rowV + i] + v[rowVTop + i]);
-            // The faces normal to a wall are held shut, so averaging them
-            // would draw the rim of a spinning body at half speed. Solid cells
-            // get the surface velocity they actually impose instead. Nothing
-            // reads this back; it is purely what ParaView sees.
-            if ((wallsMove || wallsSlip) && solidMask[rowV + i]) {
+            // Inside a body the buried faces carry the mirrored value the
+            // no-slip condition needs, which is an artefact of the stencil and
+            // not a velocity anything moves at. Solid cells get the surface
+            // velocity they actually impose instead, zero for a body that does
+            // not move. Nothing reads this back; it is what ParaView sees.
+            if (solidMask[rowV + i]) {
                 const WallField& wall = wallField[mesh.objectId[rowV + i]];
                 uu = wall.slideX - wall.omega * ((j + 0.5f) * dy - wall.cy);
                 vv = wall.slideY + wall.omega * ((i + 0.5f) * dx - wall.cx);
             }
+            uCell[rowV + i] = uu;
+            vCell[rowV + i] = vv;
             writeFloat(uu);
             writeFloat(vv);
             writeFloat(0.0f);
@@ -1342,35 +1555,23 @@ void Solver::saveVTK(int stepNum) const {
           << "restartDt=" << dt << "\n";
     const std::string configText = configHeader + state.str();
 
-    const size_t uCount = static_cast<size_t>(nx + 1) * ny;
-    const size_t vCount = static_cast<size_t>(nx) * (ny + 1);
-    const size_t pCount = static_cast<size_t>(nx) * ny;
+    // The pressure array above already holds p + phiCell scaled by the density,
+    // which is exactly what the pRaw array used to repeat, so it is gone and
+    // the reader divides that one back out. The face velocities are stored as
+    // what is left of them once the cell averages have predicted them, which
+    // is a quarter of the space and still exact to the bit.
+    const std::string facePack =
+        packFaceVelocities(nx, ny, u, v, uCell, vCell);
 
-    fout << "FIELD RestartData 4\n";
+    fout << "FIELD RestartData 2\n";
     fout << "configText 1 " << configText.size() << " char\n";
     fout.write(configText.data(),
                static_cast<std::streamsize>(configText.size()));
     fout << "\n";
 
-    fout << "uFace 1 " << uCount << " float\n";
-    for (size_t id = 0; id < uCount; ++id)
-        writeFloat(u[id]);
-    flushFloatBuffer();
-    fout << "\n";
-
-    fout << "vFace 1 " << vCount << " float\n";
-    for (size_t id = 0; id < vCount; ++id)
-        writeFloat(v[id]);
-    flushFloatBuffer();
-    fout << "\n";
-
-    // Written as the total pressure, which is what every frame ever written
-    // holds, so old frames keep restarting and setInitialState has one rule.
-    fout << "pRaw 1 " << pCount << " float\n";
-    for (int j = 0; j < ny; ++j)
-        for (int i = 0; i < nx; ++i)
-            writeFloat(p[j * nx + i] + phiCell(i, j));
-    flushFloatBuffer();
+    fout << "facePack 1 " << facePack.size() << " unsigned_char\n";
+    fout.write(facePack.data(),
+               static_cast<std::streamsize>(facePack.size()));
     fout << "\n";
 
     if (stepNum % (std::max(1, cfg.saveInterval) * 10) == 0 || stepNum == 0)

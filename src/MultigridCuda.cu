@@ -287,6 +287,18 @@ __global__ void computeNormKernel(
 // that dominated the GPU path completely. Here the whole hierarchy is allocated
 // once when the geometry is set and released in the destructor. MUCH better.
 
+bool Multigrid::cudaDeviceAvailable() {
+    int count = 0;
+    const cudaError_t status = cudaGetDeviceCount(&count);
+    if (status != cudaSuccess || count < 1) {
+        // A failed query latches the error, and the next unrelated CUDA call
+        // would be the one to report it
+        cudaGetLastError();
+        return false;
+    }
+    return true;
+}
+
 void Multigrid::freeDevice() {
     for (DeviceLevel& d : deviceLevels) {
         if (d.pressureAlloc) cudaFree(d.pressureAlloc);
@@ -647,11 +659,15 @@ float Multigrid::solveCuda(
     lastCycles = 0;
     float relative = 1.0f;
 
+    // Same as the CPU path: the first cycle is cheaper than finding out it was
+    // not needed, and here that check also costs a device to host copy
     for (int cycle = 0; cycle < maxCycles; ++cycle) {
-        computeResidualCuda(0);
-        relative = computeResidualNormCuda(0) / scale;
-        if (cycle > 0 && relative < tolerance)
-            break;
+        if (cycle > 0) {
+            computeResidualCuda(0);
+            relative = computeResidualNormCuda(0) / scale;
+            if (relative < tolerance)
+                break;
+        }
 
         vCycleCuda(0, smootherOmega, coarseOmega);
         ++lastCycles;

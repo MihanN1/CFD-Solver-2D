@@ -89,9 +89,13 @@ void Multigrid::buildHierarchy() {
         bool canX = (curNx > minCoarseSize) && (curNx % 2 == 0);
         bool canY = (curNy > minCoarseSize) && (curNy % 2 == 0);
 
+        // Not a strict comparison: a ratio of exactly two is the case the rule
+        // exists for, and Lx=2, Ly=1 on a square cell count lands on it every
+        // time. Letting it through as isotropic carried the anisotropy down
+        // the whole hierarchy and cost a level and most of the convergence.
         if (canX && canY) {
-            if (curDx < 0.5f * curDy)      canY = false;
-            else if (curDy < 0.5f * curDx) canX = false;
+            if (curDx <= 0.5f * curDy)      canY = false;
+            else if (curDy <= 0.5f * curDx) canX = false;
         }
         if (!canX && !canY)
             break;
@@ -272,7 +276,14 @@ void Multigrid::setGeometry(const std::vector<uint8_t>& solid) {
 
 void Multigrid::setUseCuda(bool enable) {
 #ifdef USE_CUDA
-    useCuda = enable;
+    // A build with the toolkit in it still runs on machines with no device
+    // behind it, and every allocation on that path ends in abort(). Asking
+    // first costs one call and turns a dead process into a CPU run.
+    useCuda = enable && cudaDeviceAvailable();
+    if (enable && !useCuda)
+        std::fprintf(stderr,
+                     "No usable CUDA device; the pressure solve runs on the "
+                     "CPU.\n");
     if (useCuda && geometryReady)
         setGeometryCuda();
 #else
@@ -722,11 +733,16 @@ float Multigrid::solve(
     lastCycles = 0;
     float relative = 1.0f;
 
+    // The first cycle runs whatever the residual says, because the field comes
+    // from the previous step and one V-cycle costs less than the residual pass
+    // that would find out it was not needed. So that pass is not made at all.
     for (int cycle = 0; cycle < maxCycles; ++cycle) {
-        computeResidual(0);
-        relative = computeResidualNorm(0) / scale;
-        if (cycle > 0 && relative < tolerance)
-            break;
+        if (cycle > 0) {
+            computeResidual(0);
+            relative = computeResidualNorm(0) / scale;
+            if (relative < tolerance)
+                break;
+        }
         vCycle(0, smootherOmega, coarseOmega);
         ++lastCycles;
     }

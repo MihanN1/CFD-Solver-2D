@@ -550,10 +550,11 @@ void Config::readFromConsole() {
     if (!ask("totalTime", "Enter total simulation time (seconds)")) return;
     if (!ask("dtUpdateInterval",
              "Enter steps between dt recomputations (recommended 5)")) return;
-    if (!ask("omega", "Enter SOR relaxation parameter omega (1.6-1.85)")) return;
+    if (!ask("omega", "Enter SOR relaxation parameter omega (coarsest multigrid "
+                      "level, 1.6-1.85)")) return;
     if (!ask("smootherOmega",
-             "Enter SOR relaxation parameter smootherOmega (for the coarsest "
-             "multigrid level, 1.0-1.3 recommended)")) return;
+             "Enter SOR relaxation parameter smootherOmega (V-cycle smoother, "
+             "1.0-1.3 recommended)")) return;
     if (!ask("mgIterations",
              "Enter multigrid V-cycles per step (2 by default, 4-10 max "
              "recommended)")) return;
