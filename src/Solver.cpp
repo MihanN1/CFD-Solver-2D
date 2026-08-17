@@ -867,8 +867,17 @@ float Solver::maxVelocity() const {
 void Solver::projectRestartState() {
     const int nx = cfg.nx, ny = cfg.ny;
 
-    u_star = u;
-    v_star = v;
+    // The reconstruction fills every face, the ones held shut against a wall
+    // included, and those come out as whatever the cell average beside them
+    // happened to be. Left in, the Poisson solve accounts for that flow through
+    // the wall and the corrector then wipes the same faces back to zero, which
+    // puts the divergence straight back: the projection landed at div = 4 and
+    // no number of V-cycles moved it, because none of it was a convergence
+    // problem. Masking first is what the predictor does on every ordinary step.
+    for (size_t id = 0; id < u.size(); ++id)
+        u_star[id] = uFluidMaskF[id] * u[id];
+    for (size_t id = 0; id < v.size(); ++id)
+        v_star[id] = vFluidMaskF[id] * v[id];
 
     for (int j = 0; j < ny; ++j) {
         u_star[idxU(0, j)] = solidMask[idxP(0, j)] ? 0.0f : cfg.U0;
