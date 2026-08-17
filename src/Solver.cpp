@@ -793,9 +793,20 @@ void Solver::projectRestartState() {
 
     // Averaged cell velocities interpolated back onto the faces are not
     // divergence free, so one projection is run before the first real step.
-    // Same size assignment on both sides, so this is a memcpy, not a realloc.
-    u_star = u;
-    v_star = v;
+    //
+    // Masked on the way in, which is the part that was missing. The
+    // interpolation fills every face, the ones held shut against a wall
+    // included, and those come out as whatever the cell average beside them
+    // happened to be. Left in, the Poisson solve accounts for that flow through
+    // the wall and the corrector then wipes the same faces back to zero, which
+    // puts the divergence straight back where it was just taken from: the
+    // projection landed at div = 4 and no number of V-cycles moved it, because
+    // none of it was ever a convergence problem. This is what the predictor
+    // does to u* on every ordinary step.
+    for (size_t id = 0; id < u.size(); ++id)
+        u_star[id] = uFluidMaskF[id] * u[id];
+    for (size_t id = 0; id < v.size(); ++id)
+        v_star[id] = vFluidMaskF[id] * v[id];
 
     for (int j = 0; j < ny; ++j) {
         u_star[idxU(0, j)] = solidMask[idxP(0, j)] ? 0.0f : cfg.U0;
