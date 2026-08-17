@@ -23,6 +23,12 @@ bool parseWallMotion(const std::string& text,
                      std::vector<WallMotion>& out,
                      std::string& error);
 
+// The whole syntax as a block ready to print: the shape of the line, what each
+// setting does, why slip and the moving settings exclude each other, and lines
+// that can be copied as they are. One sentence inside a prompt was not enough
+// for anybody who had not read the parser, so the prompt prints this instead.
+std::string wallMotionHelp();
+
 struct Config {
     bool restart = false;
     std::string restartFile = "";

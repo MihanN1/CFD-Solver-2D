@@ -193,6 +193,49 @@ int editDistance(const std::string& a, const std::string& b) {
 }
 }
 
+std::string wallMotionHelp() {
+    return
+        "\n"
+        "--- How to write wallMotion --------------------------------------\n"
+        "Shape of the line:   <object>:<setting>=<value>,<setting>=<value>\n"
+        "                     and ';' in front of the next object's number\n"
+        "  Object numbers are printed with the mesh, right after this screen.\n"
+        "  ',' and ';' both just separate settings; a new object starts\n"
+        "  wherever a number and a colon appear, and each object is listed\n"
+        "  once, with everything it does inside that one entry.\n"
+        "\n"
+        "Every object picks ONE of the two groups below.\n"
+        "\n"
+        "  A. The wall holds the fluid (no-slip) and now drags it along:\n"
+        "     rot=<deg/s>    the surface turns about this object's own centre,\n"
+        "                    counter-clockwise. rot=90 is a quarter turn a\n"
+        "                    second; a spinning cylinder, a blade, a valve\n"
+        "     slideX=<m/s>   the surface runs along +x, like a conveyor belt\n"
+        "     slideY=<m/s>   the same along +y\n"
+        "     The body itself never moves, only the velocity its surface hands\n"
+        "     to the fluid. rot, slideX and slideY add up, so one object can\n"
+        "     take all three at once.\n"
+        "\n"
+        "  B. The wall stops holding the fluid at all:\n"
+        "     slip=1         free-slip. The fluid slides past the surface and\n"
+        "                    the wall exerts no drag on it, so no boundary\n"
+        "                    layer grows. slip=0 is the default no-slip wall\n"
+        "\n"
+        "  A and B cannot be mixed on the same object: rot and slide push the\n"
+        "  fluid through the grip that slip=1 removes, so 'slip=1,rot=90' asks\n"
+        "  for a surface that turns and touches nothing. That is refused.\n"
+        "\n"
+        "Empty line = every wall stands still and holds the fluid (no-slip).\n"
+        "\n"
+        "Examples:\n"
+        "  1:rot=90              object 1 spins at 90 deg/s counter-clockwise\n"
+        "  1:slideX=0.5          its surface runs along +x at 0.5 m/s\n"
+        "  1:rot=90,slideX=0.5   both at once - one object, one entry\n"
+        "  1:slip=1              object 1 is frictionless instead\n"
+        "  1:rot=90;2:slip=1     object 1 spins, object 2 slips\n"
+        "------------------------------------------------------------------\n";
+}
+
 bool parseWallMotion(const std::string& text,
                      std::vector<WallMotion>& out,
                      std::string& error) {
@@ -233,8 +276,11 @@ bool parseWallMotion(const std::string& text,
                 if (done.object != static_cast<int>(id))
                     continue;
                 error = badValue("wallMotion", body,
-                                 "object " + idText + " is listed twice; put "
-                                 "everything that object does in one place");
+                                 "object " + idText + " is listed twice. One "
+                                 "object gets one entry, with everything it "
+                                 "does inside it: write " + idText +
+                                 ":rot=90,slideX=0.5, not " + idText +
+                                 ":rot=90;" + idText + ":slideX=0.5");
                 return false;
             }
             out.push_back(WallMotion());
@@ -247,8 +293,10 @@ bool parseWallMotion(const std::string& text,
 
         if (current < 0) {
             error = badValue("wallMotion", body,
-                             "'" + token + "' comes before any object number; "
-                             "the list starts with <number>:, e.g. 1:rot=90");
+                             "'" + token + "' comes before any object number. "
+                             "The line starts with the object it is about and "
+                             "a colon, so this reads 1:" + token +
+                             " if object 1 is the one meant");
             return false;
         }
 
@@ -263,8 +311,10 @@ bool parseWallMotion(const std::string& text,
                                  ? "'" + token + "' is a bare number; a comma "
                                    "separates settings here, so the decimal "
                                    "separator inside one is a dot"
-                                 : "'" + token + "' is not a setting; every "
-                                   "setting is name=value, e.g. rot=90");
+                                 : "'" + token + "' is not a setting. Every "
+                                   "setting is name=value, e.g. rot=90, and "
+                                   "the names are rot, slideX, slideY and "
+                                   "slip");
             return false;
         }
 
@@ -289,28 +339,49 @@ bool parseWallMotion(const std::string& text,
             out[current].slideY = static_cast<float>(parsed);
         else {
             error = badValue("wallMotion", body,
-                             "'" + name + "' is not a wall setting; there are "
-                             "rot (degrees/s, counter-clockwise), slideX and "
-                             "slideY (m/s), and slip (1 = free-slip instead of "
-                             "no-slip)");
+                             "'" + name + "' is not a wall setting. There are "
+                             "four: rot=<deg/s> spins the surface about the "
+                             "object's own centre counter-clockwise, "
+                             "slideX=<m/s> and slideY=<m/s> drag it in a "
+                             "straight line, and slip=1 makes the wall "
+                             "frictionless instead of dragging anything");
             return false;
         }
     }
 
-    // A free-slip wall exerts no tangential stress by definition, so it has
-    // nothing to drag the fluid with. Asking for both is a contradiction, not
-    // a combination, and it is better said now than silently half-applied.
     for (const WallMotion& done : out) {
         if (!done.slip)
             continue;
         if (done.rotation == 0.0f && done.slideX == 0.0f && done.slideY == 0.0f)
             continue;
+
+        // Quoting back the two lines the object could have been given beats
+        // naming the rule: whichever of them was meant can be copied straight
+        // into the answer.
+        const std::string id = std::to_string(done.object);
+        std::ostringstream moving;
+        moving << id << ":";
+        const char* separator = "";
+        if (done.rotation != 0.0f) {
+            moving << "rot=" << done.rotation;
+            separator = ",";
+        }
+        if (done.slideX != 0.0f) {
+            moving << separator << "slideX=" << done.slideX;
+            separator = ",";
+        }
+        if (done.slideY != 0.0f)
+            moving << separator << "slideY=" << done.slideY;
+
         error = badValue("wallMotion", body,
-                         "object " + std::to_string(done.object) +
-                         " is asked to slip and to move its surface at the "
-                         "same time; slip=1 switches the tangential coupling "
-                         "off, which is the only thing rot and slide act "
-                         "through. Pick one");
+                         "object " + id + " is asked to slip and to move its "
+                         "surface at once, and those are opposites. A moving "
+                         "wall pushes the fluid by holding on to it, and "
+                         "slip=1 is exactly the setting that lets go, so "
+                         "together they leave a surface that turns and touches "
+                         "nothing. Keep one of the two: " + id + ":slip=1 for "
+                         "a frictionless wall, or " + moving.str() + " for a "
+                         "wall that drags the flow");
         return false;
     }
 
@@ -397,6 +468,13 @@ std::string Config::currentValue(const std::string& key) const {
 bool Config::ask(const std::string& key, const std::string& prompt) {
     const std::string canon = canonicalKey(key);
     const std::string name = canon.empty() ? key : canon;
+
+    // wallMotion is the one answer with a grammar of its own, so its rules go
+    // on the screen before the cursor gets there and not only after a refusal.
+    // Here rather than at the call site, so re-entering it from the
+    // confirmation menu shows the same block.
+    if (name == "wallMotion")
+        std::cout << wallMotionHelp();
 
     for (;;) {
         std::cout << prompt;
@@ -497,12 +575,7 @@ void Config::readFromConsole() {
              "Enter rotation in the simulation plane (degrees)")) return;
     if (!ask("invertSection", "Mirror the section? (0 = no, 1 = yes)")) return;
     if (!ask("wallMotion",
-             "Wall behaviour, empty for stationary no-slip walls. Object "
-             "numbers are printed with the mesh right after this; '1:rot=90' "
-             "spins object 1 at 90 degrees/s counter-clockwise, "
-             "'1:slideX=0.5' drags its surface along +x, '1:slip=1' gives it "
-             "free-slip instead of no-slip, '1:rot=90;2:slip=1' does both "
-             "objects"))
+             "Wall behaviour (Enter leaves every wall stationary and no-slip)"))
         return;
     if (!ask("useCuda",
              "Use cuda? (0 = no, 1 = yes, ignored on a CPU-only build)"))
@@ -687,8 +760,6 @@ bool Config::setParam(const std::string& key,
     if (!ok)
         return false;
 
-    // Legal, but almost certainly not what was meant. The value is kept and
-    // the caller decides whether anybody is listening.
     if (warning) {
         const std::string shown = k + "=" + cleanValue(value);
         if (k == "CFL" && CFL > 1.0f)
@@ -743,16 +814,19 @@ bool Config::confirm() {
         return true;   // confirmed
     }
 
-    // "nx=256" is set right here, without a second prompt, which is also what
-    // anyone who has used the command line will type first.
     const size_t eq = input.find('=');
     if (eq != std::string::npos && eq > 0) {
+        const std::string key = input.substr(0, eq);
         std::string error, warning;
-        if (setParam(input.substr(0, eq), input.substr(eq + 1), error, &warning)) {
+        if (setParam(key, input.substr(eq + 1), error, &warning)) {
             if (!warning.empty())
                 std::cout << "Warning: " << warning << "\n";
         } else {
             std::cout << error << "\n";
+            // This branch never went through ask(), so the rules have not been
+            // printed and a one-line refusal is all there would be to go on.
+            if (canonicalKey(key) == "wallMotion")
+                std::cout << wallMotionHelp();
         }
         return false;
     }

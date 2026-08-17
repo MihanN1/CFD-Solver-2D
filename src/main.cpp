@@ -30,6 +30,11 @@ static void printUsage(const char* exe) {
         "  switches take 1 or 0             useCuda=1   (true/false, yes/no too)\n"
         "  no units inside the value        totalTime=2 not  totalTime=2s\n"
         "  quote paths with spaces          \"geometryFile=C:\\my models\\a.stl\"\n"
+        "  wallMotion has a grammar of its own:\n"
+        "        <object>:<setting>=<value>,<setting>=<value>;<next object>:...\n"
+        "        settings are rot=<deg/s>, slideX=<m/s>, slideY=<m/s>, slip=1\n"
+        "        \"wallMotion=1:rot=90,slideX=0.5;2:slip=1\"\n"
+        "        an object either moves (rot/slide) or slips, never both\n"
         "\n"
         "Example:\n"
         "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "
@@ -87,6 +92,7 @@ int main(int argc, char** argv) {
         // Every bad argument is collected, so one run reports all of them
         // instead of one per attempt.
         std::vector<std::string> problems;
+        bool wallMotionRefused = false;
 
         for (int a = 1; a < argc; ++a) {
             const std::string arg = argv[a];
@@ -101,6 +107,8 @@ int main(int argc, char** argv) {
             std::string error, warning;
             if (!cfg.setParam(key, value, error, &warning)) {
                 problems.push_back(error);
+                if (Config::canonicalKey(key) == "wallMotion")
+                    wallMotionRefused = true;
                 continue;
             }
             if (!warning.empty())
@@ -117,6 +125,11 @@ int main(int argc, char** argv) {
             std::cerr << "\nNothing has been started. Fix the line and run it "
                          "again.\n\n";
             printUsage(argv[0]);
+            // The one key with a grammar the usage block cannot hold in a
+            // single line, so it gets its own explanation when it is the one
+            // that failed.
+            if (wallMotionRefused)
+                std::cout << wallMotionHelp();
             return 1;
         }
         cfg.print();

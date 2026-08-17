@@ -372,7 +372,7 @@ above 0.1, `nu=0`.
 | `geometryFile` | path or `none` | `none` | `none` is the verification circle |
 | `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
 | `invertSection` | switch | 0 | 1 / 0 |
-| `wallMotion` | list | empty | `<object>:rot=,slideX=,slideY=,slip=`, see below |
+| `wallMotion` | list | empty | `<object>:rot=90,slideX=0.5;<object>:slip=1` — an object either moves or slips, see below |
 | `restart` | switch | 0 | 1 / 0 |
 | `restartFile` | path | empty | a `.vtk` frame or the folder holding them |
 | `addTime` | double, s | 0.0 | counts forward from the frame |
@@ -432,13 +432,24 @@ boundary layer around with it, and a belt drives a shear layer with no inlet
 involved at all.
 
 Every separate body in the mask is found and numbered on its own, and each one
-takes its own motion:
+takes its own motion. One body is one entry, the entry opens with that body's
+number and a colon, and everything the body does goes inside it:
+
+```text
+<object>:<setting>=<value>,<setting>=<value>;<object>:<setting>=<value>
+```
 
 | Setting | Unit | Means |
 |---|---|---|
 | `rot` | degrees/s, counter-clockwise | the surface turns about that body's own centroid |
 | `slideX` `slideY` | m/s | the surface is dragged in a straight line |
 | `slip` | switch | free-slip instead of no-slip: the fluid slides along the wall and the wall exerts no drag |
+
+The first two rows are one group and the third is the other. `rot` and `slide`
+keep the no-slip wall and give its surface a velocity, so the wall holds the
+fluid and now carries it somewhere; `slip` does the opposite and stops the wall
+from holding the fluid at all. Nothing about the geometry changes either way —
+a body never moves, only the velocity its surface hands to the fluid does.
 
 `rot` and the two `slide` components add up, because together they are just the
 rigid-body velocity field **v = slide + ω × (x − centre)**. Counter-clockwise
