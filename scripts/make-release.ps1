@@ -42,6 +42,14 @@ $problems = New-Object System.Collections.Generic.List[string]
 
 function Say($msg, $colour = "Cyan") { Write-Host $msg -ForegroundColor $colour }
 
+# The lines that actually say what went wrong, or failing that the last few.
+function Show-Tail($text) {
+    $lines = $text -split "`r?`n" | Where-Object { $_.Trim() }
+    $errs = $lines | Where-Object { $_ -match 'error|fatal|LNK\d|unresolved|Unsupported' }
+    $show = if ($errs) { $errs | Select-Object -Last 12 } else { $lines | Select-Object -Last 12 }
+    $show | ForEach-Object { Write-Host "      $_" -ForegroundColor DarkGray }
+}
+
 # ---------------------------------------------------------------- toolkit ---
 # CUDA 13 dropped Maxwell, Pascal and Volta, and nvcc errors out rather than
 # warning when asked for one of them, so the list follows the toolkit.
@@ -107,19 +115,40 @@ function Build-Row($Row, $Archs) {
     Write-Host "  $name ... " -NoNewline
     Remove-Item $build -Recurse -Force -ErrorAction SilentlyContinue
 
-    $args = @("-S", $repo, "-B", $build, "-G", $Generator, "-A", $Row.Arch,
+    $cmakeArgs = @("-S", $repo, "-B", $build, "-G", $Generator, "-A", $Row.Arch,
               "-DCFD_STATIC=ON",
               "-DCFD_ENABLE_AVX2=$(if($Row.Avx2){'ON'}else{'OFF'})",
               "-DCFD_ENABLE_OPENMP=$(if($Row.OpenMp){'ON'}else{'OFF'})",
               "-DCFD_ENABLE_CUDA=$(if($Row.Cuda){'ON'}else{'OFF'})")
     # Without this a missing toolkit quietly produces a CPU-only binary that
     # would then be published under a name promising CUDA.
-    if ($Row.Cuda) { $args += @("-DCFD_ENABLE_CUDA_EXPLICIT=ON", "-DCFD_CUDA_ARCHITECTURES=$Archs") }
+    if ($Row.Cuda) { $cmakeArgs += @("-DCFD_ENABLE_CUDA_EXPLICIT=ON", "-DCFD_CUDA_ARCHITECTURES=$Archs") }
 
-    & cmake @args 2>&1 | Out-String | Write-Verbose
-    if ($LASTEXITCODE -ne 0) { Write-Host "configure failed" -ForegroundColor Yellow; $problems.Add("$name - configure failed, rerun with -Verbose"); return }
-    & cmake --build $build --config Release --parallel 2>&1 | Out-String | Write-Verbose
-    if ($LASTEXITCODE -ne 0) { Write-Host "build failed" -ForegroundColor Yellow; $problems.Add("$name - build failed, rerun with -Verbose"); return }
+    # The whole log goes to a file and the tail goes to the screen. Hiding a
+    # compiler error behind a -Verbose nobody passes is not a summary, it is a
+    # dead end.
+    $logDir = Join-Path $repo "logs"
+    New-Item -ItemType Directory -Force -Path $logDir | Out-Null
+    $log = Join-Path $logDir "$label-$feature.log"
+
+    $out = & cmake @cmakeArgs 2>&1 | Out-String
+    $out | Set-Content $log
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "configure failed" -ForegroundColor Yellow
+        Show-Tail $out
+        Write-Host "      full log: $log" -ForegroundColor DarkGray
+        $problems.Add("$name - configure failed, see logs\$label-$feature.log")
+        return
+    }
+    $out = & cmake --build $build --config Release --parallel 2>&1 | Out-String
+    $out | Add-Content $log
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "build failed" -ForegroundColor Yellow
+        Show-Tail $out
+        Write-Host "      full log: $log" -ForegroundColor DarkGray
+        $problems.Add("$name - build failed, see logs\$label-$feature.log")
+        return
+    }
 
     $exe = Join-Path $build "bin\Release\Fluid Solver.exe"
     if (-not (Test-Path $exe)) { Write-Host "no executable" -ForegroundColor Yellow; $problems.Add("$name - no executable produced"); return }
