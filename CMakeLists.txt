@@ -42,8 +42,14 @@ set(
     CACHE PATH "Root directory for the generated cfd_app executable"
 )
 
-set(CFD_CUDA_ARCHITECTURES "75" CACHE STRING
-    "CUDA architectures. 75 targets the NVIDIA GTX 1660 Ti/Turing GPU."
+# A released binary has to run on more than the machine that built it. CMake
+# emits SASS for each of these plus PTX for the last, so newer cards JIT and
+# work; without the older entries nothing before Turing runs at all. CUDA 13
+# dropped Maxwell, Pascal and Volta, so building the release rows against
+# CUDA 12.x is what keeps 50..70 reachable - a 13.x toolkit will refuse them
+# and the list has to be trimmed to 75 and up.
+set(CFD_CUDA_ARCHITECTURES "50;60;61;70;75;80;86;89;90" CACHE STRING
+    "CUDA architectures to generate code for."
 )
 
 set(CMAKE_CXX_STANDARD 17)
@@ -150,6 +156,29 @@ set(CFD_SOURCES
 
 if(CFD_ENABLE_CUDA)
     list(APPEND CFD_SOURCES src/MultigridCuda.cu)
+endif()
+
+# The icon and the version block live in a resource script, which is a Windows
+# concept only. Elsewhere the icon belongs to the .desktop file or the app
+# bundle instead, so there is nothing to compile in.
+if(WIN32)
+    enable_language(RC)
+    set(CFD_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/logo/fluid-solver.ico")
+    if(EXISTS "${CFD_ICON_PATH}")
+        # windres wants forward slashes even on Windows.
+        file(TO_CMAKE_PATH "${CFD_ICON_PATH}" CFD_ICON_PATH)
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/app.rc.in"
+            "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
+            @ONLY
+        )
+        list(APPEND CFD_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+    else()
+        message(WARNING
+            "logo/fluid-solver.ico is missing; the executable gets the default "
+            "Windows icon and no version information."
+        )
+    endif()
 endif()
 
 add_executable(cfd_app ${CFD_SOURCES})

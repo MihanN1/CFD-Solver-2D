@@ -1,0 +1,41 @@
+// Windows resource script. Configured by CMake, which fills the version in
+// from project(). MSVC compiles .rc natively, MinGW goes through windres, and
+// CMake drives both once the RC language is enabled.
+//
+// The VERSIONINFO block is not decoration: it is what Explorer's Properties
+// dialog and the SmartScreen prompt read. An executable with no product name
+// and no version is one of the things that makes an unsigned installer look
+// like something the user should not have downloaded.
+
+#include <windows.h>
+
+IDI_ICON1 ICON "@CFD_ICON_PATH@"
+
+VS_VERSION_INFO VERSIONINFO
+FILEVERSION     @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+PRODUCTVERSION  @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "MihanN1"
+            VALUE "FileDescription",  "2D incompressible Navier-Stokes solver"
+            VALUE "FileVersion",      "@PROJECT_VERSION@"
+            VALUE "InternalName",     "Fluid Solver"
+            VALUE "LegalCopyright",   "MIT License"
+            VALUE "OriginalFilename", "Fluid Solver.exe"
+            VALUE "ProductName",      "Fluid Solver"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
