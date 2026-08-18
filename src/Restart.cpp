@@ -1,4 +1,5 @@
 #include "Restart.hpp"
+#include "AppPaths.hpp"
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -286,7 +287,20 @@ std::filesystem::path resolveRestartPath(const std::string& path,
         return {};
     }
 
-    const std::filesystem::path given = narrowToPath(path);
+    std::filesystem::path given = narrowToPath(path);
+
+    // "restartFile=output" means the folder the frames were written to, and
+    // those now sit beside the executable rather than in whatever directory
+    // the program was started from. An absolute path, and a relative one that
+    // does resolve against the working directory, are both left alone.
+    {
+        std::error_code exists;
+        if (given.is_relative() && !std::filesystem::exists(given, exists)) {
+            const std::filesystem::path beside = executableDir() / given;
+            if (std::filesystem::exists(beside, exists))
+                given = beside;
+        }
+    }
     std::error_code ec;
 
     if (std::filesystem::is_directory(given, ec)) {

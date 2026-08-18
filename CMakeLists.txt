@@ -119,6 +119,7 @@ endif()
 set(CFD_SOURCES
     src/main.cpp
     src/tiny_obj_loader_impl.cpp
+    src/AppPaths.cpp
     src/Config.cpp
     src/Restart.cpp
     src/Mesh.cpp

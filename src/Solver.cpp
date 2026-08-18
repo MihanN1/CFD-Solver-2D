@@ -1,4 +1,5 @@
 #include "Solver.hpp"
+#include "AppPaths.hpp"
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -73,10 +74,10 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
         gy = -cfg.gravityAccel * std::cos(rad) + 0.f;
     }
 
-    outputPath =
-        cfg.outputDir.empty() ?
-        std::filesystem::path(".") :
-        narrowToPath(cfg.outputDir);
+    // Relative to the executable, not to the working directory: a shortcut, a
+    // file manager and a terminal each hand the process a different one, so
+    // "output" used to mean three different folders.
+    outputPath = resolveOutputDir(narrowToPath(cfg.outputDir));
 
     configHeader = "formatVersion=" + std::to_string(FRAME_FORMAT_VERSION) +
                    "\n" + cfg.serialize();
