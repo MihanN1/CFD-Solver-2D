@@ -8,7 +8,7 @@ CFD‑Solver‑2D is an educational/research project that implements a finite‑
 - Interactive console parameter input with confirmation and on-the-fly editing.
 - Full numerical solver with VTK output for post-processing in ParaView.
 - STL/OBJ loading, central plane section extraction, geometry masking, profile rotation, mirroring, and robust contour reconstruction.
-- Real-time visualization with SFML.
+- A separate SFML desktop application that configures runs, launches the solver and renders the frames it writes.
 
 The project is designed to simulate external incompressible flow around arbitrary 2D profiles such as cylinders, airfoils, valves, turbine blades, and similar engineering geometries.
 
@@ -56,18 +56,22 @@ Possible future extensions include:
 - ✅ OBJ import
 - ✅ Arbitrary slicing plane
 - ✅ Automatic contour reconstruction
-- ✅ Hole detection
-- ✅ Multiple contour support
 - ✅ Non-manifold diagnostics
 - ✅ Automatic scaling and centering
 - ✅ Rotation and mirroring
 - ✅ Polygon rasterization using even-odd filling
 
+The section keeps the largest closed loop it finds, so the geometry this handles
+is anything that sections into a single closed outline.
+
 ---
 
 ## Visualization
 
-- ✅ Real-time SFML visualization
+Not part of the solver. `cfd_app` writes VTK frames and nothing else; SFML is
+not linked into it. Everything below belongs to the separate desktop UI, which
+is its own executable and drives the solver as a child process.
+
 - ✅ Pressure rendering
 - ✅ Velocity rendering
 - ✅ Solid mask rendering
@@ -111,7 +115,7 @@ The **Chorin projection** splits each time step into:
 
 ![](https://latex.codecogs.com/svg.image?\nabla^{2}p=\frac{1}{\Delta%20t}\left(\frac{\partial%20u^{*}}{\partial%20x}+\frac{\partial%20v^{*}}{\partial%20y}\right))
 
-using SOR.
+using a multigrid V-cycle with red/black SOR as its smoother.
 
 3. **Corrector** – update velocities with the pressure gradient.
 
@@ -145,7 +149,7 @@ crosses the plane at
 
 ![](https://latex.codecogs.com/svg.image?\mathbf{x}_{section}=\mathbf{a}+\frac{d_{a}}{d_{a}-d_{b}}(\mathbf{b}-\mathbf{a}))
 
-The resulting segments are connected into closed contours. Multiple contours and holes are detected automatically. Geometry consistency is validated before rasterization. The resulting contours can optionally be mirrored, rotated by `sliceRotation`, scaled to
+The resulting segments are connected into closed contours and the largest of them by area is kept; the rest are discarded, which is the limitation noted under *Geometry* above. Geometry consistency is validated before rasterization. The resulting contour can optionally be mirrored, rotated by `sliceRotation`, scaled to
 
 ![](https://latex.codecogs.com/svg.image?0.2\,\min(L_x,L_y))
 
@@ -183,32 +187,34 @@ CFD-Solver-2D/
 ├── .vscode/
 ├── output/
 ├── logo/
-│   ├── toxic-mark-32.png
-│   ├── toxic-mark-64.png
-│   ├── toxic-mark-128.png
-│   ├── toxic-mark-256.png
-│   ├── toxic-mark-512.png
-│   ├── toxic-mark-1024.png
+│   ├── fluid-solver.ico            <- embedded in the Windows executable
+│   ├── fluid-solver-{16..1024}.png <- Linux hicolor icons
+│   ├── wizard-*.bmp                <- Inno Setup wizard images
+│   └── toxic-mark-{32..1024}.png   <- the original mark
 ├── src/
 │   ├── main.cpp
+│   ├── AppPaths.cpp                <- resolves paths against the executable
 │   ├── Config.cpp
 │   ├── Mesh.cpp
 │   ├── Solver.cpp
 │   ├── Multigrid.cpp
 │   ├── MultigridCuda.cu
+│   ├── app.rc.in                   <- icon and version block, Windows only
 │   └── tiny_obj_loader_impl.cpp
 ├── include/
+│   ├── AppPaths.hpp
 │   ├── Config.hpp
 │   ├── Mesh.hpp
 │   ├── Solver.hpp
 │   ├── Multigrid.hpp
 │   ├── MultigridCuda.cuh
 │   └── tiny_obj_loader.h
+├── scripts/                        <- build every variant, package a release
+├── installer/                      <- Inno Setup, makeself, productbuild
 ├── models/
 ├── lib/
-│   ├── sfml/
+│   ├── sfml/                       <- used by the UI only, not by the solver
 │   └── stl_reader/
-├── build/
 ├── CMakeLists.txt
 ├── LICENSE
 └── README.md
@@ -219,9 +225,16 @@ CFD-Solver-2D/
 # Requirements
 
 - C++17 compatible compiler
-- CMake 3.10+
-- SFML
-- ParaView (optional)
+- CMake 3.28+
+- CUDA Toolkit (optional, for the GPU pressure solver)
+- OpenMP (optional, picked up automatically when present)
+- A CPU with AVX2 (optional; without it every vector kernel falls back to the
+  scalar loop it already carries)
+- ParaView (optional, for looking at the output)
+
+There are no other dependencies. `tiny_obj_loader` and `stl_reader` are
+header-only and vendored, so a plain configure-and-build works out of the box.
+SFML is in `lib/` for the separate UI and is not linked into the solver.
 
 Supported compilers:
 
@@ -246,33 +259,64 @@ cmake --build build --config Release
 cmake --install build --config Release --prefix install
 ```
 
+Four switches, all safe to change in any combination:
+
+| Option | Default | Off means |
+|---|---|---|
+| `CFD_ENABLE_AVX2` | ON | scalar kernels instead of the vector ones |
+| `CFD_ENABLE_OPENMP` | ON | single-threaded, bit-identical to the threaded build |
+| `CFD_ENABLE_CUDA` | ON | CPU multigrid only, no toolkit needed |
+| `CFD_STATIC` | ON | link against the shared runtime instead of embedding it |
+
+CUDA is dropped automatically when no toolkit is found, unless
+`-DCFD_ENABLE_CUDA_EXPLICIT=ON` says to treat that as an error instead. A CUDA
+build started on a machine with no NVIDIA device says so and runs on the CPU.
+
+`scripts/build-windows.ps1` and `scripts/build-linux.sh` build every combination
+for their platform in one go; `scripts/make-release.ps1` and
+`scripts/make-release.sh` go further and produce the installers and the release
+folder as well.
+
 ---
 
 # Run
 
 ```powershell
-.\install\bin\cfd_app.exe
+.\install\bin\"Fluid Solver.exe"
 ```
+
+Frames are written to an `output` folder **beside the executable**, whatever
+directory the program was started from, so a desktop shortcut and a terminal
+put them in the same place. `outputDir` overrides it; an absolute path is taken
+as given. If the folder the program lives in is read-only, which an install
+under `Program Files` is for a standard user, it falls back to the per-user data
+directory and prints the path it used.
 
 Configure:
 
 - Domain size
 - Grid resolution
 - Flow parameters
-- Reynolds number
 - Time parameters
 - Pressure solver parameters
 - Geometry
 - Slice orientation
-- Visualization options
+- CUDA on or off
 
 After confirmation the simulation starts immediately.
+
+> Reynolds number is deliberately not an input. The solver is dimensional and
+> integrates with `nu` directly, so `Re = U0 * D / nu` is a consequence of the
+> other settings, where `D = 0.2 * min(Lx, Ly)` is the obstacle diameter. To
+> drive a run by `Re`, convert on the way in: `nu = U0 * D / Re`.
 
 ---
 
 # Visualization
 
-The application provides built-in real-time visualization.
+A separate desktop application, built from its own branch. It configures a run,
+launches the solver as a child process and renders the frames the solver writes.
+The solver itself has no window.
 
 Available display modes:
 

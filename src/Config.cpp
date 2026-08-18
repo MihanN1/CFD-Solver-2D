@@ -236,6 +236,12 @@ bool Config::modifyParam(const std::string& name) {
     } else if (lower == "ro") {
         std::cout << "New ro(kg/m^3): ";
         std::cin >> ro;
+    } else if (lower == "usecuda") {
+        // setParam took this from the start, but the edit prompt did not, so
+        // typing the name of a parameter that plainly exists answered
+        // "Unknown parameter".
+        std::cout << "New useCuda (0 = no, 1 = yes): ";
+        std::cin >> useCuda;
     } else {
         std::cout << "Unknown parameter: " << name << "\n";
         return false;
