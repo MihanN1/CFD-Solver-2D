@@ -155,7 +155,7 @@ checkpoint carrying the full solver state, so a run can be continued from any
 point, with denser output or a longer clock, producing byte-for-byte what an
 uninterrupted run would have. Plus the fixes listed above.
 
-After that: optional gravity, and moving/free-slip walls per object.
+After that: optional gravity, and moving/free-slip walls per object. THERE MIGHT BE ANOTHER FIXES AND THINGS, SEE THEIR RESPECTABLE RELEASE NOTES.
 
 ---
 
