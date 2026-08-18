@@ -15,7 +15,7 @@ static void printUsage(const char* exe) {
         "Keys: Lx Ly nx ny U0 nu CFL totalTime dtUpdateInterval dtSafety\n"
         "      omega smootherOmega mgIterations mgTolerance mgMinCoarseSize\n"
         "      saveInterval outputDir geometryFile sliceAngleX sliceAngleZ\n"
-        "      sliceRotation invertSection ro\n"
+        "      sliceRotation invertSection ro useCuda\n"
         "\n"
         "Example:\n"
         "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "

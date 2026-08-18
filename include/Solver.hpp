@@ -4,6 +4,7 @@
 #include "Multigrid.hpp"
 #include <vector>
 #include <string>
+#include <filesystem>
 #include <cstdint>
 
 // Projection (fractional step) method on a staggered MAC grid:
@@ -36,6 +37,11 @@ private:
     int step = 0;
     float dt = 0.0f;  // current time step
     float lastResidual = 0.0f;  // relative residual of the last pressure solve
+
+    // cfg.outputDir resolved against the executable's own directory, once, in
+    // run(). saveVTK() is called from several places and must not re-resolve
+    // it: the fallback path prints, and a run should say that once.
+    std::filesystem::path outputPath;
 
     // Faces the corrector owns: interior faces with fluid on both sides.
     // Every other face keeps its prescribed value (0 on walls/solids, U0 at the

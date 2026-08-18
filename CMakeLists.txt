@@ -14,14 +14,42 @@ option(CFD_ENABLE_AVX2 "Compile CPU C++ sources with AVX2 support" ON)
 option(CFD_ENABLE_CUDA "Enable the CUDA multigrid backend" ON)
 option(CFD_ENABLE_CUDA_EXPLICIT "Treat a missing CUDA toolkit as a hard error" OFF)
 
+set(CFD_APP_NAME "Fluid Solver" CACHE STRING
+    "File name of the produced executable, without the extension"
+)
+
+# Release builds ship as one file. What that costs differs per platform, and
+# getting it wrong is quiet rather than loud, so it lives here instead of in
+# whatever command line happened to produce a given binary:
+#   MSVC       static CRT (/MT). The OpenMP runtime has no static form, so an
+#              OpenMP build still needs vcomp140.dll beside it.
+#   GCC/Clang  -static, plus libgomp.a rather than the libgomp.so that CMake's
+#              OpenMP::OpenMP_CXX target otherwise hands the linker.
+#   with CUDA  no full -static: libcudart_static needs dlopen and pthread, and
+#              the driver is dynamic by definition. The C++ runtime is still
+#              linked in, which leaves libc, libm and libcuda.so.1.
+#   macOS      there is no static libSystem, so this only means no third-party
+#              dylibs. That is as static as an Apple binary is allowed to be.
+option(CFD_STATIC "Link the runtime into the executable" ON)
+
+if(CFD_STATIC AND MSVC)
+    set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+endif()
+
 set(
     CFD_RUNTIME_OUTPUT_DIRECTORY
     "${CMAKE_BINARY_DIR}/bin"
     CACHE PATH "Root directory for the generated cfd_app executable"
 )
 
-set(CFD_CUDA_ARCHITECTURES "75" CACHE STRING
-    "CUDA architectures. 75 targets the NVIDIA GTX 1660 Ti/Turing GPU."
+# A released binary has to run on more than the machine that built it. CMake
+# emits SASS for each of these plus PTX for the last, so newer cards JIT and
+# work; without the older entries nothing before Turing runs at all. CUDA 13
+# dropped Maxwell, Pascal and Volta, so building the release rows against
+# CUDA 12.x is what keeps 50..70 reachable - a 13.x toolkit will refuse them
+# and the list has to be trimmed to 75 and up.
+set(CFD_CUDA_ARCHITECTURES "50;60;61;70;75;80;86;89;90" CACHE STRING
+    "CUDA architectures to generate code for."
 )
 
 set(CMAKE_CXX_STANDARD 17)
@@ -119,6 +147,7 @@ endif()
 set(CFD_SOURCES
     src/main.cpp
     src/tiny_obj_loader_impl.cpp
+    src/AppPaths.cpp
     src/Config.cpp
     src/Mesh.cpp
     src/Solver.cpp
@@ -127,6 +156,29 @@ set(CFD_SOURCES
 
 if(CFD_ENABLE_CUDA)
     list(APPEND CFD_SOURCES src/MultigridCuda.cu)
+endif()
+
+# The icon and the version block live in a resource script, which is a Windows
+# concept only. Elsewhere the icon belongs to the .desktop file or the app
+# bundle instead, so there is nothing to compile in.
+if(WIN32)
+    enable_language(RC)
+    set(CFD_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/logo/fluid-solver.ico")
+    if(EXISTS "${CFD_ICON_PATH}")
+        # windres wants forward slashes even on Windows.
+        file(TO_CMAKE_PATH "${CFD_ICON_PATH}" CFD_ICON_PATH)
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/app.rc.in"
+            "${CMAKE_CURRENT_BINARY_DIR}/app.rc"
+            @ONLY
+        )
+        list(APPEND CFD_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/app.rc")
+    else()
+        message(WARNING
+            "logo/fluid-solver.ico is missing; the executable gets the default "
+            "Windows icon and no version information."
+        )
+    endif()
 endif()
 
 add_executable(cfd_app ${CFD_SOURCES})
@@ -143,6 +195,10 @@ set_target_properties(cfd_app PROPERTIES
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
     CXX_EXTENSIONS OFF
+    # The target keeps its old name so the GUI project, which looks for
+    # cfd_app, still resolves; only the file on disk is renamed. There will be
+    # other solvers next to this one, and "cfd_app" says nothing about which.
+    OUTPUT_NAME "${CFD_APP_NAME}"
 )
 
 if(CFD_ENABLE_CUDA)
@@ -163,7 +219,11 @@ target_link_libraries(cfd_app
 )
 
 if(CFD_ENABLE_CUDA)
-    target_link_libraries(cfd_app PRIVATE CUDA::cudart)
+    if(CFD_STATIC)
+        target_link_libraries(cfd_app PRIVATE CUDA::cudart_static)
+    else()
+        target_link_libraries(cfd_app PRIVATE CUDA::cudart)
+    endif()
 endif()
 
 target_compile_definitions(cfd_app
@@ -192,6 +252,25 @@ if(MSVC)
 endif()
 
 if(CFD_ENABLE_OPENMP)
+    # CMake's OpenMP::OpenMP_CXX records the path of the *shared* libgomp, and
+    # -static then dies with "attempted static link of dynamic object". Point
+    # the search at the archive before find_package runs, and the imported
+    # target comes out static without anything downstream noticing.
+    if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        execute_process(
+            COMMAND "${CMAKE_CXX_COMPILER}" -print-file-name=libgomp.a
+            OUTPUT_VARIABLE CFD_LIBGOMP_A
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(EXISTS "${CFD_LIBGOMP_A}")
+            set(OpenMP_CXX_FLAGS "-fopenmp")
+            set(OpenMP_CXX_LIB_NAMES "gomp")
+            set(OpenMP_gomp_LIBRARY "${CFD_LIBGOMP_A}")
+            message(STATUS "OpenMP: static ${CFD_LIBGOMP_A}")
+        endif()
+    endif()
+
     find_package(OpenMP QUIET COMPONENTS CXX)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(cfd_app PRIVATE OpenMP::OpenMP_CXX)
@@ -201,11 +280,28 @@ if(CFD_ENABLE_OPENMP)
     endif()
 endif()
 
+# Everything except MSVC, which was handled by CMAKE_MSVC_RUNTIME_LIBRARY above.
+if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    if(APPLE)
+        # No static libSystem exists; only the C++ runtime can be pulled in.
+        target_link_options(cfd_app PRIVATE -static-libstdc++)
+    elseif(CFD_ENABLE_CUDA)
+        # libcudart_static wants dlopen and pthread, so the executable stays
+        # dynamically linked against libc and the driver.
+        target_link_options(cfd_app PRIVATE -static-libgcc -static-libstdc++)
+    else()
+        target_link_options(cfd_app PRIVATE
+            -static -static-libgcc -static-libstdc++)
+    endif()
+endif()
+
 if(CFD_ENABLE_AVX2)
     if(MSVC)
         target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
+        # /arch:AVX2 already implies FMA on MSVC; -mavx2 alone does not on
+        # GCC/Clang, and the predictor contracts into FMA once it is allowed.
+        target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma>)
     else()
         message(WARNING "AVX2 flags are not configured for ${CMAKE_CXX_COMPILER_ID}")
     endif()
