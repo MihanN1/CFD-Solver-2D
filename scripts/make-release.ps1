@@ -1,33 +1,35 @@
 <#
-    Everything Windows can produce for a release, in one run:
+    Builds the release rows this machine can produce, then packs them.
 
-        every executable  ->  dist\Fluid Solver <ver> windows-<arch> <feature>\
-        both installers   ->  dist\Fluid Solver <ver> windows-<arch> setup.exe
-        the release folder->  release\<ver>\
+    The matrix is deliberately small. CUDA disables itself at runtime when no
+    NVIDIA device is present, so one CUDA build serves everybody and there is
+    no reason to ship a separate non-CUDA one; OpenMP costs nothing and is
+    always on. AVX2 is the only axis that has to be split, because a binary
+    cannot decide at runtime whether it may execute an AVX2 instruction - it
+    just dies. "plain" is the fallback for whatever the other two cannot run
+    on: no CUDA, no OpenMP, no AVX2, and on Windows no vcomp140.dll beside it.
 
-    It does not tag anything, does not upload anything and does not touch git.
+        windows-x64    avx2-omp-cuda, omp-cuda, plain
+        windows-x86    avx2-omp, omp            (no 32-bit CUDA exists)
 
         pwsh -File scripts\make-release.ps1 -Version 0.1
-        pwsh -File scripts\make-release.ps1 -Version 0.1 -SkipCuda
+        pwsh -File scripts\make-release.ps1 -Version 0.1 -WithInstallers
         pwsh -File scripts\make-release.ps1 -Version 0.1 -Only Package
 
-    Needs: Visual Studio with the C++ workload, and Inno Setup 6 for the
-    installers. The CUDA rows additionally need the CUDA Toolkit with its
-    Visual Studio Integration component. Anything missing is reported and
-    skipped rather than failing the run, and the summary at the end says what
-    did not get built.
+    Needs Visual Studio with the C++ workload. The CUDA rows additionally need
+    the CUDA Toolkit with its Visual Studio Integration component; without it
+    they are reported as skipped and the rest still build. The CUDA
+    architecture list is chosen from the installed toolkit version, so nothing
+    has to be passed by hand.
 #>
 
 [CmdletBinding()]
 param(
     [string] $Version   = "0.1",
     [string] $Generator = "Visual Studio 18 2026",
-    # CUDA 12.x covers sm_50..sm_90. CUDA 13 dropped Maxwell, Pascal and Volta,
-    # so trim this to "75;80;86;89;90" if that is the toolkit installed.
-    [string] $CudaArchs = "50;60;61;70;75;80;86;89;90",
-    [switch] $SkipCuda,
+    [string] $CudaArchs = "",       # empty = decide from the installed toolkit
+    [switch] $WithInstallers,       # off until the UI folders exist
     [switch] $Skip32,
-    # Build, Installers, Package, or All
     [ValidateSet("All","Build","Installers","Package")]
     [string] $Only = "All"
 )
@@ -40,7 +42,25 @@ $problems = New-Object System.Collections.Generic.List[string]
 
 function Say($msg, $colour = "Cyan") { Write-Host $msg -ForegroundColor $colour }
 
-# ---------------------------------------------------------------- helpers ---
+# ---------------------------------------------------------------- toolkit ---
+# CUDA 13 dropped Maxwell, Pascal and Volta, and nvcc errors out rather than
+# warning when asked for one of them, so the list follows the toolkit.
+function Resolve-CudaArchs {
+    if ($CudaArchs) { return $CudaArchs }
+    $nvcc = Get-Command nvcc -ErrorAction SilentlyContinue
+    if (-not $nvcc) { return "75;80;86;89;90" }
+    $out = & nvcc --version 2>&1 | Out-String
+    if ($out -match 'release\s+(\d+)\.') {
+        if ([int]$Matches[1] -ge 13) {
+            Write-Host "  CUDA $($Matches[1]).x detected: targeting Turing and newer" -ForegroundColor DarkGray
+            return "75;80;86;89;90"
+        }
+        Write-Host "  CUDA $($Matches[1]).x detected: targeting Maxwell and newer" -ForegroundColor DarkGray
+        return "50;60;61;70;75;80;86;89;90"
+    }
+    return "75;80;86;89;90"
+}
+
 function Find-Vcomp($Bits) {
     $roots = @()
     if ($env:VCToolsRedistDir) { $roots += $env:VCToolsRedistDir }
@@ -65,34 +85,41 @@ function Find-Iscc {
     return $null
 }
 
-# ------------------------------------------------------------ 1. the exes ---
-function Build-Row($Arch, $Avx2, $OpenMp, $Cuda) {
+# ------------------------------------------------------------ the 5 rows ---
+$Rows = @(
+    @{ Arch = "x64";   Avx2 = $true;  OpenMp = $true;  Cuda = $true  }
+    @{ Arch = "x64";   Avx2 = $false; OpenMp = $true;  Cuda = $true  }
+    @{ Arch = "x64";   Avx2 = $false; OpenMp = $false; Cuda = $false }
+    @{ Arch = "Win32"; Avx2 = $true;  OpenMp = $true;  Cuda = $false }
+    @{ Arch = "Win32"; Avx2 = $false; OpenMp = $true;  Cuda = $false }
+)
+
+function Build-Row($Row, $Archs) {
     $tags = @()
-    if ($Avx2)   { $tags += "avx2" }
-    if ($OpenMp) { $tags += "omp"  }
-    if ($Cuda)   { $tags += "cuda" }
+    if ($Row.Avx2)   { $tags += "avx2" }
+    if ($Row.OpenMp) { $tags += "omp"  }
+    if ($Row.Cuda)   { $tags += "cuda" }
     $feature = if ($tags.Count) { $tags -join "-" } else { "plain" }
-    $label   = if ($Arch -eq "x64") { "windows-x64" } else { "windows-x86" }
+    $label   = if ($Row.Arch -eq "x64") { "windows-x64" } else { "windows-x86" }
     $name    = "Fluid Solver $Version $label $feature"
     $build   = Join-Path $repo "build-$label-$feature"
 
     Write-Host "  $name ... " -NoNewline
     Remove-Item $build -Recurse -Force -ErrorAction SilentlyContinue
 
-    $cmakeArch = if ($Arch -eq "x64") { "x64" } else { "Win32" }
-    $args = @("-S", $repo, "-B", $build, "-G", $Generator, "-A", $cmakeArch,
+    $args = @("-S", $repo, "-B", $build, "-G", $Generator, "-A", $Row.Arch,
               "-DCFD_STATIC=ON",
-              "-DCFD_ENABLE_AVX2=$(if($Avx2){'ON'}else{'OFF'})",
-              "-DCFD_ENABLE_OPENMP=$(if($OpenMp){'ON'}else{'OFF'})",
-              "-DCFD_ENABLE_CUDA=$(if($Cuda){'ON'}else{'OFF'})")
+              "-DCFD_ENABLE_AVX2=$(if($Row.Avx2){'ON'}else{'OFF'})",
+              "-DCFD_ENABLE_OPENMP=$(if($Row.OpenMp){'ON'}else{'OFF'})",
+              "-DCFD_ENABLE_CUDA=$(if($Row.Cuda){'ON'}else{'OFF'})")
     # Without this a missing toolkit quietly produces a CPU-only binary that
     # would then be published under a name promising CUDA.
-    if ($Cuda) { $args += @("-DCFD_ENABLE_CUDA_EXPLICIT=ON", "-DCFD_CUDA_ARCHITECTURES=$CudaArchs") }
+    if ($Row.Cuda) { $args += @("-DCFD_ENABLE_CUDA_EXPLICIT=ON", "-DCFD_CUDA_ARCHITECTURES=$Archs") }
 
     & cmake @args 2>&1 | Out-String | Write-Verbose
-    if ($LASTEXITCODE -ne 0) { Write-Host "configure failed" -ForegroundColor Yellow; $problems.Add("$name - configure failed"); return }
+    if ($LASTEXITCODE -ne 0) { Write-Host "configure failed" -ForegroundColor Yellow; $problems.Add("$name - configure failed, rerun with -Verbose"); return }
     & cmake --build $build --config Release --parallel 2>&1 | Out-String | Write-Verbose
-    if ($LASTEXITCODE -ne 0) { Write-Host "build failed" -ForegroundColor Yellow; $problems.Add("$name - build failed"); return }
+    if ($LASTEXITCODE -ne 0) { Write-Host "build failed" -ForegroundColor Yellow; $problems.Add("$name - build failed, rerun with -Verbose"); return }
 
     $exe = Join-Path $build "bin\Release\Fluid Solver.exe"
     if (-not (Test-Path $exe)) { Write-Host "no executable" -ForegroundColor Yellow; $problems.Add("$name - no executable produced"); return }
@@ -103,32 +130,37 @@ function Build-Row($Arch, $Avx2, $OpenMp, $Cuda) {
     Copy-Item $exe (Join-Path $rowDir "Fluid Solver.exe") -Force
 
     # MSVC has no static OpenMP runtime; the build does not start without this.
-    if ($OpenMp) {
-        $bits = if ($Arch -eq "x64") { "x64" } else { "x86" }
+    $extra = ""
+    if ($Row.OpenMp) {
+        $bits = if ($Row.Arch -eq "x64") { "x64" } else { "x86" }
         $dll = Find-Vcomp $bits
-        if ($dll) { Copy-Item $dll $rowDir -Force }
+        if ($dll) { Copy-Item $dll $rowDir -Force; $extra = " + vcomp140.dll" }
         else { $problems.Add("$name - vcomp140.dll not found, this build will not start") }
     }
 
     $mb = [math]::Round((Get-Item (Join-Path $rowDir "Fluid Solver.exe")).Length / 1MB, 2)
-    Write-Host "ok, $mb MB" -ForegroundColor Green
+    Write-Host "ok, $mb MB$extra" -ForegroundColor Green
 }
 
 function Build-All {
     Say "Building the executables"
     New-Item -ItemType Directory -Force -Path $dist | Out-Null
-    foreach ($avx2 in $true, $false) {
-        foreach ($omp in $true, $false) {
-            foreach ($cuda in $true, $false) {
-                if ($cuda -and $SkipCuda) { continue }
-                Build-Row "x64" $avx2 $omp $cuda
-            }
-            if (-not $Skip32) { Build-Row "Win32" $avx2 $omp $false }
+
+    $haveNvcc = [bool](Get-Command nvcc -ErrorAction SilentlyContinue)
+    $archs = Resolve-CudaArchs
+
+    foreach ($row in $Rows) {
+        if ($row.Arch -eq "Win32" -and $Skip32) { continue }
+        if ($row.Cuda -and -not $haveNvcc) {
+            Write-Host "  (CUDA row skipped: nvcc is not on PATH)" -ForegroundColor Yellow
+            $problems.Add("a CUDA row was skipped - nvcc is not on PATH, install the CUDA Toolkit with Visual Studio Integration")
+            continue
         }
+        Build-Row $row $archs
     }
 }
 
-# ------------------------------------------------------ 2. the installers ---
+# ------------------------------------------------------ the installers -----
 function Build-Installers {
     Say "Building the installers"
     $iscc = Find-Iscc
@@ -140,13 +172,9 @@ function Build-Installers {
     $iss = Join-Path $repo "installer\windows\fluid-solver.iss"
     foreach ($arch in "x64", "x86") {
         if ($arch -eq "x86" -and $Skip32) { continue }
-        # An installer with nothing to install is worse than no installer.
         $any = Get-ChildItem $dist -Directory -ErrorAction SilentlyContinue |
                Where-Object { $_.Name -like "Fluid Solver $Version windows-$arch *" }
-        if (-not $any) {
-            Write-Host "  windows-$arch ... no builds to package - skipped" -ForegroundColor Yellow
-            continue
-        }
+        if (-not $any) { Write-Host "  windows-$arch ... nothing to package - skipped" -ForegroundColor Yellow; continue }
         Write-Host "  windows-$arch ... " -NoNewline
         & $iscc "/DAppVersion=$Version" "/DArch=$arch" "/DDistDir=$dist" $iss 2>&1 | Out-String | Write-Verbose
         if ($LASTEXITCODE -eq 0) { Write-Host "ok" -ForegroundColor Green }
@@ -154,14 +182,12 @@ function Build-Installers {
     }
 }
 
-# --------------------------------------------------------- 3. the release ---
+# --------------------------------------------------------- the release ----
 function Package {
     Say "Assembling release\$Version"
     Remove-Item $rel -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $rel | Out-Null
 
-    # One zip per variant. Each holds the executable under its plain name, so
-    # unzipping anywhere and running it just works.
     Get-ChildItem $dist -Directory -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -like "Fluid Solver $Version *" } |
         ForEach-Object {
@@ -182,12 +208,12 @@ function Package {
         Where-Object { $_.Name -like "*setup.exe" -or $_.Extension -in ".pkg", ".run" } |
         ForEach-Object { Copy-Item $_.FullName $rel; Write-Host "  $($_.Name)" }
 
-    # The two standalone files: what the release was built from, and how to
-    # use it. lib\sfml is the UI's dependency and dwarfs everything else.
+    # The two standalone files: what the release was built from, and how to use
+    # it. lib\sfml belongs to the UI and dwarfs everything else.
     $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid())
     $srcDir = Join-Path $stage "Fluid-Solver-Source-Code"
     New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
-    $skip = @(".git", ".github", ".vs", ".vscode", "out", "dist", "release", "sfml")
+    $skip = @(".git", ".github", ".vs", ".vscode", "out", "dist", "release", "_to_delete")
     Get-ChildItem $repo -Force | Where-Object {
         $_.Name -notin $skip -and $_.Name -notlike "build*" -and $_.Name -notlike "bt-*"
     } | ForEach-Object { Copy-Item $_.FullName $srcDir -Recurse -Force -ErrorAction SilentlyContinue }
@@ -205,24 +231,26 @@ function Package {
     } | Set-Content (Join-Path $rel "SHA256SUMS.txt") -Encoding ascii
 }
 
-# ------------------------------------------------------------------- run ---
-Say "Fluid Solver $Version - Windows release"
+# ------------------------------------------------------------------ run ---
+Say "Fluid Solver $Version - Windows"
 Write-Host ""
-if ($Only -in "All","Build")      { Build-All;        Write-Host "" }
-if ($Only -in "All","Installers") { Build-Installers; Write-Host "" }
-if ($Only -in "All","Package")    { Package;          Write-Host "" }
+if ($Only -in "All","Build")      { Build-All; Write-Host "" }
+if ($Only -eq "Installers" -or ($Only -eq "All" -and $WithInstallers)) { Build-Installers; Write-Host "" }
+if ($Only -in "All","Package")    { Package;   Write-Host "" }
 
 Say "Done"
 if (Test-Path $rel) {
-    Get-ChildItem $rel | ForEach-Object {
-        "{0,10:N0} KB  {1}" -f ($_.Length / 1KB), $_.Name | Write-Host
-    }
+    Get-ChildItem $rel | ForEach-Object { "{0,10:N0} KB  {1}" -f ($_.Length / 1KB), $_.Name | Write-Host }
+}
+if (-not $WithInstallers -and $Only -eq "All") {
+    Write-Host ""
+    Write-Host "Installers were not built. Add -WithInstallers once the UI folder is in dist\." -ForegroundColor DarkGray
 }
 if ($problems.Count) {
     Write-Host ""
     Say "$($problems.Count) thing(s) did not work:" "Yellow"
     $problems | ForEach-Object { Write-Host "  $_" -ForegroundColor Yellow }
-    Write-Host ""
-    Write-Host "Linux and macOS rows are not built here - run scripts/make-release.sh"
-    Write-Host "on those, drop their output into dist\, and rerun with -Only Package."
 }
+Write-Host ""
+Write-Host "Linux and macOS rows are built by scripts/make-release.sh on those systems."
+Write-Host "Drop their dist\ output in beside this one and rerun with -Only Package."
