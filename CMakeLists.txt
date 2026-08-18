@@ -119,6 +119,7 @@ endif()
 set(CFD_SOURCES
     src/main.cpp
     src/tiny_obj_loader_impl.cpp
+    src/AppPaths.cpp
     src/Config.cpp
     src/Restart.cpp
     src/Mesh.cpp
@@ -206,7 +207,9 @@ if(CFD_ENABLE_AVX2)
     if(MSVC)
         target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2>)
+        # /arch:AVX2 already implies FMA on MSVC; -mavx2 alone does not on
+        # GCC/Clang, and the predictor contracts into FMA once it is allowed.
+        target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma>)
     else()
         message(WARNING "AVX2 flags are not configured for ${CMAKE_CXX_COMPILER_ID}")
     endif()

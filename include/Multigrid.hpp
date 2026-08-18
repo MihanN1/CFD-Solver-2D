@@ -134,6 +134,11 @@ private:
 
     #ifdef USE_CUDA
     public:
+        // cudaMalloc aborts the process when the toolkit is there but no device
+        // is behind it, which is a whole class of machines, so the backend is
+        // asked whether it exists at all before anything is allocated on it.
+        static bool cudaDeviceAvailable();
+
         void setGeometryCuda();
 
         float solveCuda(
