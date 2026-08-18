@@ -161,12 +161,20 @@ endif()
 # The icon and the version block live in a resource script, which is a Windows
 # concept only. Elsewhere the icon belongs to the .desktop file or the app
 # bundle instead, so there is nothing to compile in.
-if(WIN32)
+option(CFD_ENABLE_ICON "Embed the icon and version block on Windows" ON)
+
+if(WIN32 AND CFD_ENABLE_ICON)
     enable_language(RC)
-    set(CFD_ICON_PATH "${CMAKE_CURRENT_SOURCE_DIR}/logo/fluid-solver.ico")
-    if(EXISTS "${CFD_ICON_PATH}")
-        # windres wants forward slashes even on Windows.
-        file(TO_CMAKE_PATH "${CFD_ICON_PATH}" CFD_ICON_PATH)
+    set(CFD_ICON_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/logo/fluid-solver.ico")
+    if(EXISTS "${CFD_ICON_SOURCE}")
+        # rc.exe reads the .rc file in the system ANSI code page, not UTF-8,
+        # so an absolute path with non-ASCII characters anywhere in it - and
+        # this project lives under one - arrives as mojibake and the icon
+        # "does not exist". Nothing in the .rc may be non-ASCII. So the icon is
+        # copied next to the generated .rc and referenced by a bare name, which
+        # rc.exe resolves relative to the .rc itself.
+        file(COPY "${CFD_ICON_SOURCE}" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
+        set(CFD_ICON_PATH "fluid-solver.ico")
         configure_file(
             "${CMAKE_CURRENT_SOURCE_DIR}/src/app.rc.in"
             "${CMAKE_CURRENT_BINARY_DIR}/app.rc"

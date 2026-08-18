@@ -1,28 +1,37 @@
-// Windows resource script. Configured by CMake, which fills the version in
-// from project(). MSVC compiles .rc natively, MinGW goes through windres, and
-// CMake drives both once the RC language is enabled.
+// Windows resource script. Configured by CMake, which fills in the version
+// from project() and the icon name from the copy it puts beside this file.
+//
+// Two rules this file has to obey, both learned the hard way:
+//
+//   1. Everything here must be ASCII. rc.exe reads the .rc in the system ANSI
+//      code page rather than UTF-8, so a path with non-ASCII characters in it
+//      arrives as mojibake and the icon "does not exist". That is why the icon
+//      is referenced by a bare name and copied next to this file.
+//   2. Nothing is included. windows.h resolves only if the RC task was handed
+//      the SDK include path, which is one more thing that can be set up wrong,
+//      so the few constants it would have provided are written out literally.
 //
 // The VERSIONINFO block is not decoration: it is what Explorer's Properties
 // dialog and the SmartScreen prompt read. An executable with no product name
-// and no version is one of the things that makes an unsigned installer look
-// like something the user should not have downloaded.
+// and no version is one of the things that makes an unsigned download look
+// like something the user should not have run.
 
-#include <windows.h>
+// Windows shows the lowest-numbered icon resource as the application icon.
+1 ICON "@CFD_ICON_PATH@"
 
-IDI_ICON1 ICON "@CFD_ICON_PATH@"
-
-VS_VERSION_INFO VERSIONINFO
+// VS_VERSION_INFO
+1 VERSIONINFO
 FILEVERSION     @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
 PRODUCTVERSION  @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
-FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
-FILEFLAGS       0
-FILEOS          VOS_NT_WINDOWS32
-FILETYPE        VFT_APP
-FILESUBTYPE     VFT2_UNKNOWN
+FILEFLAGSMASK   0x3fL          // VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0x0L
+FILEOS          0x40004L       // VOS_NT_WINDOWS32
+FILETYPE        0x1L           // VFT_APP
+FILESUBTYPE     0x0L           // VFT2_UNKNOWN
 BEGIN
     BLOCK "StringFileInfo"
     BEGIN
-        BLOCK "040904B0"
+        BLOCK "040904B0"       // US English, Unicode
         BEGIN
             VALUE "CompanyName",      "MihanN1"
             VALUE "FileDescription",  "2D incompressible Navier-Stokes solver"
