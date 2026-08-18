@@ -1,4 +1,5 @@
 #include "Solver.hpp"
+#include "AppPaths.hpp"
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -6,13 +7,16 @@
 #include <filesystem>
 #include <iomanip>
 #include <algorithm>
+#ifdef __AVX2__
 #include <immintrin.h>
+#endif
 #include <array>
 #include <limits>
 #include <sstream>
 #include <utility>
 
 namespace {
+#ifdef __AVX2__
 // Largest of the 8 lanes
 float horizontalMax(__m256 v) {
     __m128 lo = _mm256_castps256_ps128(v);
@@ -37,6 +41,7 @@ float horizontalSum(__m256 v) {
 __m256 absMask() {
     return _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF));
 }
+#endif
 }
 
 Solver::Solver(const Config& cfg, const Mesh& mesh)
@@ -69,10 +74,10 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
         gy = -cfg.gravityAccel * std::cos(rad) + 0.f;
     }
 
-    outputPath =
-        cfg.outputDir.empty() ?
-        std::filesystem::path(".") :
-        narrowToPath(cfg.outputDir);
+    // Relative to the executable, not to the working directory: a shortcut, a
+    // file manager and a terminal each hand the process a different one, so
+    // "output" used to mean three different folders.
+    outputPath = resolveOutputDir(narrowToPath(cfg.outputDir));
 
     configHeader = "formatVersion=1\n" + cfg.serialize();
 }
@@ -247,15 +252,19 @@ void Solver::computeDt(){
     const int nx = cfg.nx;
     const int ny = cfg.ny;
 
+#ifdef __AVX2__
     const __m256 invDxVec = _mm256_set1_ps(invDx);
     const __m256 invDyVec = _mm256_set1_ps(invDy);
     const __m256 signMask = absMask();
+#endif
 
     float maxCourant = 0.0f;
 
     #pragma omp parallel
     {
+#ifdef __AVX2__
         __m256 localVec = _mm256_setzero_ps();
+#endif
         float localScalar = 0.0f;
 
         #pragma omp for schedule(static) nowait
@@ -266,6 +275,7 @@ void Solver::computeDt(){
             const int rowVTop = (j + 1) * nx;
 
             int i = 0;
+#ifdef __AVX2__
             for (; i + 8 <= nx; i += 8)
             {
                 const __m256 uL = _mm256_and_ps(signMask,
@@ -284,6 +294,7 @@ void Solver::computeDt(){
 
                 localVec = _mm256_max_ps(localVec, courant);
             }
+#endif
 
             for (; i < nx; ++i)
             {
@@ -296,7 +307,11 @@ void Solver::computeDt(){
             }
         }
 
+#ifdef __AVX2__
         const float localMax = std::max(horizontalMax(localVec), localScalar);
+#else
+        const float localMax = localScalar;
+#endif
         #pragma omp critical
         {
             maxCourant = std::max(maxCourant, localMax);
@@ -328,6 +343,7 @@ void Solver::predictor() {
     float* __restrict uStar = u_star.data();
     float* __restrict vStar = v_star.data();
 
+#ifdef __AVX2__
     const __m256 zero    = _mm256_setzero_ps();
     const __m256 two     = _mm256_set1_ps(2.f);
     const __m256 quarter = _mm256_set1_ps(0.25f);
@@ -337,6 +353,7 @@ void Solver::predictor() {
     const __m256 invDy2Vec = _mm256_set1_ps(invDy2);
     const __m256 dtConvVec = _mm256_set1_ps(dtConv);
     const __m256 dtNuVec   = _mm256_set1_ps(dtNu);
+#endif
 
     #pragma omp parallel for schedule(static)
     for (int j = 1; j < ny - 1; ++j) {
@@ -349,6 +366,7 @@ void Solver::predictor() {
         const float* __restrict uMask = uFluidMaskF.data() + rowU;
         float* __restrict uStarRow = uStar + rowU;
         int i = 1;
+#ifdef __AVX2__
         for (; i + 8 <= nx; i += 8) {
             const __m256 uij =
                 _mm256_loadu_ps(uRow + i);
@@ -416,6 +434,7 @@ void Solver::predictor() {
                 uStarRow + i,
                 _mm256_mul_ps(res, _mm256_loadu_ps(uMask + i)));
         }
+#endif
         for (; i < nx; ++i) {
             const float u_ij = uRow[i];
             const float v_n = 0.25f * (
@@ -511,6 +530,7 @@ void Solver::predictor() {
         const float* __restrict vMask = vFluidMaskF.data() + rowV;
         float* __restrict vStarRow = vStar + rowV;
         int i = 1;
+#ifdef __AVX2__
         for (; i + 8 <= nx - 1; i += 8) {
             const __m256 vij =
                 _mm256_loadu_ps(vRow + i);
@@ -576,6 +596,7 @@ void Solver::predictor() {
                 vStarRow + i,
                 _mm256_mul_ps(res, _mm256_loadu_ps(vMask + i)));
         }
+#endif
         for (; i < nx - 1; ++i) {
             const float v_ij = vRow[i];
             const float u_e = 0.25f * (
@@ -666,9 +687,11 @@ void Solver::predictor() {
 void Solver::solvePoisson() {
     const int nx = cfg.nx, ny = cfg.ny;
     const float invDt = 1.f / dt;
+#ifdef __AVX2__
     const __m256 invDxVec = _mm256_set1_ps(invDx);
     const __m256 invDyVec = _mm256_set1_ps(invDy);
     const __m256 invDtVec = _mm256_set1_ps(invDt);
+#endif
     const float* __restrict uStar = u_star.data();
     const float* __restrict vStar = v_star.data();
     float* __restrict rhsPtr = rhs.data();
@@ -681,8 +704,10 @@ void Solver::solvePoisson() {
         const int rowU = j * (nx + 1);
         const int rowV = j * nx;
         const int rowVTop = (j + 1) * nx;
-        __m256 sqAcc = _mm256_setzero_ps();
+        float rowSum = 0.0f;
         int i = 0;
+#ifdef __AVX2__
+        __m256 sqAcc = _mm256_setzero_ps();
         for (; i + 8 <= nx; i += 8){
             const __m256 uR =
                 _mm256_loadu_ps(uStar + rowU + i + 1);
@@ -704,7 +729,8 @@ void Solver::solvePoisson() {
             _mm256_storeu_ps(rhsPtr + rowP + i, val);
             sqAcc = _mm256_add_ps(sqAcc, _mm256_mul_ps(val, val));
         }
-        float rowSum = horizontalSum(sqAcc);
+        rowSum = horizontalSum(sqAcc);
+#endif
         for (; i < nx; ++i){
             const float div =
                 (uStar[rowU + i + 1] - uStar[rowU + i]) * invDx +
@@ -732,9 +758,11 @@ void Solver::solvePoisson() {
 
 void Solver::corrector() {
     const int nx = cfg.nx, ny = cfg.ny;
+#ifdef __AVX2__
     const __m256 invDxVec = _mm256_set1_ps(invDx);
     const __m256 invDyVec = _mm256_set1_ps(invDy);
     const __m256 dtVec    = _mm256_set1_ps(dt);
+#endif
     const float* __restrict pPtr = p.data();
     const float* __restrict uStar = u_star.data();
     const float* __restrict vStar = v_star.data();
@@ -746,6 +774,7 @@ void Solver::corrector() {
         const int rowP = j * nx;
         const int rowU = j * (nx + 1);
         int i = 1;
+#ifdef __AVX2__
         for (; i + 8 <= nx; i += 8){
             const __m256 pRight =
                 _mm256_loadu_ps(pPtr + rowP + i);
@@ -767,6 +796,7 @@ void Solver::corrector() {
                     res,
                     _mm256_loadu_ps(uFluidMaskF.data() + rowU + i)));
         }
+#endif
         for (; i < nx; ++i){
             const float res =
                 uStar[rowU + i]
@@ -782,6 +812,7 @@ void Solver::corrector() {
         const int rowPBot = (j - 1) * nx;
         const int rowV = j * nx;
         int i = 0;
+#ifdef __AVX2__
         for (; i + 8 <= nx; i += 8){
             const __m256 pTop =
                 _mm256_loadu_ps(pPtr + rowP + i);
@@ -803,6 +834,7 @@ void Solver::corrector() {
                     res,
                     _mm256_loadu_ps(vFluidMaskF.data() + rowV + i)));
         }
+#endif
         for (; i < nx; ++i){
             const float res =
                 vStar[rowV + i]

@@ -1,4 +1,5 @@
 #include "Mesh.hpp"
+#include "AppPaths.hpp"
 #include "Restart.hpp"   // narrowToPath / pathToConsole, the Windows path encoding fix
 #include <stl_reader/stl_reader.h>
 #include <tiny_obj_loader.h>
@@ -39,6 +40,15 @@ std::filesystem::path resolveGeometryPath(const std::string& filename) {
     const std::filesystem::path requested = narrowToPath(filename);
     if (pathExists(requested)) {
         return requested;
+    }
+
+    // Beside the executable first: that is where an installed copy keeps its
+    // models, and CFD_MODELS_DIR is baked in at compile time and points at the
+    // machine the binary was built on, which is not the machine running it.
+    const std::filesystem::path installed =
+        executableDir() / "models" / requested;
+    if (pathExists(installed)) {
+        return installed;
     }
 
     const std::filesystem::path modelPath =

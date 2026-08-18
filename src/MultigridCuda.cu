@@ -287,6 +287,18 @@ __global__ void computeNormKernel(
 // that dominated the GPU path completely. Here the whole hierarchy is allocated
 // once when the geometry is set and released in the destructor. MUCH better.
 
+bool Multigrid::cudaDeviceAvailable() {
+    int count = 0;
+    const cudaError_t status = cudaGetDeviceCount(&count);
+    if (status != cudaSuccess || count < 1) {
+        // A failed query latches the error, and the next unrelated CUDA call
+        // would be the one to report it
+        cudaGetLastError();
+        return false;
+    }
+    return true;
+}
+
 void Multigrid::freeDevice() {
     for (DeviceLevel& d : deviceLevels) {
         if (d.pressureAlloc) cudaFree(d.pressureAlloc);
