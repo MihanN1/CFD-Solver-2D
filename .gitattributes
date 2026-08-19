@@ -1,0 +1,20 @@
+# A shell script checked out with CRLF does not run at all - bash reports
+# "bad interpreter: /usr/bin/env bash^M" and stops before anything else can
+# explain why. This repository is edited on Windows and built on Linux and
+# macOS, so the line endings are pinned per file type rather than left to
+# whatever core.autocrlf happens to be set to.
+*.sh      text eol=lf
+*.bash    text eol=lf
+*.cmake   text eol=lf
+
+*.ps1     text eol=crlf
+*.iss     text eol=crlf
+*.bat     text eol=crlf
+*.cmd     text eol=crlf
+
+*.png     binary
+*.ico     binary
+*.bmp     binary
+*.zip     binary
+*.vtk     binary
+*.stl     binary
