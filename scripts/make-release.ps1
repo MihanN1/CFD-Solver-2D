@@ -28,7 +28,7 @@
 [CmdletBinding()]
 param(
     [string] $Version   = "0.1",
-    [string] $Generator = "Visual Studio 18 2026",
+    [string] $Generator = "Visual Studio 17 2022",
     [string] $CudaArchs = "",       # empty = decide from the installed toolkit
     [switch] $WithInstallers,       # off until the UI folders exist
     [switch] $Skip32,
