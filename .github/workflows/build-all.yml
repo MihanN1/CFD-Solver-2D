@@ -90,7 +90,7 @@ jobs:
       - name: CUDA toolkit
         uses: Jimver/cuda-toolkit@v0.2.35
         with:
-          cuda: "12.6.3"
+          cuda: "13.2.0"
           method: network
           sub-packages: '["nvcc", "cudart", "visual_studio_integration", "thrust"]'
 
