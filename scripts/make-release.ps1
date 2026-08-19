@@ -1,16 +1,18 @@
 <#
     Builds the release rows this machine can produce, then packs them.
 
-    The matrix is deliberately small. CUDA disables itself at runtime when no
-    NVIDIA device is present, so one CUDA build serves everybody and there is
-    no reason to ship a separate non-CUDA one; OpenMP costs nothing and is
-    always on. AVX2 is the only axis that has to be split, because a binary
-    cannot decide at runtime whether it may execute an AVX2 instruction - it
-    just dies. "plain" is the fallback for whatever the other two cannot run
-    on: no CUDA, no OpenMP, no AVX2, and on Windows no vcomp140.dll beside it.
+    The whole matrix gets built. The installer lets the user turn each of the
+    three switches on or off on its own, and it can only offer what is
+    actually in dist\, so both sides of all three are built. AVX2 has to be
+    split in any case: a binary cannot decide at runtime whether it may
+    execute an AVX2 instruction, it just dies.
 
-        windows-x64    avx2-omp-cuda, omp-cuda, plain
-        windows-x86    avx2-omp, omp            (no 32-bit CUDA exists)
+        windows-x64    AVX2 {on,off} x OpenMP {on,off} x CUDA {on,off} = 8
+        windows-x86    AVX2 {on,off} x OpenMP {on,off}                 = 4
+
+    There is no 32-bit CUDA and has not been since CUDA 9. "plain" - no AVX2,
+    no OpenMP, no CUDA - is the row that runs on anything, and the only one
+    with no vcomp140.dll beside it.
 
         pwsh -File scripts\make-release.ps1 -Version 0.1
         pwsh -File scripts\make-release.ps1 -Version 0.1 -WithInstallers
@@ -93,14 +95,17 @@ function Find-Iscc {
     return $null
 }
 
-# ------------------------------------------------------------ the 5 rows ---
-$Rows = @(
-    @{ Arch = "x64";   Avx2 = $true;  OpenMp = $true;  Cuda = $true  }
-    @{ Arch = "x64";   Avx2 = $false; OpenMp = $true;  Cuda = $true  }
-    @{ Arch = "x64";   Avx2 = $false; OpenMp = $false; Cuda = $false }
-    @{ Arch = "Win32"; Avx2 = $true;  OpenMp = $true;  Cuda = $false }
-    @{ Arch = "Win32"; Avx2 = $false; OpenMp = $true;  Cuda = $false }
-)
+# ----------------------------------------------------------- the 12 rows ---
+$Rows = @()
+foreach ($avx2 in $true, $false) {
+    foreach ($omp in $true, $false) {
+        foreach ($cuda in $true, $false) {
+            $Rows += @{ Arch = "x64"; Avx2 = $avx2; OpenMp = $omp; Cuda = $cuda }
+        }
+        # No 32-bit CUDA exists, so that axis is not in the 32-bit rows.
+        $Rows += @{ Arch = "Win32"; Avx2 = $avx2; OpenMp = $omp; Cuda = $false }
+    }
+}
 
 function Build-Row($Row, $Archs) {
     $tags = @()
@@ -120,9 +125,10 @@ function Build-Row($Row, $Archs) {
               "-DCFD_ENABLE_AVX2=$(if($Row.Avx2){'ON'}else{'OFF'})",
               "-DCFD_ENABLE_OPENMP=$(if($Row.OpenMp){'ON'}else{'OFF'})",
               "-DCFD_ENABLE_CUDA=$(if($Row.Cuda){'ON'}else{'OFF'})")
-    # Without this a missing toolkit quietly produces a CPU-only binary that
-    # would then be published under a name promising CUDA.
-    if ($Row.Cuda) { $cmakeArgs += @("-DCFD_ENABLE_CUDA_EXPLICIT=ON", "-DCFD_CUDA_ARCHITECTURES=$Archs") }
+    # Without these a missing toolkit or runtime quietly produces a binary that
+    # would then be published under a name promising the feature it lacks.
+    if ($Row.Cuda)   { $cmakeArgs += @("-DCFD_ENABLE_CUDA_EXPLICIT=ON", "-DCFD_CUDA_ARCHITECTURES=$Archs") }
+    if ($Row.OpenMp) { $cmakeArgs += "-DCFD_ENABLE_OPENMP_EXPLICIT=ON" }
 
     # The whole log goes to a file and the tail goes to the screen. Hiding a
     # compiler error behind a -Verbose nobody passes is not a summary, it is a
@@ -178,13 +184,14 @@ function Build-All {
     $haveNvcc = [bool](Get-Command nvcc -ErrorAction SilentlyContinue)
     $archs = Resolve-CudaArchs
 
+    if (-not $haveNvcc) {
+        Write-Host "  (the four CUDA rows are skipped: nvcc is not on PATH)" -ForegroundColor Yellow
+        $problems.Add("the four CUDA rows were skipped - nvcc is not on PATH, install the CUDA Toolkit with Visual Studio Integration")
+    }
+
     foreach ($row in $Rows) {
         if ($row.Arch -eq "Win32" -and $Skip32) { continue }
-        if ($row.Cuda -and -not $haveNvcc) {
-            Write-Host "  (CUDA row skipped: nvcc is not on PATH)" -ForegroundColor Yellow
-            $problems.Add("a CUDA row was skipped - nvcc is not on PATH, install the CUDA Toolkit with Visual Studio Integration")
-            continue
-        }
+        if ($row.Cuda -and -not $haveNvcc) { continue }
         Build-Row $row $archs
     }
 }
@@ -217,13 +224,24 @@ function Package {
     Remove-Item $rel -Recurse -Force -ErrorAction SilentlyContinue
     New-Item -ItemType Directory -Force -Path $rel | Out-Null
 
-    Get-ChildItem $dist -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like "Fluid Solver $Version *" } |
+    # Both shapes, not just folders: a Windows row is a directory because of the
+    # DLL beside the exe, while a Linux or macOS row dropped in from the other
+    # script is a single file. Filtering on -Directory is why those used to
+    # vanish from the release without a word.
+    Get-ChildItem $dist -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -like "Fluid Solver $Version *" -and
+            $_.Name -notlike "*setup.exe" -and $_.Extension -notin ".zip", ".pkg", ".run"
+        } |
         ForEach-Object {
             $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid())
             $inner = Join-Path $stage $_.Name
             New-Item -ItemType Directory -Force -Path $inner | Out-Null
-            Copy-Item "$($_.FullName)\*" $inner -Recurse -Force
+            if ($_.PSIsContainer) {
+                Copy-Item "$($_.FullName)\*" $inner -Recurse -Force
+            } else {
+                Copy-Item $_.FullName (Join-Path $inner "Fluid Solver") -Force
+            }
             foreach ($f in "README.md", "LICENSE") {
                 if (Test-Path (Join-Path $repo $f)) { Copy-Item (Join-Path $repo $f) $inner }
             }
@@ -242,7 +260,11 @@ function Package {
     $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid())
     $srcDir = Join-Path $stage "Fluid-Solver-Source-Code"
     New-Item -ItemType Directory -Force -Path $srcDir | Out-Null
-    $skip = @(".git", ".github", ".vs", ".vscode", "out", "dist", "release", "_to_delete")
+    # .toolchain holds a Linux virtualenv when the build ran through WSL or a
+    # container. Its symlinks are unreadable from Windows and Compress-Archive
+    # stops the whole run on the first one, so it never belongs in here.
+    $skip = @(".git", ".github", ".vs", ".vscode", "out", "dist", "release",
+              "_to_delete", ".toolchain", "logs")
     Get-ChildItem $repo -Force | Where-Object {
         $_.Name -notin $skip -and $_.Name -notlike "build*" -and $_.Name -notlike "bt-*"
     } | ForEach-Object { Copy-Item $_.FullName $srcDir -Recurse -Force -ErrorAction SilentlyContinue }
@@ -273,7 +295,7 @@ if (Test-Path $rel) {
 }
 if (-not $WithInstallers -and $Only -eq "All") {
     Write-Host ""
-    Write-Host "Installers were not built. Add -WithInstallers once the UI folder is in dist\." -ForegroundColor DarkGray
+    Write-Host "Installers were not built. Add -WithInstallers for those; the UI becomes a component of them once dist\ui-windows-<arch> exists." -ForegroundColor DarkGray
 }
 if ($problems.Count) {
     Write-Host ""

@@ -5,15 +5,70 @@ an arbitrary profile — a cylinder, an airfoil, a valve, a turbine blade — wr
 binary VTK frames you open in ParaView.
 
 Chorin projection on a staggered MAC grid, geometric multigrid pressure solve,
-immersed-boundary solid mask. Single executable, no runtime dependencies, no
-installer required if you don't want one.
+immersed-boundary solid mask. One executable per build, nothing to install if you
+don't want to.
+
+---
+
+## What is in this drop
+
+Built on Windows, so this drop carries the Windows files only. The Linux and
+macOS rows come off the same source with `scripts/make-release.sh` run on those
+systems; they are not here yet. `SHA256SUMS.txt` lists exactly what shipped —
+if a file is named below but missing from that list, it was not built.
+
+The desktop UI is not in this release either. It is a separate program, still in
+development, and it arrives with the installers.
 
 ---
 
 ## Which file do I download?
 
-**If you want it installed with shortcuts:** take the setup for your system and
-let it pick the build for you.
+Take the `.zip` that matches your system and the features you want. Unzip it
+anywhere and run it — `output/` sits next to the executable and the frames go
+there.
+
+Feature suffixes, fastest first:
+
+| Suffix | Needs | What it buys |
+|---|---|---|
+| `avx2-omp-cuda` | AVX2 CPU + NVIDIA GPU | everything on |
+| `avx2-omp` | AVX2 CPU (Intel/AMD from ~2013) | vector kernels and all your cores |
+| `avx2-cuda` | AVX2 CPU + NVIDIA GPU | vector kernels, one thread, GPU pressure solve |
+| `avx2` | AVX2 CPU | vector kernels, one thread |
+| `omp-cuda` | NVIDIA GPU | all your cores, GPU pressure solve, scalar kernels |
+| `omp` | any x86 CPU | all your cores, scalar kernels |
+| `cuda` | NVIDIA GPU | GPU pressure solve only |
+| `plain` | any CPU | runs anywhere, slowest |
+
+32-bit has no CUDA rows — there has been no 32-bit CUDA since CUDA 9.
+
+**Not sure? Take `avx2-omp`.** Any CPU newer than about 2013 has AVX2, and every
+build produces the same numbers — they differ only in speed.
+
+A CUDA build on a machine with no NVIDIA card does not fail: it says so and runs
+the pressure solve on the CPU.
+
+**Two things that are not "one file with no dependencies":**
+
+- the Windows OpenMP builds carry `vcomp140.dll` beside the executable, because
+  MSVC has no static OpenMP runtime. It is in the zip; keep it next to the exe.
+- the Linux CUDA builds link `libcudart` statically but still need the NVIDIA
+  driver's `libcuda.so.1`, and stay dynamically linked against glibc, because
+  `libcudart_static` needs `dlopen`. `plain` is the only fully static Linux row.
+
+Also in this release:
+
+- `Fluid-Solver-Source-Code.zip` — the full source this release was built from
+- `README.md` — the documentation for exactly this version
+- `SHA256SUMS.txt` — checksums for everything above
+
+### The installers
+
+Once the UI is finished, each platform gets an installer that carries every
+build for its architecture and lets you switch AVX2, OpenMP and CUDA on or off
+individually, pick whether to install the UI, and pick whether to make
+shortcuts:
 
 | Your system | File |
 |---|---|
@@ -24,36 +79,8 @@ let it pick the build for you.
 | macOS Apple Silicon | `Fluid Solver 0.1 macos-arm64.pkg` |
 | macOS Intel | `Fluid Solver 0.1 macos-x64.pkg` |
 
-The installer detects your CPU and GPU, recommends the right build, and lets you
-override it. It also asks whether to install the desktop UI and whether to make
-shortcuts.
-
-**If you just want the executable:** take the `.zip` that matches your system and
-the features you want. Unzip it anywhere and run it — `output/` appears next to
-the executable and the frames go there.
-
-Feature suffixes, fastest first:
-
-| Suffix | Needs | What it buys |
-|---|---|---|
-| `avx2-omp-cuda` | AVX2 CPU + NVIDIA GPU | everything on |
-| `avx2-omp` | AVX2 CPU (Intel/AMD from ~2013) | vector kernels and all your cores |
-| `avx2` | AVX2 CPU | vector kernels, one thread |
-| `omp` | any x86 CPU | all your cores, scalar kernels |
-| `plain` | any CPU | runs anywhere, slowest |
-| `…-cuda` | NVIDIA GPU + driver | the pressure solve runs on the GPU |
-
-**Not sure? Take `avx2-omp`.** Any CPU newer than about 2013 has AVX2, and every
-build produces the same numbers — they differ only in speed.
-
-A CUDA build on a machine with no NVIDIA card does not fail: it says so and runs
-the pressure solve on the CPU.
-
-Also in this release:
-
-- `Fluid-Solver-Source-Code.zip` — the full source this release was built from
-- `README.md` — the documentation for exactly this version
-- `SHA256SUMS.txt` — checksums for everything above
+They detect your CPU and GPU and preselect the right build. None of them are in
+this drop.
 
 ---
 
@@ -117,10 +144,8 @@ build time; CUDA is also switchable at runtime with `useCuda=0`.
 **Output.** Binary legacy VTK: pressure in Pascals, velocity vectors, solid mask.
 20 bytes per cell, written straight to the stream with no temporary arrays.
 
-**Interfaces.** Interactive console with a confirm-and-edit loop; a
-non-interactive `key=value` command line for sweeps and scripting; and a separate
-SFML desktop UI (Windows) that configures runs, launches the solver and renders
-the frames.
+**Interfaces.** Interactive console with a confirm-and-edit loop, and a
+non-interactive `key=value` command line for sweeps and scripting.
 
 ---
 
@@ -140,11 +165,13 @@ Worth knowing before you file an issue about them.
   confirmation screen, though it works on the command line.
 - **No restart.** A stopped run starts over. This is the headline feature of the
   next release.
+- **No desktop UI and no installers yet.** Both land in a later drop.
 - Upwind convection is first-order, so a coarse grid is more viscous than you
   asked for. The README explains how to tell and what to do.
 
-Windows will show a SmartScreen warning on first run — the installer is not code
-signed. macOS packages are not notarised, so right-click → Open the first time.
+Windows will show a SmartScreen warning on first run — nothing here is code
+signed. macOS packages will not be notarised either, so right-click → Open the
+first time.
 
 ---
 
@@ -169,13 +196,25 @@ cmake --build build -j
 Three switches, all on by default, all safe to turn off in any combination:
 `-DCFD_ENABLE_AVX2=OFF`, `-DCFD_ENABLE_OPENMP=OFF`, `-DCFD_ENABLE_CUDA=OFF`.
 CUDA is dropped automatically when no toolkit is found. `CFD_STATIC=ON`, the
-default, links the runtime in so the result is one file.
+default, links what can be linked in — see the two exceptions above.
 
 C++17 and CMake 3.28 are the only requirements. `tiny_obj_loader` and
 `stl_reader` are vendored.
 
-`scripts/build-linux.sh` and `scripts/build-windows.ps1` build every variant for
-their platform in one go.
+The whole release matrix, zipped and checksummed, comes from one command:
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\make-release.ps1 -Version 0.1
+bash scripts/make-release.sh 0.1
+```
+
+The Linux and macOS one checks the toolchain first and installs what is missing
+(apt and Homebrew), so a bare machine needs nothing prepared. One Mac builds both
+macOS architectures — the second is a cross build and pulls its libomp as a
+Homebrew bottle. Rows the machine cannot produce — no CUDA toolkit, no 32-bit
+multilib — are reported and skipped, not failed. `--docker` builds the Linux rows
+in an old-glibc container so they also run on distributions older than the one
+that built them; `--with-installers` adds the `.run` and `.pkg`.
 
 ---
 

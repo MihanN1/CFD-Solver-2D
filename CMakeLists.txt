@@ -13,6 +13,17 @@ option(CFD_ENABLE_OPENMP "Enable OpenMP parallel loops when available" ON)
 option(CFD_ENABLE_AVX2 "Compile CPU C++ sources with AVX2 support" ON)
 option(CFD_ENABLE_CUDA "Enable the CUDA multigrid backend" ON)
 option(CFD_ENABLE_CUDA_EXPLICIT "Treat a missing CUDA toolkit as a hard error" OFF)
+option(CFD_ENABLE_OPENMP_EXPLICIT "Treat a missing OpenMP runtime as a hard error" OFF)
+
+# AppleClang carries no OpenMP runtime of its own, so libomp has to be pointed
+# at: Homebrew's prefix for a native build, an unpacked bottle for the other
+# architecture when one Mac builds both. The prefix must hold include/omp.h and
+# lib/libomp.a or lib/libomp.dylib. Empty means "let find_package look", which
+# on macOS finds nothing and produces an OpenMP-less binary under an OpenMP
+# name, so the release script never leaves it empty for an OpenMP row.
+set(CFD_OPENMP_ROOT "" CACHE PATH
+    "Prefix of the libomp to build against (macOS)"
+)
 
 set(CFD_APP_NAME "Fluid Solver" CACHE STRING
     "File name of the produced executable, without the extension"
@@ -266,7 +277,7 @@ if(CFD_ENABLE_OPENMP)
     # target comes out static without anything downstream noticing.
     if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
         execute_process(
-            COMMAND "${CMAKE_CXX_COMPILER}" -print-file-name=libgomp.a
+            COMMAND "${CMAKE_CXX_COMPILER}" ${CMAKE_CXX_FLAGS} -print-file-name=libgomp.a
             OUTPUT_VARIABLE CFD_LIBGOMP_A
             OUTPUT_STRIP_TRAILING_WHITESPACE
             ERROR_QUIET
@@ -279,11 +290,38 @@ if(CFD_ENABLE_OPENMP)
         endif()
     endif()
 
+    # Same idea on macOS, one level further down: there is no OpenMP in the
+    # compiler at all, so the flags, the library name and the library itself are
+    # all supplied here and find_package only verifies them. The static archive
+    # wins when it is there, or the binary stops working the moment the machine
+    # running it has no Homebrew.
+    if(APPLE AND CFD_OPENMP_ROOT AND EXISTS "${CFD_OPENMP_ROOT}/include/omp.h")
+        if(CFD_STATIC AND EXISTS "${CFD_OPENMP_ROOT}/lib/libomp.a")
+            set(OpenMP_omp_LIBRARY "${CFD_OPENMP_ROOT}/lib/libomp.a")
+        elseif(EXISTS "${CFD_OPENMP_ROOT}/lib/libomp.dylib")
+            set(OpenMP_omp_LIBRARY "${CFD_OPENMP_ROOT}/lib/libomp.dylib")
+        endif()
+        if(OpenMP_omp_LIBRARY)
+            set(OpenMP_CXX_FLAGS "-Xclang -fopenmp -I${CFD_OPENMP_ROOT}/include")
+            set(OpenMP_CXX_LIB_NAMES "omp")
+            message(STATUS "OpenMP: ${OpenMP_omp_LIBRARY}")
+        endif()
+    endif()
+
     find_package(OpenMP QUIET COMPONENTS CXX)
     if(OpenMP_CXX_FOUND)
         target_link_libraries(cfd_app PRIVATE OpenMP::OpenMP_CXX)
         message(STATUS "OpenMP: enabled")
     else()
+        # Same reason as the CUDA one: silently dropping OpenMP here would
+        # publish a binary named for a feature it does not have.
+        if(CFD_ENABLE_OPENMP_EXPLICIT)
+            message(FATAL_ERROR
+                "OpenMP was requested with CFD_ENABLE_OPENMP_EXPLICIT=ON but no "
+                "runtime was found. On macOS install libomp (brew install libomp) "
+                "and pass -DCFD_OPENMP_ROOT= the prefix brew --prefix libomp prints."
+            )
+        endif()
         message(STATUS "OpenMP: not found; building without OpenMP")
     endif()
 endif()
@@ -300,6 +338,10 @@ if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     else()
         target_link_options(cfd_app PRIVATE
             -static -static-libgcc -static-libstdc++)
+        if(CFD_ENABLE_OPENMP)
+            target_link_options(cfd_app PRIVATE
+                -Wl,--whole-archive -lpthread -ldl -Wl,--no-whole-archive)
+        endif()
     endif()
 endif()
 
