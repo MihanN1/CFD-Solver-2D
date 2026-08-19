@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.28)
 
-project(CFD_Solver_2D
+project(CFD-Solver-2D
     VERSION 0.1.2
     LANGUAGES CXX
 )
