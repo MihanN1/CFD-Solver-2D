@@ -128,6 +128,19 @@ function Build-Row($Row, $Archs) {
     # Without these a missing toolkit or runtime quietly produces a binary that
     # would then be published under a name promising the feature it lacks.
     if ($Row.Cuda)   { $cmakeArgs += @("-DCFD_ENABLE_CUDA_EXPLICIT=ON", "-DCFD_CUDA_ARCHITECTURES=$Archs") }
+    if ($Row.Cuda) {
+        $nvccPath = & where nvcc 2>$null | Select-Object -First 1
+        if (-not $nvccPath) {
+            # Пробуем по CUDA_PATH
+            $nvccPath = Get-ChildItem "$env:CUDA_PATH\bin\nvcc.exe" -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+        }
+        if ($nvccPath) {
+            $cmakeArgs += "-DCMAKE_CUDA_COMPILER=`"$nvccPath`""
+            Write-Host "      using nvcc: $nvccPath" -ForegroundColor DarkGray
+        } else {
+            Write-Host "      nvcc not found, this row will fail" -ForegroundColor Yellow
+        }
+    }
     if ($Row.OpenMp) { $cmakeArgs += "-DCFD_ENABLE_OPENMP_EXPLICIT=ON" }
 
     # The whole log goes to a file and the tail goes to the screen. Hiding a
