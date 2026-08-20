@@ -1,0 +1,225 @@
+# Builds only the installers, out of a release that already exists. Nothing is
+# compiled here: the zips that "Build every binary" published are unpacked back
+# into dist/ and handed to the three installer builders.
+#
+#   Actions -> Build the installers -> Run workflow -> version, e.g. 0.1
+#
+# By default it pulls the assets of the tag v<version>. Point it at a run of
+# "Build every binary" instead by filling in run_id, which is what you want
+# when the release has not been cut yet.
+#
+# What comes out:
+#   Fluid Solver <ver> windows-x64 setup.exe
+#   Fluid Solver <ver> windows-x86 setup.exe
+#   Fluid-Solver-<ver>-linux-x64.run
+#   Fluid-Solver-<ver>-linux-x86.run
+#   Fluid Solver <ver> macos-arm64.pkg
+#   Fluid Solver <ver> macos-x64.pkg
+#
+# One macOS runner produces both .pkg files: pkgbuild and productbuild only
+# repackage binaries that are already built, so the host architecture does not
+# come into it. The Windows and Linux installers do need their own runners -
+# iscc is a Windows program and makeself wants a Linux shell.
+
+name: Build the installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version whose release the installers are built from
+        default: "0.1"
+        required: true
+      run_id:
+        description: >
+          Optional. Run id of "Build every binary" to take the zips from.
+          Leave empty to use the release of tag v<version>.
+        required: false
+        default: ""
+      attach:
+        description: Upload the finished installers to the tag's release
+        type: boolean
+        default: false
+
+jobs:
+  # Downloaded once, here, rather than four times with four sets of
+  # credentials. Everything below just pulls this artifact.
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: From the release of tag v${{ inputs.version }}
+        if: inputs.run_id == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          V: ${{ inputs.version }}
+        run: |
+          mkdir -p zips
+          gh release download "v$V" --dir zips --pattern '*.zip'
+          ls -1 zips
+
+      - name: From run ${{ inputs.run_id }} of "Build every binary"
+        if: inputs.run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: zips-raw
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # That artifact is release/<version>/, so the zips sit one level down.
+      - name: Flatten
+        if: inputs.run_id != ''
+        run: |
+          mkdir -p zips
+          find zips-raw -name '*.zip' -exec cp {} zips/ \;
+          ls -1 zips
+
+      - name: Refuse to go on with nothing
+        run: |
+          count=$(ls -1 zips/*.zip 2>/dev/null | wc -l)
+          echo "$count zip(s)"
+          [ "$count" -gt 1 ] || { echo "::error::no release zips were found"; exit 1; }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-zips
+          path: zips/
+          if-no-files-found: error
+
+  windows:
+    needs: fetch
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: release-zips, path: zips }
+
+      - name: Rebuild dist\ from the zips
+        shell: bash
+        run: |
+          python scripts/unpack-release.py "${{ inputs.version }}" zips dist --platform windows
+
+      - name: Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # Deliberately not scripts\make-release.ps1 -Only Installers: that one
+      # collects failures into a summary and still exits 0, which is exactly
+      # what a CI job must not do.
+      - name: Compile both installers
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            foreach ($p in @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+                             "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")) {
+              if (Test-Path $p) { $iscc = $p; break }
+            }
+          }
+          if (-not $iscc) { throw "Inno Setup was installed but ISCC.exe was not found" }
+          $dist = (Resolve-Path dist).Path
+          $built = 0
+          foreach ($arch in "x64", "x86") {
+            $any = Get-ChildItem dist -Directory |
+                   Where-Object { $_.Name -like "Fluid Solver ${{ inputs.version }} windows-$arch *" -and
+                                  $_.Name -notlike "*-ui" }
+            if (-not $any) { Write-Host "windows-$arch : nothing to package - skipped"; continue }
+            Write-Host "windows-$arch : $($any.Count) variant(s)"
+            & $iscc "/DAppVersion=${{ inputs.version }}" "/DArch=$arch" "/DDistDir=$dist" `
+                    installer\windows\fluid-solver.iss
+            if ($LASTEXITCODE -ne 0) { throw "iscc failed for windows-$arch" }
+            $built++
+          }
+          if ($built -eq 0) { throw "no windows rows in the release, nothing was built" }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-windows
+          path: dist/*setup.exe
+          if-no-files-found: error
+
+  linux:
+    needs: fetch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: release-zips, path: zips }
+
+      - name: Rebuild dist/ from the zips
+        run: |
+          python3 scripts/unpack-release.py "${{ inputs.version }}" zips dist --platform linux
+
+      - name: makeself
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq makeself
+
+      - name: Build both .run installers
+        run: bash scripts/make-release.sh "${{ inputs.version }}" --only=installers
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-linux
+          path: dist/*.run
+          if-no-files-found: error
+
+  macos:
+    needs: fetch
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: release-zips, path: zips }
+
+      - name: Rebuild dist/ from the zips
+        run: |
+          python3 scripts/unpack-release.py "${{ inputs.version }}" zips dist --platform macos
+
+      # Both packages from one Mac: this step only repackages, it never builds.
+      - name: Build both .pkg installers
+        run: |
+          for a in arm64 x64; do
+            ls dist/"Fluid Solver ${{ inputs.version }} macos-$a "* >/dev/null 2>&1 || {
+              echo "macos-$a: nothing to package - skipped"; continue; }
+            bash installer/macos/build-pkg.sh "${{ inputs.version }}" "$a"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-macos
+          path: dist/*.pkg
+          if-no-files-found: error
+
+  collect:
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: installers
+
+      - name: What came back
+        run: ls -1sh installers
+
+      - name: Checksums
+        run: |
+          ( cd installers && sha256sum -- * ) > SHA256SUMS-installers.txt
+          mv SHA256SUMS-installers.txt installers/
+          cat installers/SHA256SUMS-installers.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: installers/
+          if-no-files-found: error
+
+      - name: Attach them to the tag's release
+        if: inputs.attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          V: ${{ inputs.version }}
+        run: gh release upload "v$V" installers/* --clobber

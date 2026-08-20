@@ -7,7 +7,12 @@
 #
 # Interactive:   ./Fluid-Solver-<ver>-linux-<arch>.run
 # Unattended:    ./Fluid-Solver-<ver>-linux-<arch>.run -- --avx2 --openmp --cuda \
-#                    --ui --prefix=/opt/fluid-solver --shortcut --yes
+#                    --ui --prefix=/opt/fluid-solver --menu --desktop --taskbar --yes
+#
+# The three shortcut switches are separate because they land in three different
+# places: --menu writes the .desktop entry the application menu reads, --desktop
+# drops a copy on the desktop itself, and --taskbar adds it to the dock's
+# favourites. --shortcut is kept as an alias for --menu.
 
 set -uo pipefail
 
@@ -20,7 +25,9 @@ WANT_AVX2=""
 WANT_OMP=""
 WANT_CUDA=""
 WANT_UI=""
-SHORTCUT=""
+WANT_MENU=""
+WANT_DESKTOP=""
+WANT_TASKBAR=""
 ASSUME_YES=0
 
 for arg in "$@"; do
@@ -34,15 +41,36 @@ for arg in "$@"; do
         --no-cuda)   WANT_CUDA=0 ;;
         --ui)        WANT_UI=1 ;;
         --no-ui)     WANT_UI=0 ;;
-        --shortcut)  SHORTCUT=1 ;;
-        --no-shortcut) SHORTCUT=0 ;;
+        --menu|--shortcut)       WANT_MENU=1 ;;
+        --no-menu|--no-shortcut) WANT_MENU=0 ;;
+        --desktop)    WANT_DESKTOP=1 ;;
+        --no-desktop) WANT_DESKTOP=0 ;;
+        --taskbar)    WANT_TASKBAR=1 ;;
+        --no-taskbar) WANT_TASKBAR=0 ;;
         --yes|-y)    ASSUME_YES=1 ;;
         --help|-h)
-            sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
+
+# A desktop file and a dock favourite belong to a person, not to a machine, so
+# under sudo they go to whoever ran sudo rather than to root, who has no
+# session to put them in.
+TARGET_USER="${SUDO_USER:-$(id -un)}"
+TARGET_HOME="$(getent passwd "$TARGET_USER" 2>/dev/null | cut -d: -f6)"
+[ -n "$TARGET_HOME" ] || TARGET_HOME="$HOME"
+
+as_target_user() {
+    if [ "$TARGET_USER" != "$(id -un)" ] && command -v sudo >/dev/null 2>&1; then
+        sudo -u "$TARGET_USER" \
+            DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$(id -u "$TARGET_USER")/bus" \
+            "$@"
+    else
+        "$@"
+    fi
+}
 
 # ---- what this machine can actually use -----------------------------------
 HAS_AVX2=0; grep -qm1 '\bavx2\b' /proc/cpuinfo 2>/dev/null && HAS_AVX2=1
@@ -130,14 +158,6 @@ if [ "$ASSUME_YES" != 1 ]; then
     varies 2 && WANT_CUDA=$(ask "Use the CUDA build?"   "$WANT_CUDA")
 fi
 
-# The desktop UI is a separate program and only some platforms have one, so the
-# question exists only when the payload actually carries it.
-if [ ! -d ui ]; then
-    WANT_UI=0
-elif [ -z "$WANT_UI" ]; then
-    WANT_UI=$(ask "Install the desktop UI as well?" 1)
-fi
-
 if [ "$WANT_AVX2" = 1 ] && [ "$HAS_AVX2" = 0 ]; then
     echo "This CPU has no AVX2; that build would die with an illegal instruction." >&2
     exit 1
@@ -163,6 +183,20 @@ fi
 
 SRC="$APP $VERSION linux-$ARCH $FEAT"
 
+# The desktop UI is built per variant, exactly like the solver, and each one
+# lives in ui/<feature>/. So the question comes after the feature is settled:
+# asking earlier would mean offering a UI that may not exist for the build the
+# user is about to get, which is the same lie the feature boxes avoid.
+UI_SRC="ui/$FEAT"
+if [ ! -d "$UI_SRC" ]; then
+    [ "$WANT_UI" = 1 ] && echo "note: this installer carries no UI for the '$FEAT' build."
+    WANT_UI=0
+elif [ -z "$WANT_UI" ] && [ "$ASSUME_YES" != 1 ]; then
+    WANT_UI=$(ask "Install the desktop UI as well?" 1)
+elif [ -z "$WANT_UI" ]; then
+    WANT_UI=1
+fi
+
 # ---- where it goes ---------------------------------------------------------
 # Root installs system-wide; anyone else lands in their own home, which is also
 # what keeps the "output beside the executable" rule working.
@@ -180,16 +214,30 @@ if ! mkdir -p "$PREFIX" 2>/dev/null; then
     exit 1
 fi
 
-install -m 0755 "$SRC" "$PREFIX/Fluid Solver"
+HAVE_UI=0
+if [ "$WANT_UI" = 1 ] && [ -d "$UI_SRC" ]; then
+    # The ui/<feature>/ folder is a complete install: the solver, the UI, the
+    # shared objects and output/ together, because the UI is a shell that starts
+    # the solver and they have to live in one directory. So it goes in INSTEAD
+    # of the bare solver file - copying one over the other would put the same
+    # binary down twice and leave its mode depending on which copy ran last.
+    cp -r "$UI_SRC"/. "$PREFIX/"
+    chmod 0755 "$PREFIX/Fluid Solver" 2>/dev/null
+    [ -f "$PREFIX/Fluid Solver UI" ] && { chmod 0755 "$PREFIX/Fluid Solver UI"; HAVE_UI=1; }
+fi
+[ -f "$PREFIX/Fluid Solver" ] || install -m 0755 "$SRC" "$PREFIX/Fluid Solver"
 mkdir -p "$PREFIX/output" "$PREFIX/models"
 [ -d models ] && cp -r models/. "$PREFIX/models/" 2>/dev/null
 for f in README.md LICENSE; do [ -f "$f" ] && cp "$f" "$PREFIX/"; done
 
-HAVE_UI=0
-if [ "$WANT_UI" = 1 ] && [ -d ui ]; then
-    cp -r ui/. "$PREFIX/" 2>/dev/null
-    [ -f "$PREFIX/Fluid Solver UI" ] && { chmod 0755 "$PREFIX/Fluid Solver UI"; HAVE_UI=1; }
-fi
+# What to take back out later. Recorded now, while it is still known: a UI
+# variant carries its own shared objects and the uninstaller cannot guess their
+# names. output/ and models/ are handled separately and stay out of this list.
+INSTALLED=()
+while IFS= read -r f; do
+    INSTALLED+=("${f#./}")
+done < <(cd "$PREFIX" && find . -maxdepth 1 -type f ! -name uninstall.sh -printf '%P\n' | sort)
+
 
 # ---- launcher, icons, desktop entry ---------------------------------------
 if [ "$(id -u)" = 0 ]; then
@@ -209,23 +257,12 @@ for size in 16 22 24 32 48 64 128 256; do
     fi
 done
 
-[ -z "$SHORTCUT" ] && SHORTCUT=$(ask "Create an application menu entry?" 1)
-if [ "$SHORTCUT" = 1 ]; then
-    cat > "$APPDIR/fluid-solver.desktop" <<EOF
-[Desktop Entry]
-Type=Application
-Name=Fluid Solver
-Comment=2D incompressible Navier-Stokes solver
-Exec="$PREFIX/Fluid Solver"
-Path=$PREFIX
-Icon=fluid-solver
-Terminal=true
-Categories=Science;Physics;Education;
-EOF
-    chmod 0644 "$APPDIR/fluid-solver.desktop"
-    # The UI is a window, so unlike the solver it does not want a terminal.
-    if [ "$HAVE_UI" = 1 ]; then
-        cat > "$APPDIR/fluid-solver-ui.desktop" <<EOF
+# The same entry text is now needed in up to two places - the menu directory
+# and the desktop - so it is written by one function rather than pasted twice.
+# The UI is a window, so unlike the solver it does not want a terminal.
+write_entry() {   # write_entry <path> <solver|ui>
+    if [ "$2" = ui ]; then
+        cat > "$1" <<EOF
 [Desktop Entry]
 Type=Application
 Name=Fluid Solver UI
@@ -236,24 +273,148 @@ Icon=fluid-solver
 Terminal=false
 Categories=Science;Physics;Education;
 EOF
+    else
+        cat > "$1" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Fluid Solver
+Comment=2D incompressible Navier-Stokes solver
+Exec="$PREFIX/Fluid Solver"
+Path=$PREFIX
+Icon=fluid-solver
+Terminal=true
+Categories=Science;Physics;Education;
+EOF
+    fi
+}
+
+# Which program a single shortcut should point at: the UI is the windowed one,
+# so it is what a desktop icon or a taskbar button is for. Without it the
+# console solver takes its place.
+if [ "$HAVE_UI" = 1 ]; then
+    PRIMARY_ENTRY=fluid-solver-ui.desktop
+    PRIMARY_KIND=ui
+    PRIMARY_NAME="Fluid Solver UI"
+else
+    PRIMARY_ENTRY=fluid-solver.desktop
+    PRIMARY_KIND=solver
+    PRIMARY_NAME="Fluid Solver"
+fi
+
+# Three separate questions, because they are three separate places: the
+# application menu, the desktop itself, and the dock's favourites.
+[ -z "$WANT_MENU" ]    && WANT_MENU=$(ask "Create an application menu entry?" 1)
+[ -z "$WANT_DESKTOP" ] && WANT_DESKTOP=$(ask "Put a shortcut on the desktop?" 1)
+[ -z "$WANT_TASKBAR" ] && WANT_TASKBAR=$(ask "Add it to the taskbar (dock favourites)?" 0)
+
+# The desktop entry is what both the menu and the favourites refer to, so it is
+# written whenever either of them was asked for.
+NEED_ENTRY=0
+[ "$WANT_MENU" = 1 ] && NEED_ENTRY=1
+[ "$WANT_TASKBAR" = 1 ] && NEED_ENTRY=1
+
+if [ "$NEED_ENTRY" = 1 ]; then
+    write_entry "$APPDIR/fluid-solver.desktop" solver
+    chmod 0644 "$APPDIR/fluid-solver.desktop"
+    if [ "$HAVE_UI" = 1 ]; then
+        write_entry "$APPDIR/fluid-solver-ui.desktop" ui
         chmod 0644 "$APPDIR/fluid-solver-ui.desktop"
     fi
     command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$APPDIR" 2>/dev/null
     command -v gtk-update-icon-cache  >/dev/null 2>&1 && gtk-update-icon-cache -q "$ICONROOT" 2>/dev/null
 fi
 
+# ---- the desktop itself ----------------------------------------------------
+# A copy of the same entry, owned by the user and marked executable and trusted
+# - without that GNOME shows it as an untrusted text file and refuses to launch
+# it until the user right-clicks "Allow launching".
+DESKTOP_SHORTCUT=""
+if [ "$WANT_DESKTOP" = 1 ]; then
+    DESKTOP_DIR="$(as_target_user xdg-user-dir DESKTOP 2>/dev/null)"
+    [ -d "$DESKTOP_DIR" ] || DESKTOP_DIR="$TARGET_HOME/Desktop"
+    if mkdir -p "$DESKTOP_DIR" 2>/dev/null; then
+        DESKTOP_SHORTCUT="$DESKTOP_DIR/$PRIMARY_ENTRY"
+        write_entry "$DESKTOP_SHORTCUT" "$PRIMARY_KIND"
+        chmod 0755 "$DESKTOP_SHORTCUT"
+        chown "$TARGET_USER" "$DESKTOP_SHORTCUT" 2>/dev/null
+        as_target_user gio set "$DESKTOP_SHORTCUT" metadata::trusted true 2>/dev/null
+    else
+        echo "note: could not write to $DESKTOP_DIR, so no desktop shortcut."
+        WANT_DESKTOP=0
+    fi
+fi
+
+# ---- the taskbar -----------------------------------------------------------
+# There is no cross-desktop way to do this. GNOME keeps its dock in a gsettings
+# list of desktop-file ids, which is scriptable and stable. Plasma keeps its
+# task manager's launchers inside one appletsrc file whose layout changes
+# between releases, so it is left to the user rather than corrupted.
+PINNED=0
+if [ "$WANT_TASKBAR" = 1 ]; then
+    if command -v gsettings >/dev/null 2>&1 &&
+       as_target_user gsettings get org.gnome.shell favorite-apps >/dev/null 2>&1
+    then
+        current="$(as_target_user gsettings get org.gnome.shell favorite-apps 2>/dev/null)"
+        case "$current" in
+            *"'$PRIMARY_ENTRY'"*) PINNED=1 ;;
+            "@as []"|"[]")
+                as_target_user gsettings set org.gnome.shell favorite-apps \
+                    "['$PRIMARY_ENTRY']" 2>/dev/null && PINNED=1 ;;
+            \[*\])
+                as_target_user gsettings set org.gnome.shell favorite-apps \
+                    "${current%]}, '$PRIMARY_ENTRY']" 2>/dev/null && PINNED=1 ;;
+        esac
+    fi
+    if [ "$PINNED" = 0 ]; then
+        echo
+        echo "This desktop does not expose its taskbar to a script, so $PRIMARY_NAME"
+        echo "was not pinned. Open the application menu, right-click it and choose"
+        echo "\"Pin to Dash\" or \"Add to Favourites\" - one click, same result."
+    fi
+fi
+
 # ---- uninstaller -----------------------------------------------------------
 cat > "$PREFIX/uninstall.sh" <<EOF
 #!/usr/bin/env bash
 # Leaves $PREFIX/output alone: those are the user's results, not ours.
-set -e
-rm -f "$BINDIR/fluid-solver" "$BINDIR/fluid-solver-ui"
-rm -f "$APPDIR/fluid-solver.desktop" "$APPDIR/fluid-solver-ui.desktop"
+#
+# Deliberately not "set -e". Almost every line here is allowed to fail - a
+# shortcut the user already deleted, a gsettings schema that is not installed -
+# and stopping at the first one would leave the rest of the install on disk
+# with nothing said about it. Each step cleans up what it can and moves on.
+set -u
+rm -f "$BINDIR/fluid-solver" "$BINDIR/fluid-solver-ui" 2>/dev/null
+rm -f "$APPDIR/fluid-solver.desktop" "$APPDIR/fluid-solver-ui.desktop" 2>/dev/null
+rm -f "$DESKTOP_SHORTCUT" 2>/dev/null
+# Take the dock favourite back out, if it went in and this desktop has one.
+# The "|| true" is load-bearing on any desktop that is not GNOME: gsettings is
+# installed with glib, so it is on PATH, but reading a schema it does not have
+# exits non-zero.
+if command -v gsettings >/dev/null 2>&1; then
+    cur="\$(gsettings get org.gnome.shell favorite-apps 2>/dev/null || true)"
+    case "\$cur" in
+        *"'$PRIMARY_ENTRY'"*)
+            gsettings set org.gnome.shell favorite-apps "\$(printf '%s' "\$cur" |
+                sed -e "s/'$PRIMARY_ENTRY', //" \\
+                    -e "s/, '$PRIMARY_ENTRY'//" \\
+                    -e "s/'$PRIMARY_ENTRY'//")" 2>/dev/null || true ;;
+    esac
+fi
 for s in 16 22 24 32 48 64 128 256; do
-    rm -f "$ICONROOT/\${s}x\${s}/apps/fluid-solver.png"
+    rm -f "$ICONROOT/\${s}x\${s}/apps/fluid-solver.png" 2>/dev/null
 done
-rm -f "$PREFIX/Fluid Solver" "$PREFIX/Fluid Solver UI" "$PREFIX/README.md" "$PREFIX/LICENSE"
-rm -rf "$PREFIX/models"
+rm -rf "$PREFIX/models" 2>/dev/null
+# Everything the install put down, listed at install time. A UI variant brings
+# its own shared objects along and there is no way to guess their names later,
+# so they are recorded rather than pattern-matched - and listing beats "delete
+# the folder", which would be a bad idea for a prefix the user chose.
+while IFS= read -r f; do
+    [ -n "\$f" ] && rm -f "$PREFIX/\$f" 2>/dev/null
+done <<'MANIFEST'
+$(printf '%s\n' "${INSTALLED[@]}")
+MANIFEST
+rm -f "$PREFIX/uninstall.sh" 2>/dev/null
+rmdir "$PREFIX" 2>/dev/null   # only if output/ was empty and the user took it
 echo "Removed. Your results are still in $PREFIX/output"
 EOF
 chmod 0755 "$PREFIX/uninstall.sh"
@@ -261,6 +422,9 @@ chmod 0755 "$PREFIX/uninstall.sh"
 echo
 echo "Installed the $FEAT build to $PREFIX"
 [ "$HAVE_UI" = 1 ] && echo "  the desktop UI went in beside it"
+[ "$WANT_MENU" = 1 ] && echo "  menu entry:    $APPDIR/$PRIMARY_ENTRY"
+[ -n "$DESKTOP_SHORTCUT" ] && echo "  desktop icon:  $DESKTOP_SHORTCUT"
+[ "$PINNED" = 1 ] && echo "  taskbar:       $PRIMARY_NAME added to the favourites"
 echo "  run it with:   fluid-solver          (if $BINDIR is on your PATH)"
 echo "  frames go to:  $PREFIX/output"
 echo "  uninstall:     $PREFIX/uninstall.sh"

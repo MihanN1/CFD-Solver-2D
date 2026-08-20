@@ -505,14 +505,26 @@ build_installer() {
         ls "$DIST"/"Fluid Solver $VERSION linux-$arch "* >/dev/null 2>&1 || {
             printf '  %-52s' "linux-$arch"; say "nothing to package - skipped"; continue; }
         printf '  %-52s' "linux-$arch"
-        local pkg; pkg="$(mktemp -d)"
-        cp "$DIST"/"Fluid Solver $VERSION linux-$arch "* "$pkg/"
+        local pkg row feat; pkg="$(mktemp -d)"
+        # Solver rows only, and only the ones that are single files. A
+        # "<feature>-ui" entry is a folder and belongs in ui/ further down, not
+        # in the payload root, where install.sh scans for variant names - and a
+        # plain cp of it fails with "omitting directory" besides.
+        for row in "$DIST"/"Fluid Solver $VERSION linux-$arch "*; do
+            case "$row" in *-ui) continue ;; esac
+            [ -f "$row" ] && cp "$row" "$pkg/"
+        done
         for f in README.md LICENSE; do [ -f "$REPO/$f" ] && cp "$REPO/$f" "$pkg/"; done
         [ -d "$REPO/models" ] && cp -r "$REPO/models" "$pkg/" 2>/dev/null
         mkdir -p "$pkg/icons"; cp "$REPO"/logo/fluid-solver-*.png "$pkg/icons/" 2>/dev/null
-        # install.sh offers the UI only when this folder made it into the
-        # payload, so a platform without a UI build simply never asks.
-        [ -d "$DIST/ui-linux-$arch" ] && { mkdir -p "$pkg/ui"; cp -r "$DIST/ui-linux-$arch"/. "$pkg/ui/"; }
+        # The UI is built per variant like the solver is, so it goes in as
+        # ui/<feature>/ and install.sh only offers it once the feature is
+        # settled. A platform with no UI build simply never asks.
+        for row in "$DIST"/"Fluid Solver $VERSION linux-$arch "*-ui; do
+            [ -d "$row" ] || continue
+            feat="$(basename "$row")"; feat="${feat##* }"; feat="${feat%-ui}"
+            mkdir -p "$pkg/ui/$feat"; cp -r "$row"/. "$pkg/ui/$feat/"
+        done
         sed -e "s/__VERSION__/$VERSION/" -e "s/__ARCH__/$arch/" \
             "$REPO/installer/linux/install.sh" > "$pkg/install.sh"
         chmod +x "$pkg/install.sh"
