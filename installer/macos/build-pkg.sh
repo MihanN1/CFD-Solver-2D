@@ -59,6 +59,38 @@ fi
 
 echo "Building the $ARCH package for $VERSION"
 
+# ---- the icon ---------------------------------------------------------------
+# A Mach-O executable holds no icon of its own; on macOS the icon belongs to the
+# .app bundle. So one .icns is built here from the PNG set the repo already has,
+# and make_app drops it into every wrapper it creates. Without this the
+# Launchpad entry, the desktop alias and the Dock all show a blank binary.
+ICNS=""
+build_icns() {
+    command -v iconutil >/dev/null 2>&1 || return 1
+    local set="$WORK/FluidSolver.iconset"
+    mkdir -p "$set"
+    # iconutil insists on these exact names; @2x is the same pixel count as the
+    # next size up, which is why each PNG is used twice.
+    local pairs="16:16x16 32:16x16@2x 32:32x32 64:32x32@2x 128:128x128 \
+256:128x128@2x 256:256x256 512:256x256@2x 512:512x512 1024:512x512@2x"
+    local pair source target
+    for pair in $pairs; do
+        source="$REPO/logo/fluid-solver-${pair%%:*}.png"
+        target="$set/icon_${pair##*:}.png"
+        [ -f "$source" ] || return 1
+        cp "$source" "$target"
+    done
+    iconutil -c icns "$set" -o "$WORK/FluidSolver.icns" >/dev/null 2>&1 || return 1
+    ICNS="$WORK/FluidSolver.icns"
+    return 0
+}
+
+if build_icns; then
+    echo "  icon: $(basename "$ICNS")"
+else
+    echo "  icon: could not build an .icns, the wrappers will have none"
+fi
+
 # A plain string rather than an array: macOS still ships bash 3.2, where
 # "set -u" treats an empty array as unset and ${#FOUND[@]} aborts the script.
 FOUND=""
@@ -265,6 +297,13 @@ cat > "$WORK/common.sh" <<'COMMON'
 dest="${2:-/}"
 apps="${dest%/}/Applications"
 base="$apps/Fluid Solver"
+# The .icns travels inside the package's scripts folder. Installer runs the
+# postinstall from that folder, but which of $0 and the working directory points
+# at it has changed between macOS releases, so both are tried.
+icon_source=""
+for candidate in "$(dirname "$0")/FluidSolver.icns" "./FluidSolver.icns"; do
+    [ -f "$candidate" ] && { icon_source="$candidate"; break; }
+done
 
 # Whoever is actually logged in. Everything a shortcut touches is theirs, not
 # root's, even though this script runs as root.
@@ -276,6 +315,14 @@ make_app() {   # make_app <app name> <binary> <needs a terminal: 0|1> <id>
     app="$apps/$1.app"
     rm -rf "$app"
     mkdir -p "$app/Contents/MacOS" || return 1
+
+    # The icon travels with the shortcut package and lands beside the wrapper.
+    icon_line=""
+    if [ -f "$icon_source" ]; then
+        mkdir -p "$app/Contents/Resources"
+        cp "$icon_source" "$app/Contents/Resources/FluidSolver.icns"
+        icon_line="    <key>CFBundleIconFile</key><string>FluidSolver</string>"
+    fi
 
     if [ "$3" = 1 ]; then
         cat > "$app/Contents/MacOS/launcher" <<LAUNCH
@@ -300,6 +347,7 @@ LAUNCH
     <key>CFBundleDisplayName</key><string>$1</string>
     <key>CFBundleExecutable</key><string>launcher</string>
     <key>CFBundleIdentifier</key><string>com.mihann1.fluidsolver.launcher.$4</string>
+$icon_line
     <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>1.0</string>
@@ -332,6 +380,7 @@ make_script_pkg() {   # make_script_pkg <id suffix> <postinstall tail file>
     mkdir -p "$WORK/scripts-$1"
     cat "$WORK/common.sh" "$2" > "$WORK/scripts-$1/postinstall"
     chmod +x "$WORK/scripts-$1/postinstall"
+    [ -n "$ICNS" ] && cp "$ICNS" "$WORK/scripts-$1/FluidSolver.icns"
     pkgbuild --nopayload \
              --scripts "$WORK/scripts-$1" \
              --identifier "$IDENT.$1" \
