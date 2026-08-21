@@ -147,6 +147,14 @@ Name: "startmenu";    Description: "Create a Start Menu shortcut"; GroupDescript
 ; [Icons], because Windows has no installer-level way to pin anything - see
 ; PinToTaskbar in [Code].
 Name: "taskbar";      Description: "Pin to the taskbar"; GroupDescription: "{cm:AdditionalIcons}"
+#if HaveUi
+; Where a shortcut goes and what it starts are two different questions, so they
+; are two groups. This second one only appears when the UI is actually being
+; installed - without it there is a single program to point at and nothing to
+; choose between. Both boxes apply to all three places above at once.
+Name: "iconui";      Description: "Fluid Solver UI - the window"; GroupDescription: "Which program the shortcuts start:"; Components: ui
+Name: "iconconsole"; Description: "Fluid Solver - the console version, where every parameter is typed at the prompt"; GroupDescription: "Which program the shortcuts start:"; Components: ui; Flags: unchecked
+#endif
 Name: "addtopath";    Description: "Add Fluid Solver to PATH (lets you run it from any terminal)"; Flags: unchecked
 #if HaveUi
 Name: "associatevtk"; Description: "Open .vtk files with the Fluid Solver UI"; Components: ui; Flags: unchecked
@@ -213,18 +221,36 @@ Source: "..\..\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recurses
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE";   DestDir: "{app}"; Flags: ignoreversion
 
+#if HaveUi
+[InstallDelete]
+; An install never removes anything on its own, so ticking the UI once and
+; unticking it on the next run over the same folder used to leave
+; "Fluid Solver UI.exe" behind - together with a Start Menu entry and a desktop
+; icon aiming at a UI the user has just declined, built for a variant that may
+; no longer be the one installed. Runs before the files are copied, so a run
+; that DOES want the UI puts it straight back.
+Type: files; Name: "{app}\Fluid Solver UI.exe";       Check: UiNotChosen
+; The shortcut rows go by what this run wants pointed at rather than by whether
+; the UI is installed at all, so unticking one of the two boxes above takes the
+; matching leftovers from an earlier run with it.
+Type: files; Name: "{group}\{#AppName} UI.lnk";       Check: NoUiIcon
+Type: files; Name: "{autodesktop}\{#AppName} UI.lnk"; Check: NoUiIcon
+Type: files; Name: "{group}\{#AppName}.lnk";          Check: NoConsoleIcon
+Type: files; Name: "{autodesktop}\{#AppName}.lnk";    Check: NoConsoleIcon
+#endif
+
 [Dirs]
 ; The solver writes here. Created up front so a fresh install has it, and
 ; marked so an uninstall does not take the user's results with it.
 Name: "{app}\output"; Flags: uninsneveruninstall
 
 [Icons]
-Name: "{group}\{#AppName}";       Filename: "{app}\Fluid Solver.exe"; WorkingDir: "{app}"; Tasks: startmenu
+Name: "{group}\{#AppName}";       Filename: "{app}\Fluid Solver.exe"; WorkingDir: "{app}"; Tasks: startmenu;   Check: WantConsoleIcon
 Name: "{group}\Output folder";    Filename: "{app}\output"; Tasks: startmenu
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\Fluid Solver.exe"; WorkingDir: "{app}"; Tasks: desktopicon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\Fluid Solver.exe"; WorkingDir: "{app}"; Tasks: desktopicon; Check: WantConsoleIcon
 #if HaveUi
-Name: "{group}\{#AppName} UI";       Filename: "{app}\Fluid Solver UI.exe"; WorkingDir: "{app}"; Tasks: startmenu; Components: ui
-Name: "{autodesktop}\{#AppName} UI"; Filename: "{app}\Fluid Solver UI.exe"; WorkingDir: "{app}"; Tasks: desktopicon; Components: ui
+Name: "{group}\{#AppName} UI";       Filename: "{app}\Fluid Solver UI.exe"; WorkingDir: "{app}"; Tasks: startmenu;   Components: ui; Check: WantUiIcon
+Name: "{autodesktop}\{#AppName} UI"; Filename: "{app}\Fluid Solver UI.exe"; WorkingDir: "{app}"; Tasks: desktopicon; Components: ui; Check: WantUiIcon
 #endif
 
 [Registry]
@@ -348,6 +374,41 @@ begin
   Result := WantVariant(Name) and (not UiChosen);
 end;
 
+// Spelled as a function of its own rather than "not UiChosen" written into the
+// [InstallDelete] lines, so those read the same whichever Inno version compiles
+// them.
+function UiNotChosen: Boolean;
+begin
+  Result := not UiChosen;
+end;
+
+// What the shortcuts point at - the second question in [Tasks], asked in one
+// place and answered for the desktop, the Start Menu and the taskbar alike. An
+// install without the UI never sees those boxes, so it falls back to the only
+// program it has.
+function WantUiIcon: Boolean;
+begin
+  Result := UiChosen and WizardIsTaskSelected('iconui');
+end;
+
+function WantConsoleIcon: Boolean;
+begin
+  if not UiChosen then
+    Result := True
+  else
+    Result := WizardIsTaskSelected('iconconsole');
+end;
+
+function NoUiIcon: Boolean;
+begin
+  Result := not WantUiIcon;
+end;
+
+function NoConsoleIcon: Boolean;
+begin
+  Result := not WantConsoleIcon;
+end;
+
 // ---- the taskbar --------------------------------------------------------
 // Windows has no supported way for an installer to pin anything. Up to
 // Windows 10 the shell exposed a "Pin to taskbar" verb on the file itself, and
@@ -438,16 +499,21 @@ begin
   Result := ShellVerb(FileName, RES_UNPIN_FROM_TASKBAR, 'unpin from taskbar');
 end;
 
-// The UI is the windowed program, so that is what a taskbar button is for. An
-// install without it pins the console solver instead.
-function TaskbarTarget(var Title: String): String;
+// One attempt, folded into two running lists so the report at the end can say
+// what went up and what Windows refused in one dialog each rather than one per
+// program.
+procedure PinOne(const FileName, Title: String; var Pinned, Refused: String);
 begin
-  Result := ExpandConstant('{app}\Fluid Solver UI.exe');
-  Title := 'Fluid Solver UI';
-  if not FileExists(Result) then
+  if not FileExists(FileName) then Exit;
+  if PinToTaskbar(FileName) then
   begin
-    Result := ExpandConstant('{app}\Fluid Solver.exe');
-    Title := 'Fluid Solver';
+    if Pinned <> '' then Pinned := Pinned + ' and ';
+    Pinned := Pinned + '"' + Title + '"';
+  end
+  else
+  begin
+    if Refused <> '' then Refused := Refused + ' and ';
+    Refused := Refused + '"' + Title + '"';
   end;
 end;
 
@@ -634,29 +700,53 @@ begin
     Result := FeaturePage.CheckListBox.Items.Count = 0;
 end;
 
+// The AVX2 guard again, for the run where the page above was skipped. A payload
+// that varies on nothing pins all three axes, and the check that lives in
+// NextButtonClick then never fires - which is how a dist of AVX2-only rows
+// could install one on a CPU that cannot execute it, with nothing said.
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if (FeaturePage <> nil) and (FeaturePage.CheckListBox.Items.Count > 0) then Exit;
+  if AxisValue(IdxAvx2, PinAvx2) and (not HasAvx2) then
+    Result := 'This installer only carries AVX2 builds, and this CPU does not ' +
+              'support AVX2. The solver would stop with an "illegal instruction" ' +
+              'error on the first run.';
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Target, Title: String;
+  Pinned, Refused: String;
 begin
+  // Before the files move. [InstallDelete] is about to take the shortcuts this
+  // run does not want back out, and the shell can only unpin a file that is
+  // still on disk.
+  if CurStep = ssInstall then
+  begin
+    if NoUiIcon then
+      UnpinFromTaskbar(ExpandConstant('{app}\Fluid Solver UI.exe'));
+    if NoConsoleIcon then
+      UnpinFromTaskbar(ExpandConstant('{app}\Fluid Solver.exe'));
+    Exit;
+  end;
   if CurStep <> ssPostInstall then Exit;
   if not WizardIsTaskSelected('taskbar') then Exit;
 
-  Target := TaskbarTarget(Title);
-  if not FileExists(Target) then Exit;
+  // Both, one or neither - whatever the second group of tick boxes said.
+  Pinned := '';
+  Refused := '';
+  if WantUiIcon then
+    PinOne(ExpandConstant('{app}\Fluid Solver UI.exe'), 'Fluid Solver UI', Pinned, Refused);
+  if WantConsoleIcon then
+    PinOne(ExpandConstant('{app}\Fluid Solver.exe'), 'Fluid Solver', Pinned, Refused);
 
-  if PinToTaskbar(Target) then
-    MsgBox('"' + Title + '" has been pinned to the taskbar.' + #13#10#13#10 +
-           '"Fluid Solver.exe" was installed beside it - that is the console ' +
-           'version, where every parameter is typed in at the prompt.',
-           mbInformation, MB_OK)
-  else
-    MsgBox('Windows would not let the installer pin "' + Title + '" to the ' +
+  if Pinned <> '' then
+    MsgBox(Pinned + ' has been pinned to the taskbar.', mbInformation, MB_OK);
+  if Refused <> '' then
+    MsgBox('Windows would not let the installer pin ' + Refused + ' to the ' +
            'taskbar. Since Windows 11 this is blocked for every program, not ' +
            'just this one.' + #13#10#13#10 +
-           'Open the Start Menu, right-click "' + Title + '" and choose ' +
-           '"Pin to taskbar".' + #13#10#13#10 +
-           '"Fluid Solver.exe" was installed beside it - that is the console ' +
-           'version, where every parameter is typed in at the prompt.',
+           'Open the Start Menu, right-click it and choose "Pin to taskbar".',
            mbInformation, MB_OK);
 end;
 

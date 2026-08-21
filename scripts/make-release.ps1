@@ -18,6 +18,14 @@
         pwsh -File scripts\make-release.ps1 -Version 0.1 -WithInstallers
         pwsh -File scripts\make-release.ps1 -Version 0.1 -Only Package
 
+    -FromRelease fills dist\ from the published archives in release\<version>,
+    or in -ReleaseDir <path>, instead of from a build, and cuts the two Windows
+    installers from those. That is the only way the UI ever gets in: a
+    "<variant>-ui" archive is put together by hand and no build produces one.
+    -Only Installers does it by itself when dist\ holds no Windows rows.
+
+        pwsh -File scripts\make-release.ps1 -Version 0.1 -Only Installers
+
     Needs Visual Studio with the C++ workload. The CUDA rows additionally need
     the CUDA Toolkit with its Visual Studio Integration component; without it
     they are reported as skipped and the rest still build. The CUDA
@@ -32,6 +40,9 @@ param(
     [string] $CudaArchs = "",       # empty = decide from the installed toolkit
     [switch] $WithInstallers,       # off until the UI folders exist
     [switch] $Skip32,
+    [switch] $FromRelease,          # rebuild dist\ from the published archives
+    [switch] $FromDist,             # never do that, use dist\ as it stands
+    [string] $ReleaseDir = "",      # empty = release\<version>
     [ValidateSet("All","Build","Installers","Package")]
     [string] $Only = "All"
 )
@@ -209,8 +220,71 @@ function Build-All {
     }
 }
 
+# --------------------------------------------- dist out of the archives ----
+# The installer reads dist\, and up to now a build on this machine was the only
+# thing that ever filled it. That cannot produce the whole payload any more: a
+# "<variant>-ui" folder is put together by hand and exists nowhere else, so an
+# installer cut from a build has no UI to offer. Rebuilding dist\ from
+# release\<version> instead makes the installer carry exactly what was
+# published - solver rows and UI rows alike - and nothing that was not.
+#
+# Expand-Archive rather than scripts\unpack-release.py, so this needs nothing
+# but PowerShell. It is also the easy half of that script: a Windows row and a
+# UI row both stay folders, and only Linux and macOS rows have to collapse back
+# into a single file.
+function Expand-ReleaseRows {
+    param([string] $Source)
+
+    Say "Rebuilding dist\ from $Source"
+    if (-not (Test-Path $Source)) {
+        Write-Host "  no such folder" -ForegroundColor Yellow
+        $problems.Add("dist\ was not rebuilt - $Source does not exist")
+        return
+    }
+    New-Item -ItemType Directory -Force -Path $dist | Out-Null
+
+    $taken = 0
+    Get-ChildItem $Source -Filter *.zip -File | Sort-Object Name | ForEach-Object {
+        # "Fluid Solver <ver> windows-<arch> <feature>[-ui]" and nothing else:
+        # the Linux and macOS rows in the same folder are not this machine's to
+        # unpack, and the source archive is not a row at all.
+        if ($_.BaseName -notmatch "^Fluid Solver $([regex]::Escape($Version)) windows-(x64|x86) [a-z0-9-]+$") { return }
+
+        $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid())
+        Expand-Archive -LiteralPath $_.FullName -DestinationPath $stage -Force
+        $inner = Get-ChildItem $stage -Directory
+        if ($inner.Count -ne 1) {
+            Write-Host "  $($_.Name): expected one folder inside, found $($inner.Count)" -ForegroundColor Yellow
+            $problems.Add("$($_.Name) - expected exactly one folder inside the archive")
+            Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+            return
+        }
+        $target = Join-Path $dist $_.BaseName
+        Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
+        Move-Item $inner[0].FullName $target
+        Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
+        Write-Host "  $($_.BaseName)"
+        $taken++
+    }
+
+    if ($taken -eq 0) {
+        Write-Host "  nothing matched 'Fluid Solver $Version windows-<arch> <feature>.zip'" -ForegroundColor Yellow
+        $problems.Add("dist\ was not rebuilt - no Windows rows for $Version in $Source")
+    }
+    Write-Host ""
+}
+
 # ------------------------------------------------------ the installers -----
 function Build-Installers {
+    # Asked for outright, or asked for by implication: "-Only Installers" with
+    # no Windows rows in dist\ can only have meant the archives.
+    $haveRows = [bool](Get-ChildItem $dist -Directory -ErrorAction SilentlyContinue |
+                       Where-Object { $_.Name -like "Fluid Solver $Version windows-*" })
+    if (-not $FromDist -and ($FromRelease -or ($Only -eq "Installers" -and -not $haveRows))) {
+        $src = if ($ReleaseDir) { $ReleaseDir } else { $rel }
+        Expand-ReleaseRows $src
+    }
+
     Say "Building the installers"
     $iscc = Find-Iscc
     if (-not $iscc) {

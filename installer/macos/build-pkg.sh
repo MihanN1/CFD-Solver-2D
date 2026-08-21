@@ -69,6 +69,19 @@ PKGREFS=""
 CHOICES=""
 CHOICE_IDS=""
 
+# pkgbuild records the mode every file happens to have, and a "<variant>-ui"
+# archive assembled on Windows carries no Unix modes at all - unpacking one
+# leaves everything 0600, which ships a UI that will not run and a README the
+# user cannot open. The two executables are named, so they are set outright;
+# the rest is levelled to the usual 0755/0644.
+normalise_root() {   # normalise_root <install root>
+    find "$1" -type d -exec chmod 0755 {} + 2>/dev/null || true
+    find "$1" -type f -exec chmod 0644 {} + 2>/dev/null || true
+    [ -f "$1/Fluid Solver" ] && chmod 0755 "$1/Fluid Solver"
+    [ -f "$1/Fluid Solver UI" ] && chmod 0755 "$1/Fluid Solver UI"
+    return 0
+}
+
 # One payload package per variant, all of them hidden.
 for v in "${VARIANTS[@]}"; do
     src="$DIST/Fluid Solver $VERSION macos-$ARCH $v"
@@ -83,6 +96,7 @@ for v in "${VARIANTS[@]}"; do
     mkdir -p "$root/output"
     [ -d "$REPO/models" ] && cp -R "$REPO/models" "$root/" 2>/dev/null || true
     cp "$REPO/README.md" "$REPO/LICENSE" "$root/" 2>/dev/null || true
+    normalise_root "$root"
 
     # A system-wide install leaves "output" owned by root, and the solver writes
     # its frames there. Hand it to whoever is actually logged in.
@@ -99,8 +113,30 @@ exit 0
 POST
     chmod +x "$WORK/scripts-$v/postinstall"
 
+    # The same thing plus the sweep, for the package that carries no UI. macOS
+    # packages only ever add files, so without this an install that ticks the
+    # Desktop UI followed by one that unticks it leaves the old UI binary in
+    # /Applications - and the shortcut packages below keep building a Launchpad entry
+    # for it and aiming the desktop alias and the Dock at it. The removal comes
+    # first, because the chown half gives up early when there is no output/ yet.
+    mkdir -p "$WORK/scripts-solver-$v"
+    cat > "$WORK/scripts-solver-$v/postinstall" <<'POST'
+#!/bin/sh
+dest="${2:-/}"
+base="${dest%/}/Applications/Fluid Solver"
+rm -f "$base/Fluid Solver UI" 2>/dev/null
+rm -rf "${dest%/}/Applications/Fluid Solver UI.app" 2>/dev/null
+target="$base/output"
+[ -d "$target" ] || exit 0
+who="$(stat -f%Su /dev/console 2>/dev/null || true)"
+[ -n "$who" ] && chown -R "$who" "$target" 2>/dev/null
+chmod 0775 "$target" 2>/dev/null
+exit 0
+POST
+    chmod +x "$WORK/scripts-solver-$v/postinstall"
+
     pkgbuild --root "$WORK/root-$v" \
-             --scripts "$WORK/scripts-$v" \
+             --scripts "$WORK/scripts-solver-$v" \
              --identifier "$IDENT.$v" \
              --version "$VERSION" \
              --install-location / \
@@ -126,8 +162,7 @@ POST
     mkdir -p "$uiroot/output"
     [ -d "$REPO/models" ] && cp -R "$REPO/models" "$uiroot/" 2>/dev/null || true
     cp "$REPO/README.md" "$REPO/LICENSE" "$uiroot/" 2>/dev/null || true
-    chmod 0755 "$uiroot/Fluid Solver" 2>/dev/null || true
-    [ -f "$uiroot/Fluid Solver UI" ] && chmod 0755 "$uiroot/Fluid Solver UI"
+    normalise_root "$uiroot"
     pkgbuild --root "$WORK/root-ui-$v" \
              --scripts "$WORK/scripts-$v" \
              --identifier "$IDENT.ui.$v" \
@@ -277,19 +312,15 @@ PLIST
     return 0
 }
 
-# Both wrappers, whichever binaries are actually there. Called by all three
-# packages, so ticking only "Dock" still gets something to put in the Dock.
-ensure_apps() {
-    make_app "Fluid Solver UI" "Fluid Solver UI" 0 ui
-    make_app "Fluid Solver" "Fluid Solver" 1 solver
-}
-
-# The UI is the windowed program, so a single shortcut points at it; without
-# it the console solver takes its place.
-shortcut_app() {
-    if [ -d "$apps/Fluid Solver UI.app" ]; then
+# The wrapper for one of the two programs, built on demand. Every shortcut
+# package calls this for its own program first, so ticking only "Dock" still
+# produces something for the Dock to hold.
+ensure_app() {   # ensure_app ui|solver -> echoes the .app when it was made
+    if [ "$1" = ui ]; then
+        make_app "Fluid Solver UI" "Fluid Solver UI" 0 ui || return 1
         printf '%s' "$apps/Fluid Solver UI.app"
     else
+        make_app "Fluid Solver" "Fluid Solver" 1 solver || return 1
         printf '%s' "$apps/Fluid Solver.app"
     fi
 }
@@ -309,51 +340,85 @@ make_script_pkg() {   # make_script_pkg <id suffix> <postinstall tail file>
     PKGREFS="$PKGREFS<pkg-ref id=\"$IDENT.$1\">$1.pkg</pkg-ref>"
 }
 
-cat > "$WORK/tail-launchpad" <<'TAIL'
-ensure_apps
+# Two tails per place, one per program. A postinstall cannot read the tick
+# boxes, so "which program" has to be baked into the package instead - the same
+# trick the hidden per-variant packages already use, and the reason there are
+# six of these rather than three.
+for kind in ui solver; do
+    cat > "$WORK/tail-launchpad-$kind" <<TAIL
+ensure_app $kind >/dev/null
 exit 0
 TAIL
 
-cat > "$WORK/tail-desktop" <<'TAIL'
-ensure_apps
-target="$(shortcut_app)"
-[ -d "$target" ] || exit 0
-[ -n "$who" ] && [ -d "$whohome/Desktop" ] || exit 0
-link="$whohome/Desktop/$(basename "$target")"
-rm -rf "$link"
-ln -s "$target" "$link" 2>/dev/null
-chown -h "$who" "$link" 2>/dev/null
+    cat > "$WORK/tail-desktop-$kind" <<TAIL
+target="\$(ensure_app $kind)"
+[ -n "\$target" ] && [ -d "\$target" ] || exit 0
+[ -n "\$who" ] && [ -d "\$whohome/Desktop" ] || exit 0
+link="\$whohome/Desktop/\$(basename "\$target")"
+rm -rf "\$link"
+ln -s "\$target" "\$link" 2>/dev/null
+chown -h "\$who" "\$link" 2>/dev/null
 exit 0
 TAIL
 
-# defaults and killall both run as the logged-in user: the Dock is a per-user
-# thing and root has no Dock to write to.
-cat > "$WORK/tail-dock" <<'TAIL'
-ensure_apps
-target="$(shortcut_app)"
-[ -d "$target" ] || exit 0
-[ -n "$who" ] || exit 0
-uid="$(id -u "$who" 2>/dev/null)" || exit 0
+    # defaults and killall both run as the logged-in user: the Dock is a
+    # per-user thing and root has no Dock to write to.
+    cat > "$WORK/tail-dock-$kind" <<TAIL
+target="\$(ensure_app $kind)"
+[ -n "\$target" ] && [ -d "\$target" ] || exit 0
+[ -n "\$who" ] || exit 0
+uid="\$(id -u "\$who" 2>/dev/null)" || exit 0
 
-entry="<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>$target</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
+entry="<dict><key>tile-data</key><dict><key>file-data</key><dict><key>_CFURLString</key><string>\$target</string><key>_CFURLStringType</key><integer>0</integer></dict></dict></dict>"
 
-launchctl asuser "$uid" sudo -u "$who" \
-    defaults write com.apple.dock persistent-apps -array-add "$entry" 2>/dev/null
-launchctl asuser "$uid" sudo -u "$who" killall Dock 2>/dev/null
+launchctl asuser "\$uid" sudo -u "\$who" \\
+    defaults write com.apple.dock persistent-apps -array-add "\$entry" 2>/dev/null
+launchctl asuser "\$uid" sudo -u "\$who" killall Dock 2>/dev/null
 exit 0
 TAIL
 
-make_script_pkg launchpad "$WORK/tail-launchpad"
-make_script_pkg desktop   "$WORK/tail-desktop"
-make_script_pkg dock      "$WORK/tail-dock"
+    for place in launchpad desktop dock; do
+        make_script_pkg "$place-$kind" "$WORK/tail-$place-$kind"
+    done
+done
+
+# Where a shortcut goes and what it starts are two separate questions, so they
+# are two blocks of tick boxes. The second one only appears when there is a UI
+# to choose - otherwise the console solver takes every shortcut that was asked
+# for, and there is nothing to ask about.
+if [ "$HAVE_UI" = 1 ]; then
+    CHOICE_IDS="$CHOICE_IDS<line choice=\"choice-icon-ui\"/><line choice=\"choice-icon-console\"/>"
+    CHOICES="$CHOICES<choice id=\"choice-icon-ui\" title=\"Shortcuts start the UI\" description=\"The window: configures runs, launches the solver and draws the frames.\" start_selected=\"true\"/>"
+    CHOICES="$CHOICES<choice id=\"choice-icon-console\" title=\"Shortcuts start the console solver\" description=\"The console version, where every parameter is typed at the prompt. Can be ticked alongside the UI, or instead of it.\" start_selected=\"false\"/>"
+fi
+
+# What each of the six hidden packages is worth, in terms of those boxes. The
+# console half also fires when no UI went in at all, which is what keeps an
+# install without one from ending up with no shortcuts anywhere.
+if [ "$HAVE_UI" = 1 ]; then
+    UI_ICON_COND="choices['choice-ui'].selected &amp;&amp; choices['choice-icon-ui'].selected"
+    CONSOLE_ICON_COND="!choices['choice-ui'].selected || choices['choice-icon-console'].selected"
+else
+    UI_ICON_COND="false"
+    CONSOLE_ICON_COND="true"
+fi
 
 # Last in the outline, so they run after the binaries they point at are in
 # place. Ticked the way the other two platforms tick them: the menu entry and
 # the desktop icon on, the taskbar off.
 CHOICE_IDS="$CHOICE_IDS<line choice=\"choice-launchpad\"/><line choice=\"choice-desktop\"/><line choice=\"choice-dock\"/>"
-CHOICES="$CHOICES<choice id=\"choice-launchpad\" title=\"Launchpad\" description=\"Show Fluid Solver in Launchpad and the Applications folder. Without this the binaries are still installed, but only a terminal can start them.\" start_selected=\"true\"><pkg-ref id=\"$IDENT.launchpad\"/></choice>"
-CHOICES="$CHOICES<choice id=\"choice-desktop\" title=\"Desktop\" description=\"Put an alias on the desktop.\" start_selected=\"true\"><pkg-ref id=\"$IDENT.desktop\"/></choice>"
-CHOICES="$CHOICES<choice id=\"choice-dock\" title=\"Dock\" description=\"Add it to the Dock. The Dock restarts once, which is what makes the new icon appear.\" start_selected=\"false\"><pkg-ref id=\"$IDENT.dock\"/></choice>"
+CHOICES="$CHOICES<choice id=\"choice-launchpad\" title=\"Launchpad\" description=\"Show Fluid Solver in Launchpad and the Applications folder. Without this the binaries are still installed, but only a terminal can start them.\" start_selected=\"true\"/>"
+CHOICES="$CHOICES<choice id=\"choice-desktop\" title=\"Desktop\" description=\"Put an alias on the desktop.\" start_selected=\"true\"/>"
+CHOICES="$CHOICES<choice id=\"choice-dock\" title=\"Dock\" description=\"Add it to the Dock. The Dock restarts once, which is what makes the new icon appear.\" start_selected=\"false\"/>"
+
+for place in launchpad desktop dock; do
+    for kind in ui solver; do
+        if [ "$kind" = ui ]; then cond="($UI_ICON_COND)"; else cond="($CONSOLE_ICON_COND)"; fi
+        cond="choices['choice-$place'].selected &amp;&amp; $cond"
+        CHOICE_IDS="$CHOICE_IDS<line choice=\"sc-$place-$kind\"/>"
+        CHOICES="$CHOICES<choice id=\"sc-$place-$kind\" title=\"$place $kind\" visible=\"false\" enabled=\"false\" start_selected=\"$cond\" selected=\"$cond\"><pkg-ref id=\"$IDENT.$place-$kind\"/></choice>"
+    done
+done
 
 cat > "$WORK/Distribution.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>

@@ -81,6 +81,23 @@ jobs:
           echo "$count zip(s)"
           [ "$count" -gt 1 ] || { echo "::error::no release zips were found"; exit 1; }
 
+      # The "<variant>-ui" archives are assembled by hand and no build produces
+      # one, so they are only here if they were uploaded to the release by hand
+      # as well. Without them the installers still come out - just with no UI to
+      # offer - and nothing else in the run would have said so. A warning rather
+      # than an error, because building without the UI on purpose is a real
+      # thing to want.
+      - name: Is the UI in this release
+        run: |
+          ui=$(ls -1 zips/*-ui.zip 2>/dev/null | wc -l)
+          if [ "$ui" -gt 0 ]; then
+            echo "$ui UI archive(s) - the installers will offer the desktop UI"
+            echo "$ui UI archive(s) found: the installers will offer the desktop UI." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::No '*-ui.zip' archives here, so the six installers will be built without a UI component. If that was not deliberate, upload them to the release and run this again."
+            echo ":warning: No UI archives found - the installers are being built **without a UI**." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - uses: actions/upload-artifact@v4
         with:
           name: release-zips
@@ -156,6 +173,21 @@ jobs:
       - name: Build both .run installers
         run: bash scripts/make-release.sh "${{ inputs.version }}" --only=installers
 
+      # make-release.sh collects its failures into a summary and still exits 0,
+      # which is right for a person at a terminal and wrong here: with x64 built
+      # and x86 dead the upload still finds a file and the job goes green. So
+      # the count is checked instead of the exit code, the same way the Windows
+      # job counts what iscc produced.
+      - name: Both of them, or neither
+        run: |
+          missing=0
+          for arch in x64 x86; do
+            f="dist/Fluid-Solver-${{ inputs.version }}-linux-$arch.run"
+            if [ -f "$f" ]; then echo "ok      $f"
+            else echo "::error::$f was not built"; missing=1; fi
+          done
+          [ "$missing" = 0 ]
+
       - uses: actions/upload-artifact@v4
         with:
           name: installers-linux
@@ -175,13 +207,22 @@ jobs:
           python3 scripts/unpack-release.py "${{ inputs.version }}" zips dist --platform macos
 
       # Both packages from one Mac: this step only repackages, it never builds.
+      # "skipped" is not a pass here - a release that reached this job is meant
+      # to have both architectures in it, so a missing one is an error and not a
+      # note, exactly as it is for the other two platforms.
       - name: Build both .pkg installers
         run: |
+          missing=0
           for a in arm64 x64; do
-            ls dist/"Fluid Solver ${{ inputs.version }} macos-$a "* >/dev/null 2>&1 || {
-              echo "macos-$a: nothing to package - skipped"; continue; }
-            bash installer/macos/build-pkg.sh "${{ inputs.version }}" "$a"
+            if ! ls dist/"Fluid Solver ${{ inputs.version }} macos-$a "* >/dev/null 2>&1; then
+              echo "::error::no macos-$a rows in this release, so no .pkg for it"
+              missing=1; continue
+            fi
+            bash installer/macos/build-pkg.sh "${{ inputs.version }}" "$a" || missing=1
+            [ -f "dist/Fluid Solver ${{ inputs.version }} macos-$a.pkg" ] || {
+              echo "::error::macos-$a: build-pkg.sh produced no .pkg"; missing=1; }
           done
+          [ "$missing" = 0 ]
 
       - uses: actions/upload-artifact@v4
         with:

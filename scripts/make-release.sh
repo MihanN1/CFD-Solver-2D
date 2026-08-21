@@ -31,6 +31,14 @@
 #     --skip-32          skip the 32-bit rows
 #     --skip-cuda        skip the CUDA rows
 #     --only=<step>      all | build | installers | package
+#     --from-release[=<dir>]
+#                        fill dist/ from the published archives in <dir>
+#                        (release/<version> by default) instead of from a build,
+#                        then cut the installers from those. This is the only
+#                        way to get the UI in: a "<variant>-ui" archive is
+#                        assembled by hand and no build produces one.
+#                        --only=installers does it by itself when dist/ is empty
+#     --from-dist        never do that, use whatever dist/ already holds
 #
 # Rows whose prerequisites are missing are reported and skipped, never failed.
 
@@ -41,7 +49,7 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # -h has to be caught before the version is read, or it is taken as the version
 # number and the run happily assembles release/--help.
 case "${1:-}" in
-    -h|--help) sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
 VERSION="${1:-0.1}"; shift 2>/dev/null || true
@@ -70,6 +78,8 @@ toolchain_tag() {
 TOOLCHAIN="$REPO/.toolchain/$(toolchain_tag)"
 
 SKIP_32=0; SKIP_CUDA=0; ONLY=all; WITH_INSTALLERS=0; NO_DEPS=0; USE_DOCKER=0
+# auto = only when --only=installers finds dist/ empty; yes = always; no = never.
+FROM_RELEASE=auto; FROM_RELEASE_DIR=""
 CUDA_ARCHS="${CUDA_ARCHS:-}"
 DOCKER_IMAGE="${DOCKER_IMAGE:-nvidia/cuda:12.6.3-devel-ubuntu20.04}"
 
@@ -81,9 +91,12 @@ for arg in "$@"; do
         --no-deps)          NO_DEPS=1 ;;
         --docker)           USE_DOCKER=1 ;;
         --only=*)           ONLY="${arg#--only=}" ;;
+        --from-release)     FROM_RELEASE=yes ;;
+        --from-release=*)   FROM_RELEASE=yes; FROM_RELEASE_DIR="${arg#--from-release=}" ;;
+        --from-dist)        FROM_RELEASE=no ;;
         --cuda-archs=*)     CUDA_ARCHS="${arg#--cuda-archs=}" ;;
         --docker-image=*)   DOCKER_IMAGE="${arg#--docker-image=}" ;;
-        -h|--help)          sed -n '2,35p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)          sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -481,8 +494,46 @@ build_all() {
     done
 }
 
+# ---- dist out of the published archives ------------------------------------
+# The installers read dist/, and up to now the only thing that ever filled it
+# was a build on this machine. That cannot produce the whole payload any more: a
+# "<variant>-ui" archive is put together by hand and exists nowhere else, so an
+# installer cut from a build has no UI to offer. Rebuilding dist/ from
+# release/<version> instead makes the six installers carry exactly what was
+# published - solver rows and UI rows alike - and nothing that was not.
+have_dist_rows() {
+    ls "$DIST"/"Fluid Solver $VERSION $PLATFORM-"* >/dev/null 2>&1
+}
+
+unpack_release() {
+    local src="${FROM_RELEASE_DIR:-$REL}"
+    step "Rebuilding dist/ from $src"
+    if [ ! -d "$src" ]; then
+        say "  no such folder"
+        note "dist/ was not rebuilt - $src does not exist"; return 1
+    fi
+    if ! command -v python3 >/dev/null 2>&1; then
+        say "  python3 is missing, and scripts/unpack-release.py needs it"
+        note "dist/ was not rebuilt from $src - python3 is missing"; return 1
+    fi
+    # Only this platform's rows. Unpacking the other two as well would leave
+    # them in dist/ for package() to zip up again out of somebody else's build.
+    if python3 "$REPO/scripts/unpack-release.py" "$VERSION" "$src" "$DIST" \
+               --platform "$PLATFORM" 2>&1 | sed 's/^/  /'
+    then return 0; fi
+    note "dist/ was not rebuilt from $src - unpack-release.py failed"; return 1
+}
+
 # ---- installer -------------------------------------------------------------
 build_installer() {
+    # Asked for outright, or asked for by implication: "--only=installers" with
+    # an empty dist/ can only have meant the archives.
+    if [ "$FROM_RELEASE" = yes ] ||
+       { [ "$FROM_RELEASE" = auto ] && [ "$ONLY" = installers ] && ! have_dist_rows; }
+    then
+        unpack_release || true
+    fi
+
     step "Building the installer"
     if [ "$PLATFORM" = macos ]; then
         if [ -f "$REPO/installer/macos/build-pkg.sh" ]; then

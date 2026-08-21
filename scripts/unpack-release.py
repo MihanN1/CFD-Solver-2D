@@ -50,6 +50,11 @@ def parse(stem):
     return d
 
 
+# The two programs an archive may hold, on every platform. Anything named like
+# one of these has to come out executable; everything else is data.
+EXECUTABLES = {"Fluid Solver", "Fluid Solver.exe", "Fluid Solver UI", "Fluid Solver UI.exe"}
+
+
 def extract(zip_path, into):
     """Unpack and return the single top-level directory inside.
 
@@ -57,14 +62,28 @@ def extract(zip_path, into):
     executables inside a UI archive would not run. The mode is in the upper 16
     bits of external_attr on any zip written by a Unix tool; when it is there,
     it is put back.
+
+    A zip written on Windows - which is how the "<variant>-ui" archives are
+    assembled by hand - has no Unix bits to put back at all: external_attr holds
+    DOS attributes and the upper half is zero. Python then extracts those
+    entries 0600 and every later step copies that mode along, so the install
+    ends up with a UI that will not run, a README and LICENSE readable only by
+    whoever ran the installer, and an output/ at 0700 that a system-wide install
+    cannot write frames into. A missing mode is therefore filled in rather than
+    left alone: 0755 for directories and for the two executables, 0644 for the
+    rest.
     """
     with zipfile.ZipFile(zip_path) as z:
         roots = {Path(n).parts[0] for n in z.namelist() if n.strip()}
         z.extractall(into)
         for item in z.infolist():
-            mode = item.external_attr >> 16
-            if mode and not item.is_dir():
-                (into / item.filename).chmod(mode & 0o7777)
+            mode = (item.external_attr >> 16) & 0o7777
+            if not mode:
+                if item.is_dir():
+                    mode = 0o755
+                else:
+                    mode = 0o755 if Path(item.filename).name in EXECUTABLES else 0o644
+            (into / item.filename).chmod(mode)
     if len(roots) != 1:
         raise SystemExit(f"{zip_path.name}: expected one folder inside, found {sorted(roots)}")
     return into / roots.pop()
