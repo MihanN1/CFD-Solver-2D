@@ -525,12 +525,40 @@ unpack_release() {
 }
 
 # ---- installer -------------------------------------------------------------
+# ---- the icon on the UI executable -----------------------------------------
+# The UI was built without a resource script, so its executable carries no icon
+# and Explorer draws it as a blank binary. This puts the project icon on it
+# inside the published archives, before anything unpacks them, so both the
+# installers and the archives themselves end up with it. Only a Windows
+# executable can hold an icon; the script says so for the other two rather than
+# pretending, and their icons come from the .desktop entry and the .app bundle
+# that the installers below build.
+stamp_ui_icon() {
+    local script="$REPO/scripts/stamp-ui-icon.py"
+    local src="${FROM_RELEASE_DIR:-$REL}"
+    [ -f "$script" ] || return 0
+    [ -d "$src" ] || return 0
+    ls "$src"/"Fluid Solver $VERSION "*-ui.zip >/dev/null 2>&1 || return 0
+    command -v python3 >/dev/null 2>&1 || {
+        note "the UI icon was not stamped - python3 is missing"; return 0; }
+
+    step "Putting the icon on the UI executable"
+    if python3 "$script" "$VERSION" --release "$src" 2>&1 | sed 's/^/  /'; then
+        return 0
+    fi
+    # Not fatal: a Linux or macOS host cannot write a Windows resource, and the
+    # installers it builds do not need one.
+    note "some UI archives still have no icon - see the lines above"
+    return 0
+}
+
 build_installer() {
     # Asked for outright, or asked for by implication: "--only=installers" with
     # an empty dist/ can only have meant the archives.
     if [ "$FROM_RELEASE" = yes ] ||
        { [ "$FROM_RELEASE" = auto ] && [ "$ONLY" = installers ] && ! have_dist_rows; }
     then
+        stamp_ui_icon
         unpack_release || true
     fi
 

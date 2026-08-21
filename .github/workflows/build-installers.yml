@@ -112,6 +112,17 @@ jobs:
       - uses: actions/download-artifact@v4
         with: { name: release-zips, path: zips }
 
+      - name: Put the icon on the UI executable
+        shell: bash
+        run: python scripts/stamp-ui-icon.py "${{ inputs.version }}" --release zips
+
+      - name: Push the fixed archives back to the release
+        if: inputs.attach
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "v${{ inputs.version }}" zips/*windows*-ui.zip --clobber
+
       - name: Rebuild dist\ from the zips
         shell: bash
         run: |

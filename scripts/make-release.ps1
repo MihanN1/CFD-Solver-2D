@@ -274,6 +274,32 @@ function Expand-ReleaseRows {
     Write-Host ""
 }
 
+# ------------------------------------------------- the icon on the UI ------
+# The UI was built without a resource script, so "Fluid Solver UI.exe" carries
+# no icon and Explorer draws it as a blank binary. This puts the project icon on
+# it inside the published archives, before anything unpacks them, so both the
+# installers and the archives themselves end up with it. Windows is where this
+# has to happen: writing a PE resource is done with Windows' own resource
+# updater, and this is the machine that has it.
+function Set-UiIcon {
+    param([string] $Source)
+
+    $script = Join-Path $repo "scripts\stamp-ui-icon.py"
+    if (-not (Test-Path $script)) { return }
+    if (-not (Test-Path $Source)) { return }
+    $archives = Get-ChildItem $Source -Filter "Fluid Solver $Version *-ui.zip" `
+                    -File -ErrorAction SilentlyContinue
+    if (-not $archives) { return }
+
+    Say "Putting the icon on the UI executable"
+    & python $script $Version --release $Source
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host "  some UI archives still have no icon" -ForegroundColor Yellow
+        $problems.Add("the UI icon could not be written into every -ui archive")
+    }
+    Write-Host ""
+}
+
 # ------------------------------------------------------ the installers -----
 function Build-Installers {
     # Asked for outright, or asked for by implication: "-Only Installers" with
@@ -282,6 +308,7 @@ function Build-Installers {
                        Where-Object { $_.Name -like "Fluid Solver $Version windows-*" })
     if (-not $FromDist -and ($FromRelease -or ($Only -eq "Installers" -and -not $haveRows))) {
         $src = if ($ReleaseDir) { $ReleaseDir } else { $rel }
+        Set-UiIcon $src
         Expand-ReleaseRows $src
     }
 
