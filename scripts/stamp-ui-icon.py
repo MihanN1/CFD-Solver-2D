@@ -250,13 +250,16 @@ def rewrite_archive(path: Path, member: str, replacement: bytes) -> None:
 
 def platform_of(name: str) -> str:
     for system in ("windows", "linux", "macos"):
-        if f" {system}-" in name:
+        if f" {system}-" in name or f".{system}-" in name:
             return system
     return "unknown"
 
 
 def process(release: Path, version: str, icon: Path, check_only: bool) -> int:
-    archives = sorted(release.glob(f"Fluid Solver {version} *-ui.zip"))
+    # Both spellings: GitHub rewrites spaces to dots in release asset
+    # filenames, so an archive downloaded from a tag is dotted.
+    archives = sorted(set(release.glob(f"Fluid Solver {version} *-ui.zip")) |
+                      set(release.glob(f"Fluid.Solver.{version}.*-ui.zip")))
     if not archives:
         print(f"no '-ui' archives for {version} in {release}", file=sys.stderr)
         return 1

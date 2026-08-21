@@ -34,9 +34,15 @@ import sys
 import zipfile
 from pathlib import Path
 
+# A space or a dot separates the four parts of the name. The dot is not a
+# stylistic choice: GitHub rewrites spaces to dots in release asset filenames,
+# so the same archive comes back from "gh release download" as
+# "Fluid.Solver.0.1.linux-x64.avx2.zip". Matching only spaces is why a release
+# downloaded from a tag looked to this script like a folder full of files it had
+# never seen.
 NAME = re.compile(
-    r"^Fluid Solver (?P<ver>[^ ]+) "
-    r"(?P<platform>windows|linux|macos)-(?P<arch>x64|x86|arm64) "
+    r"^Fluid[ .]Solver[ .](?P<ver>[0-9][0-9A-Za-z.]*?)[ .]"
+    r"(?P<platform>windows|linux|macos)-(?P<arch>x64|x86|arm64)[ .]"
     r"(?P<feature>[a-z0-9-]+?)(?P<ui>-ui)?$"
 )
 
@@ -48,6 +54,17 @@ def parse(stem):
     d = m.groupdict()
     d["ui"] = bool(d["ui"])
     return d
+
+
+def canonical_name(info):
+    """The name with spaces, whatever the file on disk happened to be called.
+
+    Everything downstream - the .iss variant folders, install.sh's payload scan,
+    build-pkg.sh - looks for the spaced form, so that is what dist/ must hold
+    even when the archive arrived with dots in its name.
+    """
+    return (f"Fluid Solver {info['ver']} {info['platform']}-{info['arch']} "
+            f"{info['feature']}" + ("-ui" if info["ui"] else ""))
 
 
 # The two programs an archive may hold, on every platform. Anything named like
@@ -120,8 +137,9 @@ def main():
         if info["platform"] not in wanted:
             continue
 
+        name = canonical_name(info)
         inner = extract(zip_path, scratch / zip_path.stem)
-        target = dist / zip_path.stem
+        target = dist / name
 
         # Windows rows and every UI stay folders; a Linux or macOS solver row
         # collapses back to the single file the installers index by name.
