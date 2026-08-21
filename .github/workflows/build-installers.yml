@@ -118,10 +118,18 @@ jobs:
 
       - name: Push the fixed archives back to the release
         if: inputs.attach
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-        run: gh release upload "v${{ inputs.version }}" zips/*windows*-ui.zip --clobber
+        run: |
+          for f in zips/*windows*-ui.zip; do
+            for try in 1 2 3 4 5; do
+              gh release upload "v${{ inputs.version }}" "$f" --clobber && break
+              echo "retry $try for $(basename "$f")"; sleep $((try * 30))
+            done
+            sleep 5
+          done
 
       - name: Rebuild dist\ from the zips
         shell: bash
