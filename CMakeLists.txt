@@ -199,10 +199,40 @@ if(CFD_UI_ENABLE_CUDA)
         "identical to the same row without it")
 endif()
 
-add_executable(cfd_mask_ui_optimized
-    src/main.cpp
-    src/Application.cpp
-)
+# The icon and the version block live in a resource script, which is a Windows
+# concept only - elsewhere the icon belongs to the .desktop file or the .app
+# bundle, and the installers put it there. Without this the executable had no
+# icon at all and Explorer drew it as a blank binary.
+option(CFD_UI_ENABLE_ICON "Embed the icon and version block on Windows" ON)
+
+set(CFD_UI_SOURCES src/main.cpp src/Application.cpp)
+
+if(WIN32 AND CFD_UI_ENABLE_ICON)
+    enable_language(RC)
+    set(CFD_UI_ICON_SOURCE "${CMAKE_CURRENT_SOURCE_DIR}/logo/fluid-solver.ico")
+    if(EXISTS "${CFD_UI_ICON_SOURCE}")
+        # rc.exe reads the .rc in the system ANSI code page, not UTF-8, so an
+        # absolute path with non-ASCII characters anywhere in it arrives as
+        # mojibake and the icon "does not exist". The icon is therefore copied
+        # next to the generated .rc and referenced by a bare name, which rc.exe
+        # resolves relative to the .rc itself.
+        file(COPY "${CFD_UI_ICON_SOURCE}" DESTINATION "${CMAKE_CURRENT_BINARY_DIR}")
+        set(CFD_UI_ICON_PATH "fluid-solver.ico")
+        configure_file(
+            "${CMAKE_CURRENT_SOURCE_DIR}/src/ui.rc.in"
+            "${CMAKE_CURRENT_BINARY_DIR}/ui.rc"
+            @ONLY
+        )
+        list(APPEND CFD_UI_SOURCES "${CMAKE_CURRENT_BINARY_DIR}/ui.rc")
+    else()
+        message(WARNING
+            "logo/fluid-solver.ico is missing; the UI gets the default Windows "
+            "icon and no version information."
+        )
+    endif()
+endif()
+
+add_executable(cfd_mask_ui_optimized ${CFD_UI_SOURCES})
 
 target_link_libraries(cfd_mask_ui_optimized
     PRIVATE

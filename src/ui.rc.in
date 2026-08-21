@@ -1,0 +1,48 @@
+// Windows resource script for the UI, configured by CMake. Written to match the
+// solver's src/app.rc.in, including the two rules it learned the hard way:
+//
+//   1. Everything here must be ASCII. rc.exe reads the .rc in the system ANSI
+//      code page rather than UTF-8, so a path with non-ASCII characters in it
+//      arrives as mojibake and the icon "does not exist". That is why the icon
+//      is referenced by a bare name and copied next to this file.
+//   2. Nothing is included. windows.h resolves only if the RC task was handed
+//      the SDK include path, which is one more thing that can be set up wrong.
+//
+// Without this file the UI executable had no icon at all and Explorer drew it
+// as a blank binary, which is what scripts/stamp-ui-icon.py in the solver
+// project exists to repair in archives that were published before it.
+
+// Windows shows the lowest-numbered icon resource as the application icon.
+1 ICON "@CFD_UI_ICON_PATH@"
+
+// VS_VERSION_INFO. Explorer's Properties dialog and the SmartScreen prompt read
+// this; an executable with no product name and no version is one of the things
+// that makes an unsigned download look like something not to run.
+1 VERSIONINFO
+FILEVERSION     @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+PRODUCTVERSION  @PROJECT_VERSION_MAJOR@,@PROJECT_VERSION_MINOR@,@PROJECT_VERSION_PATCH@,0
+FILEFLAGSMASK   0x3fL          // VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0x0L
+FILEOS          0x40004L       // VOS_NT_WINDOWS32
+FILETYPE        0x1L           // VFT_APP
+FILESUBTYPE     0x0L           // VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"       // US English, Unicode
+        BEGIN
+            VALUE "CompanyName",      "MihanN1"
+            VALUE "FileDescription",  "Fluid Solver UI - set up runs and view the frames"
+            VALUE "FileVersion",      "@PROJECT_VERSION@"
+            VALUE "InternalName",     "Fluid Solver UI"
+            VALUE "LegalCopyright",   "MIT License"
+            VALUE "OriginalFilename", "Fluid Solver UI.exe"
+            VALUE "ProductName",      "Fluid Solver UI"
+            VALUE "ProductVersion",   "@PROJECT_VERSION@"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END
