@@ -1,140 +1,261 @@
 name: Build every UI binary
 
+# This workflow intentionally lives only in the UI branch.
+# A push to GUI-part_2 starts the full 30-archive build automatically.
+# A tag ui-vX.Y builds the same matrix and publishes the archives to a GitHub Release.
 on:
-  workflow_dispatch:
-    inputs:
-      version:
-        description: Version used in archive names
-        default: "0.1"
-        required: true
   push:
-    tags: ["ui-v*"]
+    branches:
+      - GUI-part_2
+    tags:
+      - "ui-v*"
+
+permissions:
+  contents: read
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    name: Resolve release version
+    runs-on: ubuntu-24.04
     outputs:
       value: ${{ steps.pick.outputs.value }}
     steps:
       - id: pick
         shell: bash
         run: |
-          if [ "${{ github.event_name }}" = "push" ]; then
-            v="${GITHUB_REF_NAME#ui-v}"
+          set -euo pipefail
+
+          if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == ui-v* ]]; then
+            version="${GITHUB_REF_NAME#ui-v}"
           else
-            v="${{ inputs.version }}"
+            version="0.1"
           fi
-          v="${v:-0.1}"
-          echo "value=$v" >> "$GITHUB_OUTPUT"
+
+          if [[ -z "$version" ]]; then
+            echo "Could not resolve release version" >&2
+            exit 1
+          fi
+
+          echo "value=$version" >> "$GITHUB_OUTPUT"
+          echo "Building UI release version: $version"
 
   windows:
+    name: Windows x64 + x86
     needs: version
     runs-on: windows-2022
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - name: Build and package Windows x64/x86 UI rows
+      - name: Checkout UI branch/tag
+        uses: actions/checkout@v4
+
+      - name: Show tool versions
         shell: pwsh
         run: |
+          python --version
+          cmake --version
+
+      - name: Build and package Windows UI archives
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
           python scripts/build-ui-release.py `
             --version "${{ needs.version.outputs.value }}" `
             --generator "Visual Studio 17 2022" `
-            --arch x64 --arch x86 `
+            --arch x64 `
+            --arch x86 `
             --output dist-ui
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload Windows archives
+        uses: actions/upload-artifact@v4
         with:
           name: ui-windows
           path: dist-ui/*.zip
           if-no-files-found: error
+          retention-days: 14
 
   linux:
+    name: Linux x64 + x86
     needs: version
     runs-on: ubuntu-24.04
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - name: Install x64 and i386 SFML system interfaces
+      - name: Checkout UI branch/tag
+        uses: actions/checkout@v4
+
+      - name: Install Linux x64/x86 build dependencies
         shell: bash
         run: |
+          set -euo pipefail
           sudo dpkg --add-architecture i386
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq \
-            g++ g++-multilib pkg-config \
-            libx11-dev libxrandr-dev libxcursor-dev libxi-dev libudev-dev libgl1-mesa-dev \
-            libx11-dev:i386 libxrandr-dev:i386 libxcursor-dev:i386 libxi-dev:i386 \
-            libudev-dev:i386 libgl1-mesa-dev:i386
-      - name: Build and package Linux x64/x86 UI rows
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            build-essential \
+            g++-multilib \
+            pkg-config \
+            libx11-dev \
+            libxrandr-dev \
+            libxcursor-dev \
+            libxi-dev \
+            libudev-dev \
+            libgl1-mesa-dev \
+            libx11-dev:i386 \
+            libxrandr-dev:i386 \
+            libxcursor-dev:i386 \
+            libxi-dev:i386 \
+            libudev-dev:i386 \
+            libgl1-mesa-dev:i386
+
+      - name: Show tool versions
+        shell: bash
         run: |
+          set -euo pipefail
+          python3 --version
+          cmake --version
+          g++ --version
+
+      - name: Build and package Linux UI archives
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 scripts/build-ui-release.py \
             --version "${{ needs.version.outputs.value }}" \
-            --arch x64 --arch x86 \
+            --arch x64 \
+            --arch x86 \
             --output dist-ui
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload Linux archives
+        uses: actions/upload-artifact@v4
         with:
           name: ui-linux
           path: dist-ui/*.zip
           if-no-files-found: error
+          retention-days: 14
 
   macos-arm64:
+    name: macOS arm64
     needs: version
-    runs-on: macos-latest
+    runs-on: macos-15
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - name: Build and package macOS arm64 UI rows
+      - name: Checkout UI branch/tag
+        uses: actions/checkout@v4
+
+      - name: Verify runner architecture
+        shell: bash
         run: |
+          set -euo pipefail
+          test "$(uname -m)" = "arm64"
+          python3 --version
+          cmake --version
+
+      - name: Build and package macOS arm64 UI archives
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 scripts/build-ui-release.py \
             --version "${{ needs.version.outputs.value }}" \
             --arch arm64 \
             --output dist-ui
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload macOS arm64 archives
+        uses: actions/upload-artifact@v4
         with:
           name: ui-macos-arm64
           path: dist-ui/*.zip
           if-no-files-found: error
+          retention-days: 14
 
   macos-x64:
+    name: macOS x64
     needs: version
     runs-on: macos-15-intel
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-      - name: Build and package macOS x64 UI rows
+      - name: Checkout UI branch/tag
+        uses: actions/checkout@v4
+
+      - name: Verify runner architecture
+        shell: bash
         run: |
+          set -euo pipefail
+          test "$(uname -m)" = "x86_64"
+          python3 --version
+          cmake --version
+
+      - name: Build and package macOS x64 UI archives
+        shell: bash
+        run: |
+          set -euo pipefail
           python3 scripts/build-ui-release.py \
             --version "${{ needs.version.outputs.value }}" \
             --arch x64 \
             --output dist-ui
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload macOS x64 archives
+        uses: actions/upload-artifact@v4
         with:
           name: ui-macos-x64
           path: dist-ui/*.zip
           if-no-files-found: error
+          retention-days: 14
 
   package:
-    needs: [version, windows, linux, macos-arm64, macos-x64]
-    runs-on: ubuntu-latest
+    name: Verify and collect all 30 archives
+    needs:
+      - version
+      - windows
+      - linux
+      - macos-arm64
+      - macos-x64
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/download-artifact@v4
+      - name: Checkout UI branch/tag
+        uses: actions/checkout@v4
+
+      - name: Download platform artifacts
+        uses: actions/download-artifact@v4
         with:
           pattern: ui-*
           merge-multiple: true
           path: release/${{ needs.version.outputs.value }}
-      - name: Verify exact 30-row matrix and finalize release
+
+      - name: Verify exact 30-archive matrix and finalize release
+        shell: bash
         run: |
+          set -euo pipefail
           python3 scripts/build-ui-release.py \
             --version "${{ needs.version.outputs.value }}" \
             --finalize "release/${{ needs.version.outputs.value }}"
-      - uses: actions/upload-artifact@v4
+
+      - name: List final files
+        shell: bash
+        run: |
+          set -euo pipefail
+          find "release/${{ needs.version.outputs.value }}" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      - name: Upload complete UI release
+        uses: actions/upload-artifact@v4
         with:
-          name: ui-release
-          path: release/
+          name: ui-release-${{ needs.version.outputs.value }}
+          path: release/${{ needs.version.outputs.value }}/
           if-no-files-found: error
-      - name: Attach UI files to tag release
-        if: startsWith(github.ref, 'refs/tags/ui-v')
+          retention-days: 14
+
+      - name: Create/update GitHub Release for ui-v* tag
+        if: github.ref_type == 'tag' && startsWith(github.ref_name, 'ui-v')
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          V: ${{ needs.version.outputs.value }}
+          VERSION: ${{ needs.version.outputs.value }}
         run: |
+          set -euo pipefail
           gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
-            gh release create "$GITHUB_REF_NAME" --title "Fluid Solver UI $V" --generate-notes
-          gh release upload "$GITHUB_REF_NAME" release/"$V"/* --clobber
+            gh release create "$GITHUB_REF_NAME" \
+              --title "Fluid Solver UI $VERSION" \
+              --generate-notes
+
+          gh release upload "$GITHUB_REF_NAME" \
+            release/"$VERSION"/* \
+            --clobber
