@@ -24,11 +24,11 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <filesystem>
 #include <fstream>
 #include <future>
-#include <thread>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -36,12 +36,21 @@
 #include <optional>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
 #ifndef CFD_MASK_UI_VERSION
 #define CFD_MASK_UI_VERSION "dev"
+#endif
+
+// Normally supplied by target_compile_definitions in CMakeLists.txt. Spelled
+// out here as well because Visual Studio's IntelliSense does not read a
+// target's compile definitions, so without this it reports the constructor call
+// in Implementation() as an error even though the build itself is fine.
+#ifndef CFD_SOLVER_EXE
+#define CFD_SOLVER_EXE ""
 #endif
 
 namespace maskui {
