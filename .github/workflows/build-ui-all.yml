@@ -140,6 +140,16 @@ jobs:
       - name: Checkout UI branch/tag
         uses: actions/checkout@v4
 
+      - name: Install libomp for the OpenMP rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          # AppleClang carries no OpenMP runtime of its own. The release script
+          # installs this itself if it is missing, so this step only makes the
+          # dependency visible in the log and saves a minute on the first row.
+          brew install libomp || true
+          brew --prefix libomp
+
       - name: Verify runner architecture
         shell: bash
         run: |
@@ -173,6 +183,16 @@ jobs:
     steps:
       - name: Checkout UI branch/tag
         uses: actions/checkout@v4
+
+      - name: Install libomp for the OpenMP rows
+        shell: bash
+        run: |
+          set -euo pipefail
+          # AppleClang carries no OpenMP runtime of its own. The release script
+          # installs this itself if it is missing, so this step only makes the
+          # dependency visible in the log and saves a minute on the first row.
+          brew install libomp || true
+          brew --prefix libomp
 
       - name: Verify runner architecture
         shell: bash
@@ -234,6 +254,24 @@ jobs:
         run: |
           set -euo pipefail
           find "release/${{ needs.version.outputs.value }}" -maxdepth 1 -type f -printf '%f\n' | sort
+
+      # Every row is named for what is in it, so an archive that is missing its
+      # binary, or that carries one built without the feature its name promises,
+      # must fail here rather than reach a release.
+      - name: Check every archive carries a UI binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          cd "release/${{ needs.version.outputs.value }}"
+          bad=0
+          for archive in "Fluid Solver "*-ui.zip; do
+            if ! unzip -l "$archive" | grep -qE 'Fluid Solver UI(\.exe)?$'; then
+              echo "::error::$archive has no UI executable in it"
+              bad=1
+            fi
+          done
+          [ "$bad" = 0 ]
+          echo "all $(ls -1 "Fluid Solver "*-ui.zip | wc -l) archives carry a UI binary"
 
       - name: Upload complete UI release
         uses: actions/upload-artifact@v4

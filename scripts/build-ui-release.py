@@ -79,18 +79,48 @@ def expected_archives(version: str) -> list[str]:
     return result
 
 
-def macos_libomp_prefix() -> str | None:
-    """Homebrew's libomp, which AppleClang needs to compile any OpenMP at all."""
+def macos_libomp_prefix(install: bool = True) -> str | None:
+    """Homebrew's libomp, which AppleClang needs to compile any OpenMP at all.
+
+    Installs it when it is missing rather than only reporting it. A build host
+    is not required to have been prepared by hand: the OpenMP rows need this and
+    nothing else does, so the script that needs it is the place to get it.
+    """
     brew = shutil.which("brew")
     if brew is None:
         return None
+
+    def prefix_of() -> str | None:
+        try:
+            found = subprocess.run(
+                [brew, "--prefix", "libomp"],
+                capture_output=True, text=True, check=True).stdout.strip()
+        except subprocess.CalledProcessError:
+            return None
+        return found if found and Path(found, "include", "omp.h").is_file() else None
+
+    prefix = prefix_of()
+    if prefix is not None or not install:
+        return prefix
+    print("  libomp is missing; installing it with Homebrew")
+    subprocess.run([brew, "install", "libomp"], check=False)
+    return prefix_of()
+
+
+def linux32_libgomp_present() -> bool:
+    """Whether a -m32 link can find a 32-bit libgomp.a."""
+    compiler = os.environ.get("CXX", "g++")
     try:
-        prefix = subprocess.run(
-            [brew, "--prefix", "libomp"],
+        found = subprocess.run(
+            [compiler, "-m32", "-print-file-name=libgomp.a"],
             capture_output=True, text=True, check=True).stdout.strip()
-    except subprocess.CalledProcessError:
-        return None
-    return prefix if prefix and Path(prefix, "include", "omp.h").is_file() else None
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return Path(found).is_file()
+
+
+class RowUnavailable(RuntimeError):
+    """This row cannot be built here. Others still can."""
 
 
 def cmake_args(system: str, arch: str, avx2: bool, openmp: bool,
@@ -98,6 +128,10 @@ def cmake_args(system: str, arch: str, avx2: bool, openmp: bool,
     args = [
         "cmake", "-S", str(ROOT), "-B", str(build_dir),
         "-DBUILD_TESTING=OFF",
+        # SFML fetches FreeType, HarfBuzz and SheenBidi when it builds their
+        # static forms. Pointing every build at one cache clones them once for
+        # the whole run instead of once per build directory.
+        f"-DFETCHCONTENT_BASE_DIR={build_dir.parent / '_deps'}",
         "-DCFD_UI_STATIC_RUNTIME=ON",
         f"-DCFD_UI_ENABLE_AVX2={'ON' if avx2 else 'OFF'}",
         f"-DCFD_UI_ENABLE_OPENMP={'ON' if openmp else 'OFF'}",
@@ -111,9 +145,14 @@ def cmake_args(system: str, arch: str, avx2: bool, openmp: bool,
         if system == "macos":
             prefix = macos_libomp_prefix()
             if prefix is None:
-                raise SystemExit(
-                    "macOS OpenMP rows need Homebrew's libomp: brew install libomp")
+                raise RowUnavailable(
+                    "no Homebrew libomp on this host, so an OpenMP row cannot be "
+                    "built here; install Homebrew, or run: brew install libomp")
             args.append(f"-DCFD_UI_OPENMP_ROOT={prefix}")
+        if system == "linux" and arch == "x86" and not linux32_libgomp_present():
+            raise RowUnavailable(
+                "no 32-bit libgomp.a for a -m32 link; install it, for example: "
+                "sudo apt-get install lib32gomp-14-dev")
 
     if system == "windows":
         args += ["-G", generator, "-A", "x64" if arch == "x64" else "Win32"]
@@ -147,10 +186,13 @@ def find_executable(build_dir: Path, system: str) -> Path:
 
 def build_binary(system: str, arch: str, avx2: bool, openmp: bool, work: Path,
                  generator: str, keep_builds: bool) -> Path:
-    isa = ("avx2" if avx2 else "plain") + ("-omp" if openmp else "")
-    build_dir = work / f"build-{system}-{arch}-{isa}"
-    if build_dir.exists() and not keep_builds:
-        shutil.rmtree(build_dir)
+    # One directory per architecture, reconfigured for each variant rather than
+    # one directory per variant. AVX2 and OpenMP are applied to mask_ui_core and
+    # the executable only, so SFML, FreeType, HarfBuzz and SheenBidi are
+    # identical across the variants of an architecture - and building them four
+    # times, plus cloning the three of them four times over, was most of the
+    # wall clock this script used to spend.
+    build_dir = work / f"build-{system}-{arch}"
     build_dir.parent.mkdir(parents=True, exist_ok=True)
 
     run(cmake_args(system, arch, avx2, openmp, build_dir, generator))
@@ -231,20 +273,42 @@ def build_platform(args: argparse.Namespace) -> None:
     output = Path(args.output).resolve()
     work = Path(args.work).resolve()
 
+    skipped: list[str] = []
     for arch in arches:
+        if not args.keep_builds:
+            shutil.rmtree(work / f"build-{system}-{arch}", ignore_errors=True)
         # Keyed on what actually changes the machine code. The CUDA half of a
         # feature name does not, so "avx2-omp-cuda" and "avx2-omp" ship the same
         # binary under their two names.
         binaries: dict[tuple[bool, bool], Path] = {}
+        unavailable: dict[tuple[bool, bool], str] = {}
         for feature in FEATURES[(system, arch)]:
             parts = feature.split("-")
             key = ("avx2" in parts, "omp" in parts)
+            if key in unavailable:
+                skipped.append(f"{system}-{arch} {feature}: {unavailable[key]}")
+                continue
             if key not in binaries:
-                binaries[key] = build_binary(
-                    system, arch, key[0], key[1], work,
-                    args.generator, args.keep_builds)
+                try:
+                    binaries[key] = build_binary(
+                        system, arch, key[0], key[1], work,
+                        args.generator, args.keep_builds)
+                except RowUnavailable as reason:
+                    # One missing prerequisite must not take the rows that do
+                    # not need it down with it. The run still fails at the end,
+                    # and --finalize refuses a release with a hole in it.
+                    unavailable[key] = str(reason)
+                    print(f"  SKIPPED {system}-{arch} {feature}: {reason}")
+                    skipped.append(f"{system}-{arch} {feature}: {reason}")
+                    continue
             package_variant(
                 binaries[key], output, args.version, system, arch, feature)
+
+    if skipped:
+        print(f"\n{len(skipped)} row(s) were not built:")
+        for line in skipped:
+            print("  " + line)
+        raise SystemExit(1)
 
 
 def should_skip_source(path: Path) -> bool:
