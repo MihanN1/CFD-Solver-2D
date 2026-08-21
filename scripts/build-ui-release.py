@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
 """Build and package the desktop UI using the Fluid Solver release matrix.
 
-The UI itself does not execute OpenMP or CUDA solver kernels. Therefore the
-OpenMP/CUDA parts of a release feature name are compatibility/package identity,
-while AVX2 changes the generated UI machine code. This avoids rebuilding the
-same UI binary four times while still producing the exact 30 archive names that
-the Fluid Solver release/installers pair by name.
+AVX2 and OpenMP both change the generated UI machine code: AVX2 vectorises the
+byte swap that decodes a VTK frame, OpenMP spreads that decode and the colour
+map across cores. CUDA does not - a frame is a read plus a swap, and the colour
+map has to land in host memory for the texture upload anyway, so a GPU round
+trip would cost more than it saves.
+
+So a row's AVX2 and OpenMP state selects a build, and its CUDA state selects
+only the name. One binary therefore serves the "-cuda" row and the row without
+it, which is what keeps this to 22 builds for the exact 30 archive names the
+Fluid Solver release pairs against.
 """
 
 from __future__ import annotations
@@ -74,14 +79,41 @@ def expected_archives(version: str) -> list[str]:
     return result
 
 
-def cmake_args(system: str, arch: str, avx2: bool, build_dir: Path,
-               generator: str) -> list[str]:
+def macos_libomp_prefix() -> str | None:
+    """Homebrew's libomp, which AppleClang needs to compile any OpenMP at all."""
+    brew = shutil.which("brew")
+    if brew is None:
+        return None
+    try:
+        prefix = subprocess.run(
+            [brew, "--prefix", "libomp"],
+            capture_output=True, text=True, check=True).stdout.strip()
+    except subprocess.CalledProcessError:
+        return None
+    return prefix if prefix and Path(prefix, "include", "omp.h").is_file() else None
+
+
+def cmake_args(system: str, arch: str, avx2: bool, openmp: bool,
+               build_dir: Path, generator: str) -> list[str]:
     args = [
         "cmake", "-S", str(ROOT), "-B", str(build_dir),
         "-DBUILD_TESTING=OFF",
         "-DCFD_UI_STATIC_RUNTIME=ON",
         f"-DCFD_UI_ENABLE_AVX2={'ON' if avx2 else 'OFF'}",
+        f"-DCFD_UI_ENABLE_OPENMP={'ON' if openmp else 'OFF'}",
     ]
+    if openmp:
+        # A row named "omp" must have OpenMP in it. Without this a build machine
+        # missing the runtime would quietly publish a single-threaded binary
+        # under a name promising otherwise - the same trap the solver's release
+        # script guards against.
+        args.append("-DCFD_UI_ENABLE_OPENMP_EXPLICIT=ON")
+        if system == "macos":
+            prefix = macos_libomp_prefix()
+            if prefix is None:
+                raise SystemExit(
+                    "macOS OpenMP rows need Homebrew's libomp: brew install libomp")
+            args.append(f"-DCFD_UI_OPENMP_ROOT={prefix}")
 
     if system == "windows":
         args += ["-G", generator, "-A", "x64" if arch == "x64" else "Win32"]
@@ -113,20 +145,33 @@ def find_executable(build_dir: Path, system: str) -> Path:
     return candidates[0]
 
 
-def build_binary(system: str, arch: str, avx2: bool, work: Path,
+def build_binary(system: str, arch: str, avx2: bool, openmp: bool, work: Path,
                  generator: str, keep_builds: bool) -> Path:
-    isa = "avx2" if avx2 else "plain"
+    isa = ("avx2" if avx2 else "plain") + ("-omp" if openmp else "")
     build_dir = work / f"build-{system}-{arch}-{isa}"
     if build_dir.exists() and not keep_builds:
         shutil.rmtree(build_dir)
     build_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    run(cmake_args(system, arch, avx2, build_dir, generator))
+    run(cmake_args(system, arch, avx2, openmp, build_dir, generator))
     command = ["cmake", "--build", str(build_dir), "--parallel"]
     if system == "windows":
         command += ["--config", "Release"]
     run(command)
-    return find_executable(build_dir, system)
+
+    binary = find_executable(build_dir, system)
+    # A release binary carries no symbol table. MSVC already keeps its debug
+    # information in a separate .pdb, so this is for the other two - it takes
+    # about an eighth off the file the user downloads.
+    if system != "windows":
+        strip = shutil.which("strip")
+        if strip is not None:
+            before = binary.stat().st_size
+            flags = ["-x"] if system == "macos" else []
+            subprocess.run([strip, *flags, str(binary)], check=False)
+            after = binary.stat().st_size
+            print(f"  stripped {before // 1024} KiB -> {after // 1024} KiB")
+    return binary
 
 
 def zip_add_file(zf: zipfile.ZipFile, source: Path, arcname: str,
@@ -160,10 +205,17 @@ def package_variant(binary: Path, output: Path, version: str,
     with zipfile.ZipFile(archive, "w") as zf:
         zip_add_directory(zf, name)
         zip_add_file(zf, binary, f"{name}/{executable_name}", executable=True)
-        for filename in ("README.md", "LICENSE", "BUILD_INFO.md"):
+        # Renamed on the way in. These archives get merged by hand into the
+        # solver's "-ui" archive, which already has a README.md and a LICENSE of
+        # its own; copying these across under the same names would replace the
+        # solver's documentation with the UI's.
+        for filename, packaged in (
+            ("README.md", "README-UI.md"),
+            ("BUILD_INFO.md", "BUILD_INFO-UI.md"),
+        ):
             source = ROOT / filename
             if source.is_file():
-                zip_add_file(zf, source, f"{name}/{filename}")
+                zip_add_file(zf, source, f"{name}/{packaged}")
         zip_add_directory(zf, f"{name}/output")
     print("  wrote", archive.name)
     return archive
@@ -180,14 +232,19 @@ def build_platform(args: argparse.Namespace) -> None:
     work = Path(args.work).resolve()
 
     for arch in arches:
-        binaries: dict[bool, Path] = {}
+        # Keyed on what actually changes the machine code. The CUDA half of a
+        # feature name does not, so "avx2-omp-cuda" and "avx2-omp" ship the same
+        # binary under their two names.
+        binaries: dict[tuple[bool, bool], Path] = {}
         for feature in FEATURES[(system, arch)]:
-            avx2 = "avx2" in feature.split("-")
-            if avx2 not in binaries:
-                binaries[avx2] = build_binary(
-                    system, arch, avx2, work, args.generator, args.keep_builds)
+            parts = feature.split("-")
+            key = ("avx2" in parts, "omp" in parts)
+            if key not in binaries:
+                binaries[key] = build_binary(
+                    system, arch, key[0], key[1], work,
+                    args.generator, args.keep_builds)
             package_variant(
-                binaries[avx2], output, args.version, system, arch, feature)
+                binaries[key], output, args.version, system, arch, feature)
 
 
 def should_skip_source(path: Path) -> bool:
@@ -262,7 +319,9 @@ def main() -> int:
     parser.add_argument("--arch", action="append", choices=["x64", "x86", "arm64"])
     parser.add_argument("--output", default=str(ROOT / "dist-ui"))
     parser.add_argument("--work", default=str(ROOT / ".release-build"))
-    parser.add_argument("--generator", default="Visual Studio 18 2026")
+    # The solver's own release is cut with Visual Studio 2022, and the Windows
+    # runner in .github is windows-2022, which has no 2026 to find.
+    parser.add_argument("--generator", default="Visual Studio 17 2022")
     parser.add_argument("--keep-builds", action="store_true")
     parser.add_argument("--list", action="store_true", help="print the exact 30 archive names and exit")
     parser.add_argument("--finalize", metavar="DIR", help="verify all 30 archives and add source/checksums")

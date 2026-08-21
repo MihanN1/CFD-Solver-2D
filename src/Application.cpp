@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <fstream>
 #include <future>
+#include <thread>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -54,7 +55,10 @@ constexpr float PARAMETER_GROUP_HEIGHT = 25.0f;
 constexpr float PARAMETER_SCROLL_STEP = 88.0f;
 constexpr double PI = 3.14159265358979323846;
 constexpr std::size_t DECODED_FRAME_CACHE_BYTES = 1024ull * 1024ull * 1024ull;
-constexpr std::size_t MAX_ADAPTIVE_RESIDENT_FRAMES = 16;
+// The byte budget above is the real limit; this only stops a series of tiny
+// frames from filling the cache with thousands of entries. It used to be 16,
+// which is why flipping past the sixth step always hit the disk again.
+constexpr std::size_t MAX_ADAPTIVE_RESIDENT_FRAMES = 256;
 
 const sf::Color BACKGROUND{5, 7, 6};
 const sf::Color PANEL{13, 15, 14};
@@ -1212,26 +1216,75 @@ bool openExplorerTarget(
     }
     return true;
 #else
+    // The UI ships for Linux and macOS now, so "show the folder" has to work
+    // there rather than apologise. Both systems have one command for it, and
+    // neither can select a file inside the window, so the containing folder is
+    // what gets opened.
     (void)owner;
-    (void)target;
-    error = "Opening a VTK location is implemented for Windows only.";
-    return false;
+    if (target.location.empty()) {
+        error = "No folder to show.";
+        return false;
+    }
+    std::error_code filesystemError;
+    const std::filesystem::path resolved =
+        std::filesystem::absolute(target.location, filesystemError);
+    if (filesystemError) {
+        error = "Cannot resolve the folder to show: " +
+            filesystemError.message();
+        return false;
+    }
+    const std::filesystem::path folder =
+        target.selectFile ? resolved.parent_path() : resolved;
+    if (!std::filesystem::is_directory(folder, filesystemError)) {
+        error = "Folder is unavailable: " + folder.string();
+        return false;
+    }
+#if defined(__APPLE__)
+    const std::string opener = "open";
+#else
+    const std::string opener = "xdg-open";
+#endif
+    std::string quoted;
+    quoted.reserve(folder.string().size() + 8);
+    for (const char character : folder.string()) {
+        if (character == '\'') {
+            quoted += "'\\''";
+        } else {
+            quoted += character;
+        }
+    }
+    const std::string command =
+        opener + " '" + quoted + "' >/dev/null 2>&1 &";
+    if (std::system(command.c_str()) != 0) {
+        error = "Could not run " + opener + " for " + folder.string() + ".";
+        return false;
+    }
+    return true;
 #endif
 }
 
 std::filesystem::path defaultOutputRoot(
     const std::filesystem::path& executablePath) {
+    // "output" beside the executable, which is where the solver writes its own
+    // frames and where the installers create the folder. The working directory
+    // is not that place: a Start Menu shortcut, a desktop icon or a drag-and-
+    // drop all hand the process some other directory, and the frames used to
+    // land wherever that happened to be.
+    const std::filesystem::path directory = executablePath.parent_path();
+    if (!directory.empty()) {
+        return (directory / "output").lexically_normal();
+    }
+
+    // Only reachable when the executable path is unknown, which the platform
+    // lookups make unlikely. Keep an absolute fallback so the solver's
+    // absolute-output contract is still satisfied.
     std::error_code filesystemError;
     const std::filesystem::path current =
         std::filesystem::current_path(filesystemError);
     if (!filesystemError) {
         return (current / "output").lexically_normal();
     }
-
-    // current_path() can fail only in unusual process-environment cases. Keep
-    // a usable absolute fallback so the solver's absolute-output contract is
-    // still satisfied.
-    return (executablePath.parent_path() / "output").lexically_normal();
+    return std::filesystem::path("output");
 }
 
 std::filesystem::path createRunDirectory(
@@ -1525,7 +1578,7 @@ public:
         const auto hasBackgroundWork = [&]() {
             return solverProcess_.active ||
                    resultCatalogFuture_.valid() ||
-                   selectedFrameFuture_.valid() ||
+                   !inFlightFrames_.empty() ||
                    playingFrames_;
         };
 
@@ -1654,11 +1707,7 @@ private:
             {218.0f, height - 106.0f}, {94.0f, 34.0f}};
         generateButton_.bounds = {
             {18.0f, height - 62.0f},
-            {143.0f, 38.0f}
-        };
-        continueButton_.bounds = {
-            {169.0f, height - 62.0f},
-            {143.0f, 38.0f}
+            {294.0f, 38.0f}
         };
 
         const float parameterBottom =
@@ -1747,14 +1796,12 @@ private:
         vectorButton_.selected = showVelocityVectors_;
         vectorButton_.enabled = !frames_.empty();
         const bool loadingResults =
-            resultCatalogFuture_.valid() || selectedFrameFuture_.valid();
+            resultCatalogFuture_.valid() || !inFlightFrames_.empty();
         const bool solverAvailable =
             solverInfo_.valid && solverInfo_.recognized;
         generateButton_.enabled =
             solverAvailable && !geometry_.empty() &&
             !solverProcess_.active && !loadingResults;
-        continueButton_.enabled = false;
-        continueButton_.label = "Continue VTK: later";
         outputFolderButton_.enabled =
             !solverProcess_.active && !loadingResults;
         openVtkButton_.enabled = !solverProcess_.active && !loadingResults;
@@ -1942,11 +1989,6 @@ private:
         if (button == sf::Mouse::Button::Left &&
             generateButton_.hit(position)) {
             generateAndRun();
-            return;
-        }
-        if (button == sf::Mouse::Button::Left &&
-            continueButton_.hit(position)) {
-            continueSelectedFrame();
             return;
         }
         if (button == sf::Mouse::Button::Left) {
@@ -2329,8 +2371,11 @@ private:
     void update(float elapsed) {
         pollResultCatalog();
         pollSelectedFrame();
+        // Playback no longer waits for the loaders to fall idle. They are
+        // always busy pulling the window in now, and the next step is usually
+        // already decoded; a cache miss simply lands a frame or two later.
         if (mode_ == DisplayMode::Results && playingFrames_ &&
-            frames_.size() > 1 && !selectedFrameFuture_.valid() &&
+            frames_.size() > 1 && !desiredFrame_ &&
             !resultCatalogFuture_.valid()) {
             playbackAccumulator_ += elapsed;
             if (playbackAccumulator_ >= 0.12f) {
@@ -2904,7 +2949,7 @@ private:
         }
         if (!info.recognized) {
             status_ =
-                "Selected EXE is not recognized as Fluid Solver.exe; "
+                "Selected file is not recognized as the Fluid Solver; "
                 "selection was rejected.";
             return;
         }
@@ -2958,7 +3003,7 @@ private:
         status_ = target->selectFile
             ? "Selected " + target->location.filename().string() +
                   " in File Explorer."
-            : "Opened the VTK run directory in File Explorer.";
+            : "Opened the run folder in the file manager.";
     }
 
     void loadGeometry(const std::filesystem::path& selected) {
@@ -3150,7 +3195,7 @@ private:
         activeFrame_.reset();
         decodedFrameCache_.clear();
         desiredFrame_.reset();
-        loadingFrame_.reset();
+        inFlightFrames_.clear();
         resultTextureCacheValid_ = false;
         resultsWarning_.clear();
         selectedFrame_ = 0;
@@ -3169,17 +3214,10 @@ private:
                  : "");
     }
 
-    void continueSelectedFrame() {
-        status_ =
-            "VTK continuation is reserved for a later restart-capable Fluid "
-            "Solver. Current CFD-Solver-2D-main has no restart/restartFile/"
-            "addTime CLI contract; imported VTK frames remain readable.";
-    }
-
     void loadExternalResultInputs(
         const std::vector<std::filesystem::path>& inputs) {
         if (solverProcess_.active || resultCatalogFuture_.valid() ||
-            selectedFrameFuture_.valid()) {
+            !inFlightFrames_.empty()) {
             status_ =
                 "Cannot import VTK frames while another load or solver runs.";
             return;
@@ -3252,7 +3290,7 @@ private:
         ResultOrigin origin) {
         const bool stopped =
             origin == ResultOrigin::StoppedFluidSolverRun;
-        if (resultCatalogFuture_.valid() || selectedFrameFuture_.valid()) {
+        if (resultCatalogFuture_.valid() || !inFlightFrames_.empty()) {
             status_ = "A VTK load is already running.";
             return;
         }
@@ -3351,8 +3389,7 @@ private:
         currentRunIsContinuation_ = false;
         selectedFrame_ = frames_.size() - 1;
         desiredFrame_.reset();
-        loadingFrame_.reset();
-        loadingFrameIsPrefetch_ = false;
+        inFlightFrames_.clear();
         decodedFrameCache_.clear();
         decodedFrameCache_.insert(selectedFrame_, activeFrame_);
         planAdaptivePrefetch(selectedFrame_);
@@ -3449,7 +3486,7 @@ private:
         adaptiveWindowIndices_ = std::move(window.nearestIndices);
         decodedFrameCache_.retainOnly(adaptiveWindowIndices_);
         for (const std::size_t index : adaptiveWindowIndices_) {
-            if (index == centerIndex || loadingFrame_ == index ||
+            if (index == centerIndex || frameIsInFlight(index) ||
                 decodedFrameCache_.contains(index)) {
                 continue;
             }
@@ -3489,35 +3526,60 @@ private:
             decodedCacheStatus() + ".";
     }
 
+    // How many frames may decode at once. One per spare core, because a decode
+    // is now a read plus a byte swap and scales with them, with a ceiling so a
+    // 32-core machine does not put a gigabyte of half-built frames in flight.
+    static std::size_t frameLoaderCount() {
+        const unsigned int cores = std::thread::hardware_concurrency();
+        const std::size_t spare = cores > 1u
+            ? static_cast<std::size_t>(cores - 1u)
+            : std::size_t(1);
+        return std::min<std::size_t>(std::max<std::size_t>(spare, 2u), 8u);
+    }
+
+    bool frameIsInFlight(std::size_t index) const {
+        for (const InFlightFrame& load : inFlightFrames_) {
+            if (load.index == index) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void startFrameLoad(std::size_t index, bool prefetch) {
-        loadingFrame_ = index;
-        loadingFrameIsPrefetch_ = prefetch;
-        selectedFrameStarted_ = std::chrono::steady_clock::now();
+        if (frameIsInFlight(index)) {
+            return;
+        }
         const std::filesystem::path path = frames_[index].sourcePath;
-        selectedFrameFuture_ = std::async(
+        InFlightFrame load;
+        load.index = index;
+        load.started = std::chrono::steady_clock::now();
+        load.future = std::async(
             std::launch::async,
             [path]() {
                 return std::make_shared<VtkFrame>(
                     VtkFrameParser::parse(path));
             });
+        inFlightFrames_.push_back(std::move(load));
         if (!prefetch) {
             status_ = "Loading solver step " +
                 std::to_string(frames_[index].frameNumber) + "...";
         }
     }
 
+    // Fills the loader slots rather than starting one frame. The queue is
+    // ordered by distance from the frame on screen, so the nearest steps are
+    // always the ones being worked on.
     void startNextPrefetch() {
-        if (selectedFrameFuture_.valid() || desiredFrame_) {
-            return;
-        }
-        while (!prefetchQueue_.empty()) {
+        const std::size_t loaders = frameLoaderCount();
+        while (inFlightFrames_.size() < loaders && !prefetchQueue_.empty()) {
             const std::size_t index = prefetchQueue_.front();
             prefetchQueue_.pop_front();
-            if (index == selectedFrame_ || decodedFrameCache_.contains(index)) {
+            if (index == selectedFrame_ || decodedFrameCache_.contains(index) ||
+                frameIsInFlight(index)) {
                 continue;
             }
             startFrameLoad(index, true);
-            return;
         }
     }
 
@@ -3538,62 +3600,70 @@ private:
             startNextPrefetch();
             return;
         }
-        if (selectedFrameFuture_.valid()) {
-            status_ = "Queued latest request: solver step " +
-                std::to_string(frames_[index].frameNumber) + ".";
-            return;
-        }
+        // The frame the user is waiting for goes in even when every loader is
+        // busy: a prefetch that finishes later is worth less than the step on
+        // screen, and holding this back was what made fast flipping stall.
         startFrameLoad(index, false);
     }
 
     void pollSelectedFrame() {
-        if (!selectedFrameFuture_.valid() ||
-            selectedFrameFuture_.wait_for(std::chrono::seconds(0)) !=
-                std::future_status::ready) {
+        bool harvested = false;
+        for (std::size_t slot = 0; slot < inFlightFrames_.size();) {
+            InFlightFrame& load = inFlightFrames_[slot];
+            if (!load.future.valid() ||
+                load.future.wait_for(std::chrono::seconds(0)) !=
+                    std::future_status::ready) {
+                ++slot;
+                continue;
+            }
+            const std::size_t index = load.index;
+            const auto started = load.started;
+            std::future<std::shared_ptr<VtkFrame>> future =
+                std::move(load.future);
+            inFlightFrames_.erase(inFlightFrames_.begin() +
+                static_cast<std::ptrdiff_t>(slot));
+            harvested = true;
+            try {
+                std::shared_ptr<const VtkFrame> frame = future.get();
+                VtkFrameParser::validateCompatibility(*activeFrame_, *frame);
+                frames_[index].warningCount = frame->warnings.size();
+                decodedFrameCache_.insert(index, frame);
+                if (desiredFrame_ == index) {
+                    const auto milliseconds = std::chrono::duration_cast<
+                        std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - started).count();
+                    commitSelectedFrame(
+                        index,
+                        std::move(frame),
+                        "Loaded in " + std::to_string(milliseconds) + " ms:");
+                }
+            } catch (const std::exception& exception) {
+                if (desiredFrame_ == index) {
+                    desiredFrame_.reset();
+                    status_ = std::string("VTK frame load failed: ") +
+                        exception.what();
+                }
+            }
+        }
+
+        if (!harvested) {
             return;
         }
-        const std::size_t index = *loadingFrame_;
-        const bool wasPrefetch = loadingFrameIsPrefetch_;
-        try {
-            std::shared_ptr<const VtkFrame> frame =
-                selectedFrameFuture_.get();
-            VtkFrameParser::validateCompatibility(*activeFrame_, *frame);
-            frames_[index].warningCount = frame->warnings.size();
-            decodedFrameCache_.insert(index, frame);
-            decodedFrameCache_.retainOnly(adaptiveWindowIndices_);
-            if (desiredFrame_ == index) {
-                const auto milliseconds = std::chrono::duration_cast<
-                    std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() -
-                    selectedFrameStarted_).count();
-                commitSelectedFrame(
-                    index,
-                    std::move(frame),
-                    "Loaded in " + std::to_string(milliseconds) + " ms:");
-            }
-        } catch (const std::exception& exception) {
-            if (desiredFrame_ == index) {
-                desiredFrame_.reset();
-                status_ = std::string("VTK frame load failed: ") +
-                    exception.what();
-            }
-        }
-        loadingFrame_.reset();
-        loadingFrameIsPrefetch_ = false;
+        // The eviction pass runs once per poll rather than once per frame, so a
+        // batch that lands together is not trimmed against a window that the
+        // first of them has already moved.
+        decodedFrameCache_.retainOnly(adaptiveWindowIndices_);
         if (desiredFrame_ && *desiredFrame_ != selectedFrame_) {
             const std::size_t latest = *desiredFrame_;
             if (const auto cached = decodedFrameCache_.find(latest)) {
                 commitSelectedFrame(latest, cached, "Cache hit for");
             } else {
                 startFrameLoad(latest, false);
-                return;
             }
         } else if (desiredFrame_ == selectedFrame_) {
             desiredFrame_.reset();
         }
-        if (wasPrefetch || !desiredFrame_) {
-            startNextPrefetch();
-        }
+        startNextPrefetch();
     }
 
     sf::FloatRect horizontalSliceTrack() const {
@@ -4058,7 +4128,6 @@ private:
         saveConfigButton_.draw(*window_, font_);
         loadConfigButton_.draw(*window_, font_);
         generateButton_.draw(*window_, font_);
-        continueButton_.draw(*window_, font_);
 
         sf::RectangleShape viewBackground(setupViewport_.size);
         viewBackground.setPosition(setupViewport_.position);
@@ -4465,41 +4534,60 @@ private:
                 status_ = "Cannot allocate the VTK result texture.";
                 return;
             }
-            std::vector<std::uint8_t> pixels(frame.nx * frame.ny * 4u);
-            for (std::size_t j = 0; j < frame.ny; ++j) {
-                const std::size_t sourceRow = j * frame.nx;
-                const std::size_t pixelRow =
-                    (frame.ny - 1u - j) * frame.nx * 4u;
-                for (std::size_t i = 0; i < frame.nx; ++i) {
+            // Kept between frames so a series of same-sized frames does not
+            // allocate and free a few megabytes on every single step.
+            resultPixels_.assign(frame.nx * frame.ny * 4u, 0);
+            std::uint8_t* const pixelData = resultPixels_.data();
+            const bool showPressure =
+                resultQuantity_ == ResultQuantity::Pressure;
+            const float* const values = showPressure
+                ? frame.pressure.data()
+                : frame.velocityMagnitude.data();
+            const std::uint8_t* const finiteMask = showPressure
+                ? frame.pressureFinite.data()
+                : frame.velocityFinite.data();
+            const std::uint8_t* const solidMask = frame.solid.data();
+            const std::size_t nx = frame.nx;
+            const std::size_t ny = frame.ny;
+            const bool rangeAvailable = range.available;
+            const double rangeMinimum = range.minimum;
+            const double rangeMaximum = range.maximum;
+
+            // One row per thread. Rows are independent and the map is pure
+            // arithmetic, so this is the cheapest parallelism in the UI. The
+            // per-pixel branch on the displayed quantity is gone with it: the
+            // choice is the same for the whole image, so it is made once.
+#if defined(_OPENMP)
+#pragma omp parallel for schedule(static) if (nx * ny >= 32768)
+#endif
+            for (std::ptrdiff_t row = 0;
+                 row < static_cast<std::ptrdiff_t>(ny);
+                 ++row) {
+                const std::size_t j = static_cast<std::size_t>(row);
+                const std::size_t sourceRow = j * nx;
+                const std::size_t pixelRow = (ny - 1u - j) * nx * 4u;
+                for (std::size_t i = 0; i < nx; ++i) {
                     const std::size_t dataIndex = sourceRow + i;
                     sf::Color color = SOLID_COLOR;
-                    if (frame.solid[dataIndex] == 0) {
-                        const bool finite =
-                            resultQuantity_ == ResultQuantity::Pressure
-                                ? frame.pressureFinite[dataIndex] != 0
-                                : frame.velocityFinite[dataIndex] != 0;
-                        if (!finite || !range.available) {
+                    if (solidMask[dataIndex] == 0) {
+                        if (finiteMask[dataIndex] == 0 || !rangeAvailable) {
                             color = INVALID_COLOR;
                         } else {
-                            const double value =
-                                resultQuantity_ == ResultQuantity::Pressure
-                                    ? frame.pressure[dataIndex]
-                                    : frame.velocityMagnitude[dataIndex];
                             color = scalarColor(
-                                value,
-                                range.minimum,
-                                range.maximum);
+                                values[dataIndex],
+                                rangeMinimum,
+                                rangeMaximum);
                         }
                     }
 
                     const std::size_t pixel = pixelRow + i * 4u;
-                    pixels[pixel] = color.r;
-                    pixels[pixel + 1u] = color.g;
-                    pixels[pixel + 2u] = color.b;
-                    pixels[pixel + 3u] = color.a;
+                    pixelData[pixel] = color.r;
+                    pixelData[pixel + 1u] = color.g;
+                    pixelData[pixel + 2u] = color.b;
+                    pixelData[pixel + 3u] = color.a;
                 }
             }
-            resultTexture_.update(pixels.data());
+            resultTexture_.update(resultPixels_.data());
             resultTexture_.setSmooth(false);
             resultTextureCacheValid_ = true;
         }
@@ -4849,10 +4937,10 @@ private:
             label = "SIMULATION RUNNING";
         } else if (resultCatalogFuture_.valid()) {
             label = "INDEXING VTK";
-        } else if (selectedFrameFuture_.valid()) {
-            label = loadingFrameIsPrefetch_
-                        ? "PREFETCHING VTK"
-                        : "LOADING VTK";
+        } else if (!inFlightFrames_.empty()) {
+            label = desiredFrame_
+                        ? "LOADING VTK"
+                        : "PREFETCHING VTK";
         } else {
             return;
         }
@@ -4947,17 +5035,16 @@ private:
     ResultQuantity resultQuantity_ = ResultQuantity::Pressure;
     Button setupTab_{"Setup"};
     Button resultsTab_{"Results"};
-    Button openVtkButton_{"Open VTK frame(s)"};
+    Button openVtkButton_{"Open frames"};
     Button stopSimulationButton_{"Stop simulation"};
-    Button revealVtkButton_{"Show VTK in Explorer"};
-    Button solverExeButton_{"Select solver EXE"};
+    Button revealVtkButton_{"Show output folder"};
+    Button solverExeButton_{"Select solver"};
     Button importButton_{"Import STL / OBJ"};
     Button outputFolderButton_{"Output folder"};
-    Button resetDefaultsButton_{"Reset"};
-    Button saveConfigButton_{"Save cfg"};
-    Button loadConfigButton_{"Load cfg"};
-    Button generateButton_{"Run new"};
-    Button continueButton_{"Continue VTK"};
+    Button resetDefaultsButton_{"Reset defaults"};
+    Button saveConfigButton_{"Save setup"};
+    Button loadConfigButton_{"Load setup"};
+    Button generateButton_{"Run simulation"};
     Button pressureButton_{"Pressure"};
     Button velocityButton_{"Velocity"};
     Button vectorButton_{"Vectors: Off"};
@@ -5007,16 +5094,21 @@ private:
     std::shared_ptr<const VtkFrame> activeFrame_;
     std::size_t selectedFrame_ = 0;
     std::optional<std::size_t> desiredFrame_;
-    std::optional<std::size_t> loadingFrame_;
     std::deque<std::size_t> prefetchQueue_;
     std::vector<std::size_t> adaptiveWindowIndices_;
     std::size_t adaptiveWindowDivisor_ = 1;
-    bool loadingFrameIsPrefetch_ = false;
+    // Frames decode on several threads at once. With one at a time - which is
+    // what a single future meant - flipping quickly outran the loader and every
+    // step past the cached few waited for the whole file to be read again.
+    struct InFlightFrame {
+        std::size_t index = 0;
+        std::future<std::shared_ptr<VtkFrame>> future;
+        std::chrono::steady_clock::time_point started{};
+    };
+    std::vector<InFlightFrame> inFlightFrames_;
     std::future<VtkSeriesCatalog> resultCatalogFuture_;
     std::optional<ResultOrigin> pendingResultOrigin_;
-    std::future<std::shared_ptr<VtkFrame>> selectedFrameFuture_;
     std::chrono::steady_clock::time_point resultCatalogStarted_{};
-    std::chrono::steady_clock::time_point selectedFrameStarted_{};
     DecodedFrameCache decodedFrameCache_{DECODED_FRAME_CACHE_BYTES};
     DataRange pressureRange_;
     DataRange velocityRange_;
@@ -5028,6 +5120,8 @@ private:
     bool showRunDetails_ = false;
     std::string runDetailsText_;
     sf::Texture resultTexture_;
+    // Scratch for the colour map, reused rather than reallocated.
+    std::vector<std::uint8_t> resultPixels_;
     bool resultTextureCacheValid_ = false;
     std::string resultsWarning_;
     std::string status_ =

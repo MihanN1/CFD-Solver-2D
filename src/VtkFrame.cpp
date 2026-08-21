@@ -12,34 +12,102 @@
 #include <limits>
 #include <regex>
 #include <sstream>
+#include <string_view>
 #include <system_error>
 #include <utility>
+
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
+#if defined(__AVX2__)
+#include <immintrin.h>
+#endif
 
 namespace maskui {
 namespace {
 
+// Legacy VTK binary payloads are big endian and the solver writes millions of
+// words per frame. Reading them one at a time through an istream cost more than
+// everything else in this file put together, so the whole array is copied in
+// one go and swapped in place here instead.
+inline std::uint32_t swapWord(std::uint32_t value) {
+#if defined(_MSC_VER)
+    return _byteswap_ulong(value);
+#elif defined(__GNUC__) || defined(__clang__)
+    return __builtin_bswap32(value);
+#else
+    return ((value & 0x000000FFu) << 24) | ((value & 0x0000FF00u) << 8) |
+           ((value & 0x00FF0000u) >> 8) | ((value & 0xFF000000u) >> 24);
+#endif
+}
+
+void swapWords(std::uint32_t* words, std::size_t count) {
+    std::size_t index = 0;
+#if defined(__AVX2__)
+    // Eight words per shuffle. The mask reverses the four bytes of each 32-bit
+    // lane, which is exactly the swap, and it applies per 128-bit half - hence
+    // the same 16 bytes twice.
+    const __m256i mask = _mm256_setr_epi8(
+        3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12,
+        3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+    for (; index + 8 <= count; index += 8) {
+        __m256i chunk = _mm256_loadu_si256(
+            reinterpret_cast<const __m256i*>(words + index));
+        _mm256_storeu_si256(
+            reinterpret_cast<__m256i*>(words + index),
+            _mm256_shuffle_epi8(chunk, mask));
+    }
+#endif
+    for (; index < count; ++index) {
+        words[index] = swapWord(words[index]);
+    }
+}
+
+// Worth a thread hand-off only when there is enough work to pay for it; a small
+// frame is faster on one core than on eight.
+constexpr std::size_t PARALLEL_ELEMENT_THRESHOLD = 32768;
+
+// The whole file is in memory before this runs, so the cursor is a pair of
+// pointers rather than a stream. Every token used to be an std::string built by
+// operator>>, and every binary word a four-byte istream::read; both are gone.
 class TokenCursor {
 public:
-    explicit TokenCursor(std::istream& input)
-        : input_(input) {}
+    TokenCursor(const char* begin, const char* end)
+        : cursor_(begin), end_(end) {}
 
     bool empty() {
         fill();
-        return !token_.has_value();
+        return !hasToken_;
     }
 
-    const std::string& peek() {
+    std::string_view peek() {
         fill();
-        if (empty()) {
+        if (!hasToken_) {
             throw VtkParseError("Unexpected end of VTK file");
         }
-        return *token_;
+        return token_;
     }
 
     std::string take() {
-        const std::string token = peek();
-        token_.reset();
+        std::string token(peek());
+        hasToken_ = false;
         return token;
+    }
+
+    // Bulk reads. One memcpy plus one vectorised swap per array, instead of a
+    // stream round trip per value.
+    void readBigEndianFloats(
+        float* destination,
+        std::size_t count,
+        const std::string& context) {
+        readWords(destination, count, context);
+    }
+
+    void readBigEndianInts(
+        std::int32_t* destination,
+        std::size_t count,
+        const std::string& context) {
+        readWords(destination, count, context);
     }
 
     void expect(const std::string& expected) {
@@ -51,18 +119,18 @@ public:
     }
 
     void beginBinaryPayload(const std::string& context) {
-        if (token_.has_value()) {
+        if (hasToken_) {
             throw VtkParseError(
                 "Internal token state precedes binary " + context);
         }
-        char character = '\0';
-        while (input_.get(character)) {
+        while (cursor_ != end_) {
+            const char character = *cursor_++;
             if (character == '\n') {
                 return;
             }
             if (character == '\r') {
-                if (input_.peek() == '\n') {
-                    input_.get();
+                if (cursor_ != end_ && *cursor_ == '\n') {
+                    ++cursor_;
                 }
                 return;
             }
@@ -102,56 +170,35 @@ public:
                 context + ": " + type);
         }
         constexpr std::size_t valueBytes = 4;
-        if (count > static_cast<std::size_t>(
-                        std::numeric_limits<std::streamoff>::max()) /
-                        valueBytes) {
+        if (count > std::numeric_limits<std::size_t>::max() / valueBytes) {
             throw VtkParseError("Binary VTK payload size overflow: " + context);
         }
-        const std::streamoff byteCount =
-            static_cast<std::streamoff>(count * valueBytes);
-        const std::streampos current = input_.tellg();
-        input_.seekg(0, std::ios::end);
-        const std::streampos end = input_.tellg();
-        if (!input_ || current < std::streampos(0) ||
-            end < current || end - current < byteCount) {
-            throw VtkParseError(
-                "Truncated binary VTK payload while skipping " + context);
-        }
-        input_.seekg(current + byteCount);
-        if (!input_) {
-            throw VtkParseError("Cannot seek across binary " + context);
-        }
+        require(count * valueBytes, "skipping " + context);
+        cursor_ += count * valueBytes;
     }
 
     std::string takeBinaryBytes(
         std::size_t count,
         const std::string& context) {
-        std::string bytes(count, '\0');
-        if (count == 0) {
-            return bytes;
-        }
-        input_.read(bytes.data(), static_cast<std::streamsize>(count));
-        if (input_.gcount() != static_cast<std::streamsize>(count)) {
-            throw VtkParseError(
-                "Truncated binary VTK payload while reading " + context);
-        }
+        require(count, "reading " + context);
+        std::string bytes(cursor_, cursor_ + count);
+        cursor_ += count;
         return bytes;
     }
 
     void endBinaryPayload(const std::string& context) {
-        const int character = input_.peek();
-        if (character == '\r') {
-            input_.get();
-            if (input_.peek() == '\n') {
-                input_.get();
+        if (cursor_ == end_) {
+            return;
+        }
+        if (*cursor_ == '\r') {
+            ++cursor_;
+            if (cursor_ != end_ && *cursor_ == '\n') {
+                ++cursor_;
             }
             return;
         }
-        if (character == '\n') {
-            input_.get();
-            return;
-        }
-        if (character == std::char_traits<char>::eof()) {
+        if (*cursor_ == '\n') {
+            ++cursor_;
             return;
         }
         throw VtkParseError(
@@ -160,39 +207,65 @@ public:
     }
 
 private:
-    std::uint32_t takeBigEndianWord(const std::string& context) {
-        std::array<unsigned char, 4> bytes{};
-        input_.read(
-            reinterpret_cast<char*>(bytes.data()),
-            static_cast<std::streamsize>(bytes.size()));
-        if (input_.gcount() !=
-            static_cast<std::streamsize>(bytes.size())) {
+    static bool isSpace(char character) {
+        return character == ' ' || character == '\t' || character == '\n' ||
+               character == '\r' || character == '\v' || character == '\f';
+    }
+
+    void require(std::size_t bytes, const std::string& context) const {
+        if (static_cast<std::size_t>(end_ - cursor_) < bytes) {
             throw VtkParseError(
-                "Truncated binary VTK payload while reading " + context);
+                "Truncated binary VTK payload while " + context);
         }
-        return
-            (static_cast<std::uint32_t>(bytes[0]) << 24u) |
-            (static_cast<std::uint32_t>(bytes[1]) << 16u) |
-            (static_cast<std::uint32_t>(bytes[2]) << 8u) |
-            static_cast<std::uint32_t>(bytes[3]);
+    }
+
+    template <typename T>
+    void readWords(
+        T* destination,
+        std::size_t count,
+        const std::string& context) {
+        static_assert(sizeof(T) == 4, "VTK binary words are four bytes");
+        if (count > std::numeric_limits<std::size_t>::max() / sizeof(T)) {
+            throw VtkParseError("Binary VTK payload size overflow: " + context);
+        }
+        const std::size_t byteCount = count * sizeof(T);
+        require(byteCount, "reading " + context);
+        std::memcpy(destination, cursor_, byteCount);
+        cursor_ += byteCount;
+        swapWords(reinterpret_cast<std::uint32_t*>(destination), count);
+    }
+
+    std::uint32_t takeBigEndianWord(const std::string& context) {
+        std::uint32_t word = 0;
+        require(sizeof(word), "reading " + context);
+        std::memcpy(&word, cursor_, sizeof(word));
+        cursor_ += sizeof(word);
+        return swapWord(word);
     }
 
     void fill() {
-        if (token_.has_value()) {
+        if (hasToken_) {
             return;
         }
-        std::string next;
-        if (input_ >> next) {
-            token_ = std::move(next);
+        while (cursor_ != end_ && isSpace(*cursor_)) {
+            ++cursor_;
+        }
+        if (cursor_ == end_) {
             return;
         }
-        if (!input_.eof()) {
-            throw VtkParseError("Failed while reading VTK tokens");
+        const char* start = cursor_;
+        while (cursor_ != end_ && !isSpace(*cursor_)) {
+            ++cursor_;
         }
+        token_ = std::string_view(
+            start, static_cast<std::size_t>(cursor_ - start));
+        hasToken_ = true;
     }
 
-    std::istream& input_;
-    std::optional<std::string> token_;
+    const char* cursor_ = nullptr;
+    const char* end_ = nullptr;
+    std::string_view token_;
+    bool hasToken_ = false;
 };
 
 std::string trimCarriageReturn(std::string line) {
@@ -613,17 +686,46 @@ std::size_t DecodedFrameCache::byteBudget() const {
 }
 
 VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
-    std::ifstream input(path, std::ios::binary);
+    // One read for the whole file. Everything below then works on memory, which
+    // is what makes a frame decode in a couple of milliseconds instead of the
+    // stream round trip it used to cost per value.
+    std::ifstream input(path, std::ios::binary | std::ios::ate);
     if (!input.is_open()) {
         throw VtkParseError("Cannot open VTK file: " + path.string());
     }
+    const std::streamoff fileSize = input.tellg();
+    if (fileSize < 0) {
+        throw VtkParseError("Cannot measure VTK file: " + path.string());
+    }
+    std::vector<char> data(static_cast<std::size_t>(fileSize));
+    input.seekg(0, std::ios::beg);
+    if (!data.empty() &&
+        !input.read(data.data(), static_cast<std::streamsize>(data.size()))) {
+        throw VtkParseError("Cannot read VTK file: " + path.string());
+    }
+    input.close();
+
+    const char* readCursor = data.data();
+    const char* const readEnd = data.data() + data.size();
+    const auto nextLine = [&readCursor, readEnd](std::string& line) {
+        if (readCursor == readEnd) {
+            return false;
+        }
+        const char* const start = readCursor;
+        while (readCursor != readEnd && *readCursor != '\n') {
+            ++readCursor;
+        }
+        line.assign(start, static_cast<std::size_t>(readCursor - start));
+        if (readCursor != readEnd) {
+            ++readCursor;
+        }
+        return true;
+    };
 
     std::string version;
     std::string title;
     std::string encoding;
-    if (!std::getline(input, version) ||
-        !std::getline(input, title) ||
-        !std::getline(input, encoding)) {
+    if (!nextLine(version) || !nextLine(title) || !nextLine(encoding)) {
         throw VtkParseError("VTK file is missing its three-line header");
     }
     version = trimCarriageReturn(version);
@@ -638,7 +740,7 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
             "Only legacy ASCII or BINARY VTK files are supported");
     }
 
-    TokenCursor cursor(input);
+    TokenCursor cursor(readCursor, readEnd);
     cursor.expect("DATASET");
     cursor.expect("STRUCTURED_POINTS");
     cursor.expect("DIMENSIONS");
@@ -752,12 +854,9 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                 frame.pressure.reserve(sampleCount);
                 if (binary) {
                     cursor.beginBinaryPayload("pressure");
-                    for (std::size_t index = 0;
-                         index < sampleCount;
-                         ++index) {
-                        frame.pressure.push_back(
-                            cursor.takeBigEndianFloat("pressure"));
-                    }
+                    frame.pressure.resize(sampleCount);
+                    cursor.readBigEndianFloats(
+                        frame.pressure.data(), sampleCount, "pressure");
                     cursor.endBinaryPayload("pressure");
                 } else {
                     for (std::size_t index = 0;
@@ -780,17 +879,22 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                 frame.solid.reserve(sampleCount);
                 if (binary) {
                     cursor.beginBinaryPayload("solid");
-                    for (std::size_t index = 0;
-                         index < sampleCount;
-                         ++index) {
-                        const int value =
-                            cursor.takeBigEndianInt("solid");
-                        if (value != 0 && value != 1) {
-                            throw VtkParseError(
-                                "solid values must be 0 or 1");
-                        }
-                        frame.solid.push_back(
-                            static_cast<std::uint8_t>(value));
+                    // Read as 32-bit words, then narrow to the byte the frame
+                    // keeps. The scratch buffer is worth it: it turns 100k
+                    // stream reads into one memcpy and one swap pass.
+                    std::vector<std::int32_t> rawSolid(sampleCount);
+                    cursor.readBigEndianInts(
+                        rawSolid.data(), sampleCount, "solid");
+                    frame.solid.resize(sampleCount);
+                    std::int32_t invalid = 0;
+                    for (std::size_t index = 0; index < sampleCount; ++index) {
+                        const std::int32_t value = rawSolid[index];
+                        invalid |= (value & ~std::int32_t(1));
+                        frame.solid[index] =
+                            static_cast<std::uint8_t>(value != 0);
+                    }
+                    if (invalid != 0) {
+                        throw VtkParseError("solid values must be 0 or 1");
                     }
                     cursor.endBinaryPayload("solid");
                 } else {
@@ -838,15 +942,16 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                 frame.velocity.reserve(sampleCount);
                 if (binary) {
                     cursor.beginBinaryPayload("velocity");
-                    for (std::size_t index = 0;
-                         index < sampleCount;
-                         ++index) {
-                        frame.velocity.push_back({
-                            cursor.takeBigEndianFloat("velocity x"),
-                            cursor.takeBigEndianFloat("velocity y"),
-                            cursor.takeBigEndianFloat("velocity z")
-                        });
-                    }
+                    // Velocity is three interleaved floats per sample and the
+                    // struct is exactly that, so the array lands straight in it.
+                    static_assert(
+                        sizeof(Velocity) == 3 * sizeof(float),
+                        "Velocity must be three tightly packed floats");
+                    frame.velocity.resize(sampleCount);
+                    cursor.readBigEndianFloats(
+                        reinterpret_cast<float*>(frame.velocity.data()),
+                        sampleCount * 3u,
+                        "velocity");
                     cursor.endBinaryPayload("velocity");
                 } else {
                     for (std::size_t index = 0;
@@ -984,44 +1089,110 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
         sampleCount,
         std::numeric_limits<float>::quiet_NaN());
 
+    // Finite masks, speed and the four ranges in one sweep. Split across cores
+    // when the grid is large enough to pay for the hand-off; each thread keeps
+    // private counters and ranges and they are merged afterwards, so the result
+    // does not depend on how many threads ran.
     std::size_t nonFinitePressureCount = 0;
     std::size_t nonFiniteVelocityCount = 0;
-    for (std::size_t index = 0; index < sampleCount; ++index) {
-        const bool pressureIsFinite = std::isfinite(frame.pressure[index]);
-        frame.pressureFinite[index] =
-            static_cast<std::uint8_t>(pressureIsFinite);
-        if (!pressureIsFinite) {
-            ++nonFinitePressureCount;
+    const float* const pressureData = frame.pressure.data();
+    const Velocity* const velocityData = frame.velocity.data();
+    const std::uint8_t* const solidData = frame.solid.data();
+    std::uint8_t* const pressureFiniteData = frame.pressureFinite.data();
+    std::uint8_t* const velocityFiniteData = frame.velocityFinite.data();
+    float* const magnitudeData = frame.velocityMagnitude.data();
+
+#if defined(_OPENMP)
+#pragma omp parallel if (sampleCount >= PARALLEL_ELEMENT_THRESHOLD)
+#endif
+    {
+        std::size_t localNonFinitePressure = 0;
+        std::size_t localNonFiniteVelocity = 0;
+        DataRange localPressure;
+        DataRange localVelocityX;
+        DataRange localVelocityY;
+        DataRange localMagnitude;
+
+#if defined(_OPENMP)
+#pragma omp for schedule(static) nowait
+#endif
+        for (std::ptrdiff_t signedIndex = 0;
+             signedIndex < static_cast<std::ptrdiff_t>(sampleCount);
+             ++signedIndex) {
+            const std::size_t index =
+                static_cast<std::size_t>(signedIndex);
+            const float pressureValue = pressureData[index];
+            const bool pressureIsFinite = std::isfinite(pressureValue);
+            pressureFiniteData[index] =
+                static_cast<std::uint8_t>(pressureIsFinite);
+            if (!pressureIsFinite) {
+                ++localNonFinitePressure;
+            }
+
+            const Velocity velocity = velocityData[index];
+            const bool componentsAreFinite =
+                std::isfinite(velocity.x) &&
+                std::isfinite(velocity.y) &&
+                std::isfinite(velocity.z);
+            // std::hypot guards against overflow that the plain square root
+            // would hit, but it is an order of magnitude slower and the guard
+            // only matters near the float limits - so it is kept for those.
+            float magnitude = std::numeric_limits<float>::quiet_NaN();
+            if (componentsAreFinite) {
+                const float ax = std::fabs(velocity.x);
+                const float ay = std::fabs(velocity.y);
+                constexpr float safeLimit = 1.0e18f;
+                magnitude = (ax < safeLimit && ay < safeLimit)
+                    ? std::sqrt(ax * ax + ay * ay)
+                    : std::hypot(velocity.x, velocity.y);
+            }
+            const bool magnitudeIsFinite = std::isfinite(magnitude);
+            if (magnitudeIsFinite) {
+                magnitudeData[index] = magnitude;
+            }
+            velocityFiniteData[index] = static_cast<std::uint8_t>(
+                componentsAreFinite && magnitudeIsFinite);
+            if (!componentsAreFinite || !magnitudeIsFinite) {
+                ++localNonFiniteVelocity;
+            }
+
+            if (solidData[index] != 0) {
+                continue;
+            }
+            if (pressureIsFinite) {
+                includeValue(localPressure, pressureValue);
+            }
+            includeValue(localVelocityX, velocity.x);
+            includeValue(localVelocityY, velocity.y);
+            if (magnitudeIsFinite) {
+                includeValue(localMagnitude, magnitude);
+            }
         }
 
-        const Velocity& velocity = frame.velocity[index];
-        const bool componentsAreFinite =
-            std::isfinite(velocity.x) &&
-            std::isfinite(velocity.y) &&
-            std::isfinite(velocity.z);
-        const float magnitude = componentsAreFinite
-            ? std::hypot(velocity.x, velocity.y)
-            : std::numeric_limits<float>::quiet_NaN();
-        const bool magnitudeIsFinite = std::isfinite(magnitude);
-        if (magnitudeIsFinite) {
-            frame.velocityMagnitude[index] = magnitude;
-        }
-        frame.velocityFinite[index] = static_cast<std::uint8_t>(
-            componentsAreFinite && magnitudeIsFinite);
-        if (!componentsAreFinite || !magnitudeIsFinite) {
-            ++nonFiniteVelocityCount;
-        }
-
-        if (frame.solid[index] != 0) {
-            continue;
-        }
-        if (pressureIsFinite) {
-            includeValue(frame.pressureRange, frame.pressure[index]);
-        }
-        includeValue(frame.velocityXRange, velocity.x);
-        includeValue(frame.velocityYRange, velocity.y);
-        if (magnitudeIsFinite) {
-            includeValue(frame.velocityMagnitudeRange, magnitude);
+#if defined(_OPENMP)
+#pragma omp critical(vtkFrameReduce)
+#endif
+        {
+            nonFinitePressureCount += localNonFinitePressure;
+            nonFiniteVelocityCount += localNonFiniteVelocity;
+            if (localPressure.available) {
+                includeValue(frame.pressureRange, localPressure.minimum);
+                includeValue(frame.pressureRange, localPressure.maximum);
+            }
+            if (localVelocityX.available) {
+                includeValue(frame.velocityXRange, localVelocityX.minimum);
+                includeValue(frame.velocityXRange, localVelocityX.maximum);
+            }
+            if (localVelocityY.available) {
+                includeValue(frame.velocityYRange, localVelocityY.minimum);
+                includeValue(frame.velocityYRange, localVelocityY.maximum);
+            }
+            if (localMagnitude.available) {
+                includeValue(
+                    frame.velocityMagnitudeRange, localMagnitude.minimum);
+                includeValue(
+                    frame.velocityMagnitudeRange, localMagnitude.maximum);
+            }
         }
     }
 

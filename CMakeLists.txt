@@ -8,7 +8,12 @@ project(CFDMaskUIOptimized
 include(FetchContent)
 option(BUILD_TESTING "Build CFD Mask UI tests" OFF)
 option(CFD_UI_ENABLE_AVX2 "Compile UI-owned code with AVX2 instructions" OFF)
+option(CFD_UI_ENABLE_OPENMP "Decode and colour VTK frames on every core" OFF)
+option(CFD_UI_ENABLE_CUDA "Carry the CUDA release tag on this UI build" OFF)
 option(CFD_UI_STATIC_RUNTIME "Prefer static C/C++ runtimes where the platform supports it" ON)
+# A row must never be published under a name promising a feature the build does
+# not have - the same rule the solver's release script enforces.
+option(CFD_UI_ENABLE_OPENMP_EXPLICIT "Treat a missing OpenMP runtime as a hard error" OFF)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -119,11 +124,79 @@ if(CFD_UI_ENABLE_AVX2)
     if(MSVC)
         target_compile_options(mask_ui_core PRIVATE /arch:AVX2)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(mask_ui_core PRIVATE -mavx2)
+        # -mfma alongside -mavx2 for the same reason the solver passes it: the
+        # magnitude and colour maths contracts into FMA only once it is allowed.
+        target_compile_options(mask_ui_core PRIVATE -mavx2 -mfma)
     else()
         message(FATAL_ERROR
             "CFD_UI_ENABLE_AVX2 is ON, but this compiler has no configured AVX2 flag.")
     endif()
+endif()
+
+# OpenMP is what turns frame decoding and the colour map loose on every core.
+# The static runtime matters here too: an OpenMP row that needs libgomp.so on
+# the machine that runs it is not the single-file build the release promises.
+if(CFD_UI_ENABLE_OPENMP)
+    if(CFD_UI_STATIC_RUNTIME AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        execute_process(
+            COMMAND "${CMAKE_CXX_COMPILER}" ${CMAKE_CXX_FLAGS} -print-file-name=libgomp.a
+            OUTPUT_VARIABLE CFD_UI_LIBGOMP_A
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(EXISTS "${CFD_UI_LIBGOMP_A}")
+            set(OpenMP_CXX_FLAGS "-fopenmp")
+            set(OpenMP_CXX_LIB_NAMES "gomp")
+            set(OpenMP_gomp_LIBRARY "${CFD_UI_LIBGOMP_A}")
+            message(STATUS "UI OpenMP: static ${CFD_UI_LIBGOMP_A}")
+        endif()
+    endif()
+
+    # AppleClang carries no OpenMP runtime of its own, so libomp has to be
+    # pointed at, exactly as the solver does it.
+    if(APPLE AND CFD_UI_OPENMP_ROOT AND
+       EXISTS "${CFD_UI_OPENMP_ROOT}/include/omp.h")
+        if(CFD_UI_STATIC_RUNTIME AND
+           EXISTS "${CFD_UI_OPENMP_ROOT}/lib/libomp.a")
+            set(OpenMP_omp_LIBRARY "${CFD_UI_OPENMP_ROOT}/lib/libomp.a")
+        elseif(EXISTS "${CFD_UI_OPENMP_ROOT}/lib/libomp.dylib")
+            set(OpenMP_omp_LIBRARY "${CFD_UI_OPENMP_ROOT}/lib/libomp.dylib")
+        endif()
+        if(OpenMP_omp_LIBRARY)
+            set(OpenMP_CXX_FLAGS
+                "-Xclang -fopenmp -I${CFD_UI_OPENMP_ROOT}/include")
+            set(OpenMP_CXX_LIB_NAMES "omp")
+            message(STATUS "UI OpenMP: ${OpenMP_omp_LIBRARY}")
+        endif()
+    endif()
+
+    find_package(OpenMP QUIET COMPONENTS CXX)
+    if(OpenMP_CXX_FOUND)
+        target_link_libraries(mask_ui_core PUBLIC OpenMP::OpenMP_CXX)
+        message(STATUS "UI OpenMP: enabled")
+    elseif(CFD_UI_ENABLE_OPENMP_EXPLICIT)
+        message(FATAL_ERROR
+            "CFD_UI_ENABLE_OPENMP was requested with "
+            "CFD_UI_ENABLE_OPENMP_EXPLICIT=ON, but no OpenMP runtime was found. "
+            "On macOS install libomp (brew install libomp) and pass "
+            "-DCFD_UI_OPENMP_ROOT=$(brew --prefix libomp)."
+        )
+    else()
+        message(STATUS "UI OpenMP: not found; building single-threaded")
+    endif()
+endif()
+
+# CUDA deliberately changes nothing here. Decoding a frame is a read plus a byte
+# swap, and the colour map is one pass whose result has to end up in host memory
+# for the texture upload anyway - sending either to a GPU would cost more in
+# transfers than the arithmetic is worth, which is the whole reason this UI is
+# fast on AVX2 and OpenMP instead. The option exists so a "-cuda" row can be
+# built and paired with the solver row of the same name; because it emits no
+# code, one binary serves both the "-cuda" and the plain row of a variant.
+if(CFD_UI_ENABLE_CUDA)
+    message(STATUS
+        "UI CUDA: release tag only - this UI runs no CUDA and the binary is "
+        "identical to the same row without it")
 endif()
 
 add_executable(cfd_mask_ui_optimized
@@ -152,7 +225,7 @@ if(CFD_UI_ENABLE_AVX2)
     if(MSVC)
         target_compile_options(cfd_mask_ui_optimized PRIVATE /arch:AVX2)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(cfd_mask_ui_optimized PRIVATE -mavx2)
+        target_compile_options(cfd_mask_ui_optimized PRIVATE -mavx2 -mfma)
     endif()
 endif()
 

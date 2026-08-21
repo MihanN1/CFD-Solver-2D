@@ -274,18 +274,38 @@ bool writeFluidSolverArguments(
     }
 }
 
+// The solver ships as "Fluid Solver.exe" on Windows and as "Fluid Solver" with
+// no extension everywhere else. Both names are tried on every platform, the
+// native one first: the UI ships for Linux and macOS now, and it used to insist
+// on a .exe that does not exist there.
+const char* const FLUID_SOLVER_FILE_NAMES[] = {
+#if defined(_WIN32)
+    "Fluid Solver.exe",
+    "Fluid Solver",
+#else
+    "Fluid Solver",
+    "Fluid Solver.exe",
+#endif
+};
+
 std::filesystem::path resolveFluidSolverExecutable(
     const std::filesystem::path& uiExecutable,
     const std::filesystem::path& configuredExecutable) {
-    const std::filesystem::path adjacent =
-        uiExecutable.parent_path() / "Fluid Solver.exe";
-    if (isRegularFile(adjacent)) {
-        return adjacent;
+    const std::filesystem::path directory = uiExecutable.parent_path();
+    for (const char* const name : FLUID_SOLVER_FILE_NAMES) {
+        const std::filesystem::path adjacent = directory / name;
+        if (isRegularFile(adjacent)) {
+            return adjacent;
+        }
     }
     if (isRegularFile(configuredExecutable)) {
         return configuredExecutable;
     }
-    return adjacent.empty() ? configuredExecutable : adjacent;
+    // Nothing there. Name the file the UI looks for beside itself, so the
+    // message the user gets points at the place it has to be put.
+    return directory.empty()
+        ? configuredExecutable
+        : directory / FLUID_SOLVER_FILE_NAMES[0];
 }
 
 bool validateFluidSolverExecutable(
@@ -297,6 +317,7 @@ bool validateFluidSolverExecutable(
             "Fluid Solver executable is not a regular file: " +
                 executable.string());
     }
+#if defined(_WIN32)
     std::string extension = executable.extension().string();
     std::transform(
         extension.begin(),
@@ -306,8 +327,25 @@ bool validateFluidSolverExecutable(
             return static_cast<char>(std::tolower(character));
         });
     if (extension != ".exe") {
-        return fail(error, "Fluid Solver must be a .exe file");
+        return fail(error, "On Windows the Fluid Solver must be a .exe file");
     }
+#else
+    // Elsewhere the solver carries no extension, so the thing worth checking is
+    // whether it can actually be run.
+    std::error_code permissionError;
+    const std::filesystem::perms permissions =
+        std::filesystem::status(executable, permissionError).permissions();
+    if (!permissionError &&
+        (permissions & (std::filesystem::perms::owner_exec |
+                        std::filesystem::perms::group_exec |
+                        std::filesystem::perms::others_exec)) ==
+            std::filesystem::perms::none) {
+        return fail(
+            error,
+            "Fluid Solver is not executable: " + executable.string() +
+                " - chmod +x it");
+    }
+#endif
     error.clear();
     return true;
 }

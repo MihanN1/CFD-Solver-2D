@@ -6,8 +6,12 @@ This package builds the GUI independently of the CFD solver source tree.
 ## Requirements
 
 - CMake 3.28 or newer.
-- Visual Studio 18 2026 with **Desktop development with C++**.
+- Visual Studio 2022 or newer with **Desktop development with C++**.
 - Windows SDK.
+
+On Linux: `build-essential`, `libx11-dev`, `libxrandr-dev`, `libxcursor-dev`,
+`libxi-dev`, `libudev-dev`, `libgl1-mesa-dev`. On macOS: the Xcode command line
+tools, plus `brew install libomp` for the OpenMP rows.
 
 The package includes the GUI's direct source dependencies:
 
@@ -28,7 +32,7 @@ may download its pinned FreeType/HarfBuzz/SheenBidi sources on a clean build.
 5. If you previously configured an older package in that build folder, use
    **File -> Delete Cache** first.
 6. Press **Configure**.
-7. Generator: **Visual Studio 18 2026**; platform: **x64**.
+7. Generator: **Visual Studio 17 2022** (or newer); platform: **x64**.
 8. Leave `CFD_SOLVER_EXE` empty unless you explicitly want CMake to copy a built
    `Fluid Solver.exe` beside the GUI.
 9. Press **Configure** again until there are no red unresolved entries.
@@ -74,7 +78,7 @@ List the exact 30 names without building:
 python scripts/build-ui-release.py --version 0.1 --list
 ```
 
-Build all Windows rows locally with Visual Studio 18 2026:
+Build all Windows rows locally:
 
 ```text
 python scripts/build-ui-release.py --version 0.1 --arch x64 --arch x86
@@ -85,31 +89,69 @@ be installed. On macOS, CI builds arm64 and x64 on native runners. The workflow
 merges all four native-platform jobs, verifies that all 30 expected archives are
 present, creates `Fluid-Solver-UI-Source-Code.zip`, and writes `SHA256SUMS.txt`.
 
-AVX2 is a real UI compile-time ISA switch. OpenMP and CUDA are solver-kernel
-features, not UI execution backends, so those suffixes are compatibility/package
-identity only; archives with the same architecture and AVX2 state reuse the same
-UI binary. This is required so the existing installer can pair
-`<feature>-ui` with the matching solver `<feature>` row by name without adding
-meaningless OpenMP/CUDA dependencies to the UI executable.
+AVX2 and OpenMP are both real compile-time switches for this UI: AVX2 vectorises
+the byte swap that decodes a VTK frame, OpenMP spreads that decode and the colour
+map across every core. CUDA is not, and deliberately so - decoding a frame is a
+read plus a byte swap, and the colour map has to land in host memory for the
+texture upload anyway, so a round trip to the GPU would cost more in transfers
+than the arithmetic is worth. The `-cuda` suffix therefore selects a name and not
+a build, which is what lets 22 builds cover the 30 archive names the solver
+release pairs against.
+
+A row whose name promises OpenMP is configured with
+`CFD_UI_ENABLE_OPENMP_EXPLICIT=ON`, so a build machine without an OpenMP runtime
+fails the row instead of quietly publishing a single-threaded binary under a name
+that says otherwise.
+
+On Windows an OpenMP row needs `vcomp140.dll` beside it, because MSVC has no
+static OpenMP runtime. The solver's own `omp` archives already ship that DLL, and
+a `-ui` archive is that archive plus the UI binary, so the pairing supplies it.
 
 Each binary archive contains one top-level folder with the same stem,
-`Fluid Solver UI[.exe]`, README/LICENSE/build info, and an empty `output/` folder.
+`Fluid Solver UI[.exe]`, `README-UI.md`, `BUILD_INFO-UI.md`, and an empty
+`output/` folder. The documentation is renamed on the way in on purpose: these
+archives are merged by hand into the solver's `-ui` archive, which has a
+`README.md` and a `LICENSE` of its own, and a plain copy would replace them.
+
+**To assemble a `-ui` release archive:** take the solver's archive for that row,
+and add `Fluid Solver UI[.exe]` from the UI archive of the same name. Nothing
+else from the UI archive is needed - the binary is fully static apart from the
+system graphics stack.
 
 ## Solver integration
 
-The solver is optional at GUI build time. At runtime the GUI can use
-**Select solver EXE** to point to `Fluid Solver.exe`. Selecting/replacing the
-solver does not require rebuilding the GUI.
+The solver is optional at GUI build time. At runtime the UI looks for the solver
+beside its own executable first - `Fluid Solver.exe` on Windows, `Fluid Solver`
+with no extension on Linux and macOS - and **Select solver** points it somewhere
+else. Selecting or replacing the solver does not require rebuilding the UI.
 
-For a fresh UI with no saved preference, the default VTK/output root is
-`./output`, resolved from the process working directory and converted to an
-absolute run directory before it is passed to the current Fluid Solver. A saved
-`ui-preferences.txt` or loaded `.cfdui` configuration can intentionally override
-that default.
+For a fresh UI with no saved preference, the output root is `output` **beside the
+UI executable**, which is where the solver writes its own frames and where the
+installers create the folder. It is not the process working directory: a Start
+Menu shortcut, a desktop icon or a drag-and-drop each hand the process some other
+directory, and frames used to land wherever that happened to be. A saved
+`ui-preferences.txt` or a loaded `.cfdui` configuration still overrides it.
 
 The current UI launch contract does not emit gravity, `restart`, `restartFile`,
 or `addTime`. VTK restart parsing/state support is retained for later continuation
 work when the solver has the required restart interface.
+
+## Frame loading
+
+A VTK frame is read in one go and decoded from memory. The legacy binary payload
+is big endian, so every 32-bit word is swapped in place - eight at a time through
+one AVX2 shuffle where that is compiled in - rather than pulled through the
+stream a value at a time, which is what the reader used to do. On a 600x300 grid
+that is 24.8 ms down to 2.6 ms per frame.
+
+Frames also decode on several threads at once, one per spare core up to eight.
+There used to be a single loader, and a request while it was busy simply waited,
+which is why flipping quickly past the few cached steps stalled on every one. The
+decoded-frame cache holds up to 256 frames within its byte budget instead of 16,
+so an ordinary series ends up entirely resident after one pass.
+
+The colour map that turns a frame into the displayed texture runs across cores
+too, and its buffer is kept between frames rather than reallocated per step.
 
 ## Tests
 
@@ -171,14 +213,23 @@ Gravity and continuation keys are not emitted.
 
 Performed in the available Linux validation environment:
 
-- C++17 syntax check of every `src/*.cpp`: passed.
-- `FluidSolverRunTests`: compiled and passed.
-- `GeometryProcessorTests`: compiled and passed.
-- `VtkFrameTests`: compiled and passed.
-- Generated 30-name release matrix compared exactly against the provided solver `release/0.1` binary archive set: 30/30, no missing or extra rows.
+- Full Linux Release link of `Fluid Solver UI`, with and without AVX2/OpenMP.
+- `FluidSolverRunTests`, `GeometryProcessorTests`, `VtkFrameTests`: passed.
+- Reader equivalence: the same data written as BINARY and as ASCII decodes to
+  bit-identical pressure, solid, velocity, speed, finite masks and ranges,
+  including frames carrying NaN and infinity.
+- Reader robustness: truncated payload, truncated header, empty file and a solid
+  value outside {0,1} all raise `VtkParseError` rather than misbehaving.
+- Ranges and speeds checked against independently computed reference values.
+- Solver discovery: the extension-less solver is found beside the UI, a
+  non-executable one is refused with a message that says so, and a configured
+  path is used when nothing sits beside the UI.
+- Generated 30-name release matrix compared exactly against the solver
+  `release/0.1` archive set: 30/30, no missing or extra rows.
+- Linux x64 release rows built and packaged end to end through
+  `scripts/build-ui-release.py`.
 
 Not performed here:
 
-- Visual Studio 18 2026 Windows Release build;
-- Windows GUI launch and interactive visual verification;
-- live execution of the Windows-only finished Fluid Solver binaries.
+- Windows and macOS builds;
+- GUI launch and interactive visual verification (the container has no display).

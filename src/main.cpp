@@ -3,10 +3,14 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <shellapi.h>
+#elif defined(__APPLE__)
+#include <mach-o/dyld.h>
 #endif
 
+#include <cstdint>
 #include <filesystem>
 #include <iostream>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -50,6 +54,38 @@ std::filesystem::path executablePath(
         buffer.resize(length);
         return std::filesystem::path(buffer);
     }
+#elif defined(__linux__)
+    // Everything the UI keeps beside itself - the solver, output/, the font,
+    // the saved preferences - hangs off this path, and argv[0] is not it. A
+    // launcher symlink or a .desktop entry hands over a bare name or a link,
+    // and resolving that against the working directory aimed the whole lot at
+    // wherever the program happened to be started from.
+    {
+        std::error_code linkError;
+        const std::filesystem::path self =
+            std::filesystem::read_symlink("/proc/self/exe", linkError);
+        if (!linkError && !self.empty()) {
+            return self;
+        }
+    }
+#elif defined(__APPLE__)
+    {
+        std::uint32_t size = 0;
+        _NSGetExecutablePath(nullptr, &size);
+        if (size > 0) {
+            std::string pathBuffer(size, '\0');
+            if (_NSGetExecutablePath(pathBuffer.data(), &size) == 0) {
+                pathBuffer.resize(std::char_traits<char>::length(
+                    pathBuffer.c_str()));
+                std::error_code realError;
+                const std::filesystem::path resolved =
+                    std::filesystem::canonical(pathBuffer, realError);
+                return realError
+                    ? std::filesystem::path(pathBuffer)
+                    : resolved;
+            }
+        }
+    }
 #endif
     std::error_code error;
     std::filesystem::path executable =
@@ -69,7 +105,7 @@ int main(int argc, char* argv[]) {
         systemArguments(argc, argv);
     if (arguments.size() > 2) {
         std::cerr
-            << "Usage: cfd_mask_ui_optimized [model.stl|model.obj|result-directory]\n";
+            << "Usage: \"Fluid Solver UI\" [model.stl | model.obj | folder of solution_*.vtk]\n";
         return 1;
     }
 

@@ -1,74 +1,115 @@
-# CFD Mask UI Optimized — Build / Validation Information
+# Fluid Solver UI — build and validation notes
 
 Date: 2026-08-21
 
 ## Scope
 
-This package contains the GUI source revision only. The reference `CFD-Solver-2D` project/release was inspected to reproduce its release matrix; no solver source, binary, or published solver archive was modified.
+This package is the UI source revision only. The solver project is an external,
+read-only runtime dependency; no solver source, binary or published archive was
+modified.
 
-## Default VTK/output root
+## Package size
 
-A fresh UI now starts with `./output` as its output root, relative to the process working directory. The UI resolves that location to an absolute path before generating the solver's `outputDir`, preserving the current solver requirement that output paths be absolute. Existing saved preferences/configuration can still override the default.
+`third_party/sfml` was vendored whole, including the parts a build never reads.
+Removed: `examples/`, `test/`, `doc/`, `.github/`, and the `miniaudio`, `dr_mp3`
+and `wepoll` header drops under `extlibs/` — SFML's audio and network modules are
+switched off here and nothing else includes them. The package went from 30 MB to
+15 MB. What is left of `extlibs` is genuinely referenced: `cpp-unicodelib` by
+`System/String.cpp`, `stb_image` and `qoi` by `Graphics/Image.cpp`, `glad` and
+`vulkan` by the window and graphics modules.
+
+Release binaries are stripped on Linux and macOS, which is another 13% off the
+file the user downloads. MSVC already keeps debug information in a separate
+`.pdb`.
+
+## Frame loading
+
+The reader used to pull the legacy VTK binary payload through an `ifstream` four
+bytes at a time — one virtual dispatch per value, several hundred thousand of
+them per frame. It now reads the file once and decodes from memory, swapping the
+big-endian words in place, eight at a time through one AVX2 shuffle where that is
+compiled in. Measured on a 600×300 grid (3.4 MiB frame, two cores):
+
+| build | parse |
+| --- | --- |
+| before | 24.8 ms |
+| after, no AVX2/OpenMP | 3.2 ms |
+| after, AVX2 + OpenMP | 2.6 ms |
+
+Frames also decode on several threads at once — one per spare core, capped at
+eight. There was a single loader before, and a request arriving while it was busy
+simply waited its turn, which is why flipping quickly past the cached few stalled
+on every step. The decoded-frame cache holds up to 256 frames inside its byte
+budget rather than 16.
 
 ## Static linking policy
 
 - `BUILD_SHARED_LIBS=OFF`: SFML is static.
-- `SFML_USE_SYSTEM_DEPS=OFF`: FreeType, HarfBuzz, and SheenBidi are built into the static dependency graph.
+- `SFML_USE_SYSTEM_DEPS=OFF`: FreeType, HarfBuzz and SheenBidi are inside the
+  static dependency graph.
 - `CFD_UI_STATIC_RUNTIME=ON` by default.
-- Windows/MSVC: static CRT (`/MT`, `/MTd` for Debug).
-- Linux/GCC: static `libgcc` + `libstdc++`; X11/OpenGL/OS interfaces remain dynamic.
-- macOS: system runtime/frameworks remain dynamic because macOS does not support fully static desktop binaries.
+- Windows/MSVC: static CRT (`/MT`).
+- Linux/GCC: static `libgcc`, `libstdc++` and, for the OpenMP rows, `libgomp.a`;
+  X11/OpenGL remain dynamic because they are system interfaces.
+- macOS: system runtimes and frameworks remain dynamic, as the platform requires.
+
+The one exception is a Windows OpenMP row, which needs `vcomp140.dll` beside it
+because MSVC has no static OpenMP runtime. The solver's own `omp` archives ship
+that DLL already, and a `-ui` archive is that archive plus the UI binary, so the
+pairing supplies it.
 
 ## Release matrix
 
-`scripts/build-ui-release.py` generates the exact 30 solver-corresponding UI archive names:
+`scripts/build-ui-release.py` produces the 30 archive names of the solver release
+with `-ui` before `.zip`:
 
-- Windows x64: 8 rows.
-- Windows x86: 4 rows.
-- Linux x64: 8 rows.
-- Linux x86: 4 rows.
-- macOS arm64: 2 rows.
-- macOS x64: 4 rows.
+- Windows x64: 8 rows, x86: 4 rows.
+- Linux x64: 8 rows, x86: 4 rows.
+- macOS arm64: 2 rows, x64: 4 rows.
 
-Each name is the solver row name plus `-ui` before `.zip`.
+AVX2 and OpenMP both change the generated code, so they select a build. CUDA does
+not: decoding a frame is a read plus a byte swap, and the colour map has to end
+up in host memory for the texture upload anyway, so a GPU round trip would cost
+more in transfers than the arithmetic is worth. The `-cuda` suffix therefore
+selects a name only, and 22 builds cover the 30 names.
 
-AVX2 changes generated UI machine code. OpenMP/CUDA do not execute inside this UI, so their suffixes are release-pairing identities only; rows with equal architecture + AVX2 state reuse one built UI binary. This prevents useless OpenMP/CUDA runtime dependencies while preserving exact installer pairing.
+A row named `omp` is configured with `CFD_UI_ENABLE_OPENMP_EXPLICIT=ON`, so a
+build machine without an OpenMP runtime fails that row rather than publishing a
+single-threaded binary under a name that promises otherwise.
 
-`.github/workflows/build-ui-all.yml` builds on native Windows/Linux/macOS runners, merges the platform artifacts, verifies all 30 rows, adds `Fluid-Solver-UI-Source-Code.zip`, and writes SHA-256 checksums.
+`.github/workflows/build-ui-all.yml` builds on native Windows, Linux and macOS
+runners, merges the platform artifacts, verifies all 30 rows, checks that every
+archive actually carries a UI executable, adds
+`Fluid-Solver-UI-Source-Code.zip`, and writes SHA-256 checksums.
 
-## Windows CMake GUI build
+## Assembling a `-ui` release archive
 
-1. Extract this package.
-2. In CMake GUI, set **Where is the source code** to this extracted folder.
-3. Set **Where to build the binaries** to a separate empty build folder.
-4. Configure with **Visual Studio 18 2026**, platform **x64**.
-5. Leave `CFD_SOLVER_EXE` empty unless you intentionally want CMake to copy a selected `Fluid Solver.exe` beside the GUI.
-6. Configure until no unresolved red entries remain.
-7. Generate.
-8. Open Project.
-9. Build `cfd_mask_ui_optimized` as **Release | x64**.
+Take the solver's archive for a row and add `Fluid Solver UI[.exe]` from the UI
+archive of the same name. Nothing else from the UI archive is needed. The
+documentation inside a UI archive is named `README-UI.md` and `BUILD_INFO-UI.md`
+on purpose, so that copying the whole folder across cannot replace the solver's
+own `README.md` and `LICENSE`.
 
-Typical executable:
+## Verified in this revision
 
-`<build-folder>/Release/Fluid Solver UI.exe`
+- Full Linux Release link of `Fluid Solver UI`, with and without AVX2 and OpenMP.
+- `FluidSolverRunTests`, `GeometryProcessorTests`, `VtkFrameTests`: passed.
+- Reader equivalence: the same data written as BINARY and as ASCII decodes to
+  bit-identical pressure, solid, velocity, speed, finite masks and ranges,
+  including frames carrying NaN and infinity.
+- Reader robustness: truncated payload, truncated header, empty file and a solid
+  value outside {0,1} all raise `VtkParseError`.
+- Ranges and speeds checked against independently computed reference values.
+- Solver discovery: the extension-less solver is found beside the UI, a
+  non-executable one is refused with a message saying so, and a configured path
+  is used when nothing sits beside the UI.
+- Release matrix compared name by name against the solver's `release/0.1`:
+  30/30, none missing, none extra.
+- The eight `linux-x64` rows built and packaged end to end, producing exactly
+  four distinct binaries — each shared by its `-cuda` and plain row, as intended.
 
-## Validation evidence available in this package preparation
+## Not verified here
 
-- Written: release builder, workflow, CMake static/AVX2 controls, VTK default change, and documentation.
-- Python syntax: `scripts/build-ui-release.py` passed `py_compile`.
-- Release matrix enumeration: exactly 30 archive names.
-- Programmatic comparison against `CFD-Solver-2D/release/0.1`: generated names exactly equal every solver binary archive name transformed with `-ui` before `.zip` (30/30, no missing/extra rows).
-- ZIP packaging smoke test: executable/file/directory Unix modes and archive layout verified.
-- C++17 syntax check of every GUI `src/*.cpp`: passed.
-- `FluidSolverRunTests`: passed.
-- `GeometryProcessorTests`: passed.
-- `VtkFrameTests`: passed.
-- CMake configure progressed through project/static-dependency setup but stopped in this Linux container because X11 development components `Xrandr`, `Xcursor`, and `Xi` are not installed.
-- Full Linux linked executable build: not performed here.
-- Windows Visual Studio build: not performed here.
-- macOS build: not performed here.
-- GitHub Actions 30-row release run: not performed here.
-
-## Finished solver boundary
-
-The finished solver builds remain external, read-only runtime dependencies. Select one through the GUI at runtime if it is not adjacent to the UI executable.
+- Windows and macOS builds (no such host in this environment).
+- GUI launch and interactive visual checks (the container has no display).
+- A full 30-row GitHub Actions run.
