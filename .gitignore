@@ -1,0 +1,47 @@
+# Out-of-source and accidental in-source CMake build trees
+/build/
+/build-*/
+/cmake-build-*/
+/out/
+/CMakeFiles/
+/_deps/
+/Testing/
+CMakeCache.txt
+CTestTestfile.cmake
+cmake_install.cmake
+install_manifest.txt
+
+# Visual Studio and compiler output
+/.vs/
+/.vscode/
+/x64/
+/Debug/
+/Release/
+/RelWithDebInfo/
+/MinSizeRel/
+*.sln
+*.vcxproj
+*.vcxproj.filters
+*.vcxproj.user
+*.obj
+*.pdb
+*.ilk
+*.idb
+*.lib
+*.exp
+*.exe
+
+# User-local CMake settings
+CMakeUserPresets.json
+/solver-selection.txt
+
+# Windows metadata
+Thumbs.db
+Desktop.ini
+
+# UI release automation output
+/.release-build/
+/dist-ui/
+/release-ui/
+/output/
+/ui-preferences.txt

@@ -1,0 +1,140 @@
+name: Build every UI binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version used in archive names
+        default: "0.1"
+        required: true
+  push:
+    tags: ["ui-v*"]
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.pick.outputs.value }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            v="${GITHUB_REF_NAME#ui-v}"
+          else
+            v="${{ inputs.version }}"
+          fi
+          v="${v:-0.1}"
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+
+  windows:
+    needs: version
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and package Windows x64/x86 UI rows
+        shell: pwsh
+        run: |
+          python scripts/build-ui-release.py `
+            --version "${{ needs.version.outputs.value }}" `
+            --generator "Visual Studio 17 2022" `
+            --arch x64 --arch x86 `
+            --output dist-ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-windows
+          path: dist-ui/*.zip
+          if-no-files-found: error
+
+  linux:
+    needs: version
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install x64 and i386 SFML system interfaces
+        shell: bash
+        run: |
+          sudo dpkg --add-architecture i386
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            g++ g++-multilib pkg-config \
+            libx11-dev libxrandr-dev libxcursor-dev libxi-dev libudev-dev libgl1-mesa-dev \
+            libx11-dev:i386 libxrandr-dev:i386 libxcursor-dev:i386 libxi-dev:i386 \
+            libudev-dev:i386 libgl1-mesa-dev:i386
+      - name: Build and package Linux x64/x86 UI rows
+        run: |
+          python3 scripts/build-ui-release.py \
+            --version "${{ needs.version.outputs.value }}" \
+            --arch x64 --arch x86 \
+            --output dist-ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-linux
+          path: dist-ui/*.zip
+          if-no-files-found: error
+
+  macos-arm64:
+    needs: version
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and package macOS arm64 UI rows
+        run: |
+          python3 scripts/build-ui-release.py \
+            --version "${{ needs.version.outputs.value }}" \
+            --arch arm64 \
+            --output dist-ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-macos-arm64
+          path: dist-ui/*.zip
+          if-no-files-found: error
+
+  macos-x64:
+    needs: version
+    runs-on: macos-15-intel
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and package macOS x64 UI rows
+        run: |
+          python3 scripts/build-ui-release.py \
+            --version "${{ needs.version.outputs.value }}" \
+            --arch x64 \
+            --output dist-ui
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-macos-x64
+          path: dist-ui/*.zip
+          if-no-files-found: error
+
+  package:
+    needs: [version, windows, linux, macos-arm64, macos-x64]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: ui-*
+          merge-multiple: true
+          path: release/${{ needs.version.outputs.value }}
+      - name: Verify exact 30-row matrix and finalize release
+        run: |
+          python3 scripts/build-ui-release.py \
+            --version "${{ needs.version.outputs.value }}" \
+            --finalize "release/${{ needs.version.outputs.value }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-release
+          path: release/
+          if-no-files-found: error
+      - name: Attach UI files to tag release
+        if: startsWith(github.ref, 'refs/tags/ui-v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.version.outputs.value }}
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || \
+            gh release create "$GITHUB_REF_NAME" --title "Fluid Solver UI $V" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" release/"$V"/* --clobber
