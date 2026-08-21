@@ -248,7 +248,10 @@ function Expand-ReleaseRows {
         # "Fluid Solver <ver> windows-<arch> <feature>[-ui]" and nothing else:
         # the Linux and macOS rows in the same folder are not this machine's to
         # unpack, and the source archive is not a row at all.
-        if ($_.BaseName -notmatch "^Fluid Solver $([regex]::Escape($Version)) windows-(x64|x86) [a-z0-9-]+$") { return }
+        # A space or a dot between the parts: GitHub rewrites spaces to dots in
+        # release asset filenames, so the same archive downloaded from a tag
+        # arrives as "Fluid.Solver.0.1.windows-x64.avx2.zip".
+        if ($_.BaseName -notmatch "^Fluid[ .]Solver[ .]$([regex]::Escape($Version))[ .]windows-(x64|x86)[ .][a-z0-9-]+$") { return }
 
         $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid())
         Expand-Archive -LiteralPath $_.FullName -DestinationPath $stage -Force
@@ -259,7 +262,10 @@ function Expand-ReleaseRows {
             Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
             return
         }
-        $target = Join-Path $dist $_.BaseName
+        # dist\ always holds the spaced form, because that is what the .iss
+        # variant folders are looked up by.
+        $target = Join-Path $dist ($_.BaseName -replace "^Fluid[ .]Solver[ .]", "Fluid Solver " `
+                                              -replace "[ .](windows-(?:x64|x86))[ .]", ' $1 ')
         Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
         Move-Item $inner[0].FullName $target
         Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
@@ -287,8 +293,9 @@ function Set-UiIcon {
     $script = Join-Path $repo "scripts\stamp-ui-icon.py"
     if (-not (Test-Path $script)) { return }
     if (-not (Test-Path $Source)) { return }
-    $archives = Get-ChildItem $Source -Filter "Fluid Solver $Version *-ui.zip" `
-                    -File -ErrorAction SilentlyContinue
+    # Both spellings, for the same reason Expand-ReleaseRows accepts both.
+    $archives = Get-ChildItem $Source -File -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match "^Fluid[ .]Solver[ .]$([regex]::Escape($Version))[ .].*-ui\.zip$" }
     if (-not $archives) { return }
 
     Say "Putting the icon on the UI executable"
