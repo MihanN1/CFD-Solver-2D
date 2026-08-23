@@ -1,0 +1,32 @@
+674126a8bf9a958ae73e4226b3daf2f6aa1aeeb3218f4c80359656ebd5ac1e0c  Fluid Solver 0.1 linux-x64 avx2-cuda.zip
+88a80bdaa0c56d8509fa4a96f562336c3ddcbab78d646853d02b2f42868fd038  Fluid Solver 0.1 linux-x64 avx2-omp-cuda.zip
+d4ba37fea07f36b60b4ed1f42a7031f668c4b881788b69a1f6d6be557e24060a  Fluid Solver 0.1 linux-x64 avx2-omp.zip
+b71862db3c723636b0a551586a4bc9324e3afa11a51e14dc082b7324a30b0147  Fluid Solver 0.1 linux-x64 avx2.zip
+8204878e3d93524c2d34a454a9249bc9a4f3265db7b1293e3d0f9f16de80d8b8  Fluid Solver 0.1 linux-x64 cuda.zip
+2caefdd8709d9c43a6c3cccf23153b9150df33c20f13f39338d83b937993925c  Fluid Solver 0.1 linux-x64 omp-cuda.zip
+ea073c53972d16e5cd656d4687021055b4d69dfed62dc557b937c885eddfc7b4  Fluid Solver 0.1 linux-x64 omp.zip
+90c625388628fae154957bd3a2c3dd65185cb4baa24e5df6180ef1afd20e87b2  Fluid Solver 0.1 linux-x64 plain.zip
+21331efa7f9cbbffca74e9d44800ad8f428b4f37677d26822ef1d691c7b816be  Fluid Solver 0.1 linux-x86 avx2-omp.zip
+c3b5647498cb22f4590f0b53221a7a4672c4dd416e659f03a32099f0d274148c  Fluid Solver 0.1 linux-x86 avx2.zip
+26296f89aaef761695b1ad6df44949aac0a80ec766723d946d21aceaccc6488e  Fluid Solver 0.1 linux-x86 omp.zip
+5cc483febc400b184289bcca1c63f95f6f3564e7f1501c116983650f5dc8fdc9  Fluid Solver 0.1 linux-x86 plain.zip
+6b27f96168a610de087310ec53d18cb289aa8ca6aee1fc2dff79060f5875cb2a  Fluid Solver 0.1 macos-arm64 omp.zip
+aee87b55f5bac2fc088f9e8649ddf3d6d713783ce127424956ae2d9068423cf2  Fluid Solver 0.1 macos-arm64 plain.zip
+b11dfb466ad5ad67d9efe0adb01c11e2df6183626bba41fa168bdfb83601a07e  Fluid Solver 0.1 macos-x64 avx2-omp.zip
+3a14d36bf5956b1deea50845bbb7fd59af36fa4e15567e74bd4008517b9aa9a7  Fluid Solver 0.1 macos-x64 avx2.zip
+f7f42f6eaadbf439aebd376c0db1ed0c5f30cd24f662e2da5770a8fe571df870  Fluid Solver 0.1 macos-x64 omp.zip
+8284b5ac1bae959175e85f59e159d0588cde79c41df25c27dacd1086452baf06  Fluid Solver 0.1 macos-x64 plain.zip
+b5fcef071881d2212f489c865c4d3bcb61a44bc82004f0244a634389db502817  Fluid Solver 0.1 windows-x64 avx2-cuda.zip
+3fbf66b32a968dd9df17bf78a8d5a1a04d48d1573beecd580524480a5a188428  Fluid Solver 0.1 windows-x64 avx2-omp-cuda.zip
+dc9b07b13873311af15d127cd469aa87858f34fb4051ea64715c974cefe38254  Fluid Solver 0.1 windows-x64 avx2-omp.zip
+e3b73b9f9b6d552c69bab676e72e9da15038dd3cc3c49be1d4b07a66dd009064  Fluid Solver 0.1 windows-x64 avx2.zip
+9787d4a730c0516fb10c1ea9765e5c31393537f1e90417e2d7b2d16a0a5cabf2  Fluid Solver 0.1 windows-x64 cuda.zip
+ec84ae020e4ebaf0a3658cabdee7946deecf155a162a1cea109e12dca1158632  Fluid Solver 0.1 windows-x64 omp-cuda.zip
+2a76c58f4ba6bbb4359eb2b44d5bd6e702ed6aa6ae1147fb208e40643ed172e2  Fluid Solver 0.1 windows-x64 omp.zip
+c8d0ce1dedea31a4f31ae9c8de3b4596ada6aca42710ade1ae9d668368c828af  Fluid Solver 0.1 windows-x64 plain.zip
+fa9db8c857c7b9ab115f068a4ef478a5c382aa4d52c6942959bc65e580b67218  Fluid Solver 0.1 windows-x86 avx2-omp.zip
+0ffae853d30e92131d86ee0fb1e585acd984ffacce6a85adfc2dc7c963450bba  Fluid Solver 0.1 windows-x86 avx2.zip
+6f3162b265e337429da6e48e4260343239812766e9eac51176d10b85eca34f2a  Fluid Solver 0.1 windows-x86 omp.zip
+7a847abe6621081fae4b9897fd4e1d3a973ff57a2549c9aa2e50770d82c65e82  Fluid Solver 0.1 windows-x86 plain.zip
+04318f4b7822cfdbfccfb12859547ee457b9125cea567e95eb939a62afe5ea6b  Fluid-Solver-Source-Code.zip
+80cbff8c2bd192be1dc6f8aeeee3b7a11338785473535831887d0d154923217a  README.md
