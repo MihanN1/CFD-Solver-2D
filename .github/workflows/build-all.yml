@@ -74,11 +74,19 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu20.04
+    # Without these, tzdata's postinstall asks which continent you live in and
+    # the job hangs there until it times out. There is nobody to answer.
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      TZ: Etc/UTC
     steps:
       - name: Prepare the container for checkout
         run: |
+          set -e
+          ln -snf /usr/share/zoneinfo/Etc/UTC /etc/localtime
+          echo Etc/UTC > /etc/timezone
           apt-get update -qq
-          apt-get install -y -qq git
+          apt-get install -y -qq tzdata git
           git config --global --add safe.directory '*'
 
       # The aarch64 rows are cross-built here rather than on an ARM runner, so

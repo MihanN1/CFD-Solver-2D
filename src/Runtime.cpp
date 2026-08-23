@@ -248,6 +248,14 @@ bool cudaEnabled() {
            !envOff("FLUID_SOLVER_NO_CUDA");
 }
 
+bool trayEnabled() {
+    return settings().tray && !envOff("FLUID_SOLVER_NO_TRAY");
+}
+
+bool updateCheckEnabled() {
+    return settings().checkForUpdates && !envOff("FLUID_SOLVER_NO_UPDATE_CHECK");
+}
+
 int threadCount() {
 #if defined(_OPENMP)
     if (!openMpEnabled())

@@ -323,7 +323,7 @@ bool openUrl(const std::string& url) {
 void runStartupCheck(bool interactive) {
     if (envOff("FLUID_SOLVER_NO_UPDATE_CHECK"))
         return;
-    if (!runtime::settings().checkForUpdates)
+    if (!runtime::updateCheckEnabled())
         return;
 
     const Result result = check();
