@@ -107,9 +107,16 @@ jobs:
           set -euo pipefail
           sudo dpkg --add-architecture i386
           sudo apt-get update
+          # g++-multilib is a 32-bit compiler with no 32-bit headers behind it.
+          # libc6-dev-i386 is what carries asm/ and bits/; without it every
+          # x86 translation unit dies on asm/errno.h. lib32stdc++ is the
+          # matching C++ runtime.
+          gccmajor=$(g++ -dumpversion | cut -d. -f1)
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             build-essential \
             g++-multilib \
+            libc6-dev-i386 \
+            "lib32stdc++-${gccmajor}-dev" \
             pkg-config \
             libx11-dev \
             libxrandr-dev \
@@ -157,13 +164,12 @@ jobs:
 
           sudo apt-get update
 
-          # Nothing but ports may serve arm64. If anything else still does, the
-          # 404 is back and it is better to say so here than 200 lines later.
+          # A warning, not a gate: apt-get update above already fails loudly on
+          # a 404, and a wrong guess here must not be what stops a good build.
           if apt-get indextargets --no-release-info 2>/dev/null |
-               grep -i '^Architecture: arm64' -A3 |
+               grep -A4 -i '^Architecture: arm64' |
                grep -i '^URI:' | grep -qv 'ports\.ubuntu\.com'; then
-            echo "::error::something other than ports.ubuntu.com is being asked for arm64"
-            exit 1
+            echo "::warning::something other than ports.ubuntu.com is listed for arm64"
           fi
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             crossbuild-essential-arm64 \
@@ -174,13 +180,22 @@ jobs:
             libudev-dev:arm64 \
             libgl1-mesa-dev:arm64
 
-      - name: Show tool versions
+      - name: Show tool versions, and that -m32 actually works
         shell: bash
         run: |
           set -euo pipefail
           python3 --version
           cmake --version
           g++ --version
+          # The real x86 rows are C++17 with <filesystem>. A plain C probe
+          # passes with gcc-multilib alone and tells you nothing.
+          cat > /tmp/m32.cpp <<'EOF'
+          #include <filesystem>
+          #include <thread>
+          int main() { return (int)std::filesystem::path("/").native().size(); }
+          EOF
+          g++ -m32 -std=c++17 /tmp/m32.cpp -o /tmp/m32
+          echo "-m32 C++17 ok"
 
       - name: Build and package Linux UI archives
         shell: bash
