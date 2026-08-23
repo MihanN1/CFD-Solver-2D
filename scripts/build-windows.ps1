@@ -19,7 +19,7 @@
 [CmdletBinding()]
 param(
     [string]   $Generator  = "Visual Studio 18 2026",
-    [string]   $Version    = "0.2",
+    [string]   $Version    = "",    # empty = whatever CMakeLists.txt says
     [string]   $OutDir     = "dist",
     # CUDA 12.x covers sm_50..sm_90. CUDA 13 dropped everything below Turing,
     # so drop 50;60;61;70 from this list if that is the toolkit installed.
@@ -30,6 +30,26 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+# major.minor from CMakeLists.txt. $Version defaults to empty because param()
+# runs before this does.
+function Get-ProjectVersion {
+    $cmake = Join-Path $repo "CMakeLists.txt"
+    if (Test-Path $cmake) {
+        $match = [regex]::Match((Get-Content $cmake -Raw),
+                                'project\s*\([^)]*?VERSION\s+(\d+)\.(\d+)')
+        if ($match.Success) {
+            return "$($match.Groups[1].Value).$($match.Groups[2].Value)"
+        }
+    }
+    return ""
+}
+if (-not $Version) {
+    $Version = Get-ProjectVersion
+    if (-not $Version) {
+        throw "No -Version given and no version found in CMakeLists.txt"
+    }
+}
+
 $dist = Join-Path $repo $OutDir
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 

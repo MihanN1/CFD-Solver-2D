@@ -95,6 +95,11 @@ int threadCount();
 // One line per accelerator: what it is, whether it is on, and if not, why.
 std::string summary();
 
+// What THIS MACHINE can run, and which release row to download for it. Answers
+// the same question from a "plain" build as from any other, which is the point:
+// plain runs anywhere, so it is the one to grab when you do not know yet.
+std::string hardwareReport();
+
 // The interactive menu. Returns true when something was changed and saved.
 bool configureInteractively();
 

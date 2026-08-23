@@ -39,9 +39,17 @@
 
 set -euo pipefail
 
-VERSION="${1:-0.2}"
 WANT_ARCH="${2:-all}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# major.minor from CMakeLists.txt, so no version is typed twice.
+project_version() {
+    sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9]\+\.[0-9]\+\).*/\1/p' \
+        "$REPO/CMakeLists.txt" 2>/dev/null | head -1
+}
+
+VERSION="${1:-}"
+[ -n "$VERSION" ] || VERSION="$(project_version)"
+[ -n "$VERSION" ] || { echo "no version in CMakeLists.txt" >&2; exit 1; }
 DIST="$REPO/dist"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT

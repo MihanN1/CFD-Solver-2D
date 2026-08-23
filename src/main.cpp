@@ -22,6 +22,8 @@ static void printUsage(const char* exe) {
         "  " << exe << "                       interactive configuration\n"
         "  " << exe << " key=value [key=value] non-interactive run\n"
         "  " << exe << " --settings             change AVX2/OpenMP/CUDA and exit\n"
+        "  " << exe << " --hardware             what this machine can run, and\n"
+        "                                       which download to take\n"
         "  " << exe << " --check-updates        ask GitHub for a newer release\n"
         "\n"
         "Keys: Lx Ly nx ny U0 nu CFL totalTime dtUpdateInterval dtSafety\n"
@@ -104,6 +106,10 @@ int main(int argc, char** argv) {
             }
             if (arg == "--settings" || arg == "--accel") {
                 runtime::configureInteractively();
+                return 0;
+            }
+            if (arg == "--hardware") {
+                std::cout << runtime::hardwareReport();
                 return 0;
             }
             if (arg == "--check-updates") {

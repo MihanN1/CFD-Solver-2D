@@ -61,7 +61,18 @@ case "${1:-}" in
     -h|--help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
-VERSION="${1:-0.2}"; shift 2>/dev/null || true
+
+# major.minor from CMakeLists.txt, so no version is typed twice.
+project_version() {
+    sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9]\+\.[0-9]\+\).*/\1/p' \
+        "$REPO/CMakeLists.txt" 2>/dev/null | head -1
+}
+
+VERSION="${1:-}"; shift 2>/dev/null || true
+[ -n "$VERSION" ] || VERSION="$(project_version)"
+if [ -z "$VERSION" ]; then
+    echo "no version given and none found in CMakeLists.txt" >&2; exit 1
+fi
 
 DIST="$REPO/dist"
 REL="$REPO/release/$VERSION"

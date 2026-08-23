@@ -11,6 +11,7 @@
 #include <limits>
 #include <sstream>
 #include <system_error>
+#include <thread>
 
 #if defined(_OPENMP)
 #include <omp.h>
@@ -270,6 +271,88 @@ void apply() {
         omp_set_num_threads(settings().threads);
     }
 #endif
+}
+
+namespace {
+
+const char* platformTag() {
+#if defined(_WIN32)
+    return "windows";
+#elif defined(__APPLE__)
+    return "macos";
+#else
+    return "linux";
+#endif
+}
+
+const char* archTag() {
+#if defined(_M_ARM64) || defined(__aarch64__)
+    return "arm64";
+#elif defined(_M_X64) || defined(__x86_64__)
+    return "x64";
+#else
+    return "x86";
+#endif
+}
+
+bool archIsX86() {
+    const std::string arch = archTag();
+    return arch == "x64" || arch == "x86";
+}
+
+// Which rows exist: no AVX2 on ARM, and CUDA only on 64-bit Windows and Linux.
+std::string bestRowFor(bool avx2, bool omp, bool cuda) {
+    std::string tag;
+    const auto add = [&tag](const char* part) {
+        if (!tag.empty())
+            tag += '-';
+        tag += part;
+    };
+    if (avx2 && archIsX86())
+        add("avx2");
+    if (omp)
+        add("omp");
+    if (cuda && std::string(archTag()) == "x64" &&
+        std::string(platformTag()) != "macos")
+        add("cuda");
+    return tag.empty() ? "plain" : tag;
+}
+
+}   // namespace
+
+std::string hardwareReport() {
+    const bool avx2 = archIsX86() && machineHasAvx2();
+    const bool nvidia = machineHasNvidia();
+    // The machine's cores, not threadCount(): that one answers "how many
+    // threads will OpenMP use", which is 1 in a build that has no OpenMP - and
+    // a plain build is exactly the one someone runs this from.
+    unsigned cores = std::thread::hardware_concurrency();
+    if (cores == 0)
+        cores = 1;
+
+    std::ostringstream out;
+    out << "This machine\n"
+        << "  system     : " << platformTag() << "-" << archTag() << "\n"
+        << "  cores      : " << cores << "\n"
+        << "  AVX2       : ";
+    if (!archIsX86())
+        out << "no - AVX2 is an x86 instruction set, this is ARM\n";
+    else
+        out << (avx2 ? "yes\n" : "no - this CPU is too old for it\n");
+    out << "  NVIDIA GPU : ";
+    if (std::string(platformTag()) == "macos")
+        out << "not usable - macOS has had no CUDA since 10.14\n";
+    else if (std::string(archTag()) != "x64")
+        out << "not usable - no CUDA toolkit targets this architecture\n";
+    else
+        out << (nvidia ? "yes\n" : "no driver found\n");
+
+    out << "\nDownload this row:\n\n    Fluid Solver " << CFD_RELEASE_VERSION
+        << " " << platformTag() << "-" << archTag() << " "
+        << bestRowFor(avx2, cores > 1, nvidia) << "\n\n"
+        << "Add \"-ui\" to that name for the same thing with the desktop UI in\n"
+           "it. Or take the installer, which reads all of the above itself.\n";
+    return out.str();
 }
 
 std::string summary() {

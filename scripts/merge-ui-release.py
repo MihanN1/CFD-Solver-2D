@@ -54,6 +54,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
+def project_version(default: str = "0.0") -> str:
+    """major.minor from CMakeLists.txt, so no version is typed twice."""
+    cmake = ROOT / "CMakeLists.txt"
+    try:
+        text = cmake.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return default
+    match = re.search(r"project\s*\([^)]*?VERSION\s+([0-9]+)\.([0-9]+)", text)
+    return f"{match.group(1)}.{match.group(2)}" if match else default
+
+
 # Same shape as scripts/unpack-release.py matches, and for the same reason:
 # GitHub rewrites spaces to dots in release asset names, so an archive that came
 # back from a tag is dotted rather than spaced.
@@ -271,7 +282,7 @@ def stamp_icons(release: Path, version: str) -> bool:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Assemble the '-ui' release archives from the UI builds.")
-    parser.add_argument("version", nargs="?", default="0.2")
+    parser.add_argument("version", nargs="?", default=project_version())
     parser.add_argument("--release", help="folder holding the solver archives "
                                           "(default release/<version>)")
     parser.add_argument("--ui-dir", help="where the UI builds are, if not in "

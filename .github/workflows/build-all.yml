@@ -2,9 +2,9 @@
 # assembles release/<version> out of them. Installers are deliberately not
 # built here - they are a separate step you run when you want them.
 #
-#   Actions -> Build every binary -> Run workflow -> version, e.g. 0.2
-#   or push a tag v0.2, which uses 0.2 as the version and attaches the files
-#   to that tag's release.
+#   Actions -> Build every binary -> Run workflow (leave version empty)
+#   or push a tag v0.2, which uses 0.2 and attaches the files to that
+#   tag's release.
 #
 # What comes out, 34 rows in total:
 #   windows-x64    AVX2 {on,off} x OpenMP {on,off} x CUDA {on,off} = 8
@@ -32,9 +32,11 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: The version that goes into every file name
-        default: "0.2"
-        required: true
+        description: >
+          Leave empty to use the version in CMakeLists.txt, which is where it
+          actually lives. Fill it in only to override that for one run.
+        default: ""
+        required: false
   push:
     tags: ["v*"]
 
@@ -44,14 +46,24 @@ jobs:
     outputs:
       value: ${{ steps.pick.outputs.value }}
     steps:
+      # Only here to read CMakeLists.txt.
+      - uses: actions/checkout@v4
       - id: pick
         run: |
+          set -euo pipefail
           if [ "${{ github.event_name }}" = "push" ]; then
             v="${GITHUB_REF_NAME#v}"
           else
             v="${{ inputs.version }}"
           fi
-          v="${v:-0.2}"
+          if [ -z "$v" ]; then
+            v=$(sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9]\+\.[0-9]\+\).*/\1/p' \
+                CMakeLists.txt | head -1)
+          fi
+          if [ -z "$v" ]; then
+            echo "::error::no version given and none found in CMakeLists.txt"
+            exit 1
+          fi
           echo "value=$v" >> "$GITHUB_OUTPUT"
           echo "Building version $v"
 

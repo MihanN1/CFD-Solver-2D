@@ -2,7 +2,10 @@
 # compiled here: the zips that "Build every binary" published are unpacked back
 # into dist/ and handed to the three installer builders.
 #
-#   Actions -> Build the installers -> Run workflow -> version, e.g. 0.2
+#   Actions -> Build the installers -> Run workflow
+#
+# Leave the version empty to cut installers for whatever CMakeLists.txt
+# says; fill it in only to cut them for some other published release.
 #
 # By default it pulls the assets of the tag v<version>. Point it at a run of
 # "Build every binary" instead by filling in run_id, which is what you want
@@ -33,9 +36,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: The version whose release the installers are built from
-        default: "0.2"
-        required: true
+        description: >
+          The version whose release the installers are built from. Leave empty
+          to use the version in CMakeLists.txt; fill it in to cut installers
+          for a release that is not the one this branch is on.
+        default: ""
+        required: false
       run_id:
         description: >
           Optional. Run id of "Build every binary" to take the zips from.
@@ -60,17 +66,40 @@ on:
         default: false
 
 jobs:
+  # The version comes from CMakeLists.txt, not from a default in this file.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.pick.outputs.value }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        run: |
+          set -euo pipefail
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            v=$(sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9]\+\.[0-9]\+\).*/\1/p' \
+                CMakeLists.txt | head -1)
+          fi
+          if [ -z "$v" ]; then
+            echo "::error::no version given and none found in CMakeLists.txt"
+            exit 1
+          fi
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "Building installers for $v"
+
   # Downloaded once, here, rather than four times with four sets of
   # credentials. Everything below just pulls this artifact.
   fetch:
+    needs: version
     runs-on: ubuntu-latest
     steps:
-      - name: From the release of tag v${{ inputs.version }}
+      - name: From the release of tag v${{ needs.version.outputs.value }}
         if: inputs.run_id == ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          V: ${{ inputs.version }}
+          V: ${{ needs.version.outputs.value }}
         run: |
           mkdir -p zips
           gh release download "v$V" --dir zips --pattern '*.zip'
@@ -123,7 +152,7 @@ jobs:
           if-no-files-found: error
 
   windows:
-    needs: fetch
+    needs: [version, fetch]
     runs-on: windows-2022
     permissions:
       contents: write
@@ -170,7 +199,7 @@ jobs:
 
       - name: Put the icon on the UI executable
         shell: bash
-        run: python scripts/stamp-ui-icon.py "${{ inputs.version }}" --release zips
+        run: python scripts/stamp-ui-icon.py "${{ needs.version.outputs.value }}" --release zips
 
       # Goes to the PORTABLE release, not the installer one: these are the
       # portable "-ui" archives with the icon put on the UI executable.
@@ -183,7 +212,7 @@ jobs:
         run: |
           for f in zips/*windows*-ui.zip; do
             for try in 1 2 3 4 5; do
-              gh release upload "v${{ inputs.version }}" "$f" --clobber && break
+              gh release upload "v${{ needs.version.outputs.value }}" "$f" --clobber && break
               echo "retry $try for $(basename "$f")"; sleep $((try * 30))
             done
             sleep 5
@@ -192,7 +221,7 @@ jobs:
       - name: Rebuild dist\ from the zips
         shell: bash
         run: |
-          python scripts/unpack-release.py "${{ inputs.version }}" zips dist --platform windows
+          python scripts/unpack-release.py "${{ needs.version.outputs.value }}" zips dist --platform windows
 
       - name: Inno Setup
         run: choco install innosetup --no-progress -y
@@ -221,11 +250,11 @@ jobs:
           # No /DArch: one installer carrying every architecture in the
           # release, picked at run time. That is the file people download.
           $any = Get-ChildItem dist -Directory |
-                 Where-Object { $_.Name -like "Fluid Solver ${{ inputs.version }} windows-* *" -and
+                 Where-Object { $_.Name -like "Fluid Solver ${{ needs.version.outputs.value }} windows-* *" -and
                                 $_.Name -notlike "*-ui" }
           if (-not $any) { throw "no windows rows in the release, nothing was built" }
           Write-Host "windows : $($any.Count) variant(s) across every architecture"
-          & $iscc "/DAppVersion=${{ inputs.version }}" "/DDistDir=$dist" `
+          & $iscc "/DAppVersion=${{ needs.version.outputs.value }}" "/DDistDir=$dist" `
                   installer\windows\fluid-solver.iss
           if ($LASTEXITCODE -ne 0) { throw "iscc failed" }
 
@@ -250,7 +279,7 @@ jobs:
           if-no-files-found: error
 
   linux:
-    needs: fetch
+    needs: [version, fetch]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -259,13 +288,13 @@ jobs:
 
       - name: Rebuild dist/ from the zips
         run: |
-          python3 scripts/unpack-release.py "${{ inputs.version }}" zips dist --platform linux
+          python3 scripts/unpack-release.py "${{ needs.version.outputs.value }}" zips dist --platform linux
 
       - name: makeself
         run: sudo apt-get update -qq && sudo apt-get install -y -qq makeself
 
       - name: Build both .run installers
-        run: bash scripts/make-release.sh "${{ inputs.version }}" --only=installers
+        run: bash scripts/make-release.sh "${{ needs.version.outputs.value }}" --only=installers
 
       # make-release.sh collects its failures into a summary and still exits 0,
       # which is right for a person at a terminal and wrong here: with x64 built
@@ -274,7 +303,7 @@ jobs:
       # job counts what iscc produced.
       - name: It, or nothing
         run: |
-          f="dist/Fluid-Solver-${{ inputs.version }}-linux.run"
+          f="dist/Fluid-Solver-${{ needs.version.outputs.value }}-linux.run"
           if [ -f "$f" ]; then echo "ok      $f"
           else echo "::error::$f was not built"; exit 1; fi
 
@@ -285,7 +314,7 @@ jobs:
           if-no-files-found: error
 
   macos:
-    needs: fetch
+    needs: [version, fetch]
     runs-on: macos-latest
     env:
       # Apple issues two certificates and they do different jobs, so both are
@@ -360,7 +389,7 @@ jobs:
 
       - name: Rebuild dist/ from the zips
         run: |
-          python3 scripts/unpack-release.py "${{ inputs.version }}" zips dist --platform macos
+          python3 scripts/unpack-release.py "${{ needs.version.outputs.value }}" zips dist --platform macos
 
       # Both packages from one Mac: this step only repackages, it never builds.
       # "skipped" is not a pass here - a release that reached this job is meant
@@ -370,14 +399,14 @@ jobs:
         run: |
           missing=0
           for a in arm64 x64; do
-            ls dist/"Fluid Solver ${{ inputs.version }} macos-$a "* >/dev/null 2>&1 || {
+            ls dist/"Fluid Solver ${{ needs.version.outputs.value }} macos-$a "* >/dev/null 2>&1 || {
               echo "::error::no macos-$a rows in this release"; missing=1; }
           done
           [ "$missing" = 0 ] || exit 1
           # Signing and notarising happen inside build-pkg.sh, in the only order
           # Apple accepts: binaries, then package, then notarise, then staple.
-          bash installer/macos/build-pkg.sh "${{ inputs.version }}" all
-          [ -f "dist/Fluid Solver ${{ inputs.version }} macos.pkg" ] || {
+          bash installer/macos/build-pkg.sh "${{ needs.version.outputs.value }}" all
+          [ -f "dist/Fluid Solver ${{ needs.version.outputs.value }} macos.pkg" ] || {
             echo "::error::build-pkg.sh produced no .pkg"; exit 1; }
 
       - name: Forget the keychain
@@ -395,7 +424,7 @@ jobs:
           if-no-files-found: error
 
   collect:
-    needs: [windows, linux, macos]
+    needs: [version, windows, linux, macos]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -431,7 +460,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          V: ${{ inputs.version }}
+          V: ${{ needs.version.outputs.value }}
           TAG: ${{ inputs.installer_tag }}
         run: |
           set -euo pipefail

@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import os
+import re
 import shutil
 import struct
 import sys
@@ -40,6 +41,16 @@ LANG_NEUTRAL_EN_US = 0x0409
 
 UI_NAMES = ("Fluid Solver UI.exe", "Fluid Solver UI")
 ROOT = Path(__file__).resolve().parents[1]
+
+def project_version(default: str = "0.0") -> str:
+    """major.minor from CMakeLists.txt, so no version is typed twice."""
+    cmake = ROOT / "CMakeLists.txt"
+    try:
+        text = cmake.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return default
+    match = re.search(r"project\s*\([^)]*?VERSION\s+([0-9]+)\.([0-9]+)", text)
+    return f"{match.group(1)}.{match.group(2)}" if match else default
 
 
 # ---------------------------------------------------------------- reading ---
@@ -342,7 +353,7 @@ def refresh_checksums(release: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(
         description="Put the project icon on the UI executable in every -ui archive.")
-    parser.add_argument("version", nargs="?", default="0.1")
+    parser.add_argument("version", nargs="?", default=project_version())
     parser.add_argument("--release", help="folder of release archives "
                                           "(default release/<version>)")
     parser.add_argument("--icon", default=str(ROOT / "logo" / "fluid-solver.ico"))

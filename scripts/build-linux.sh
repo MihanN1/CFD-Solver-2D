@@ -19,8 +19,15 @@
 
 set -uo pipefail
 
-VERSION="${VERSION:-0.2}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# major.minor from CMakeLists.txt, so no version is typed twice.
+project_version() {
+    sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9]\+\.[0-9]\+\).*/\1/p' \
+        "$REPO/CMakeLists.txt" 2>/dev/null | head -1
+}
+
+VERSION="${VERSION:-$(project_version)}"
+[ -n "$VERSION" ] || { echo "no version in CMakeLists.txt" >&2; exit 1; }
 DIST="$REPO/dist"
 # CUDA 12.x covers sm_50..sm_90. CUDA 13 dropped everything below Turing.
 CUDA_ARCHS="${CUDA_ARCHS:-75;80;86;89;90}"

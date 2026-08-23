@@ -42,7 +42,7 @@
 
 [CmdletBinding()]
 param(
-    [string] $Version   = "0.2",
+    [string] $Version   = "",       # empty = whatever CMakeLists.txt says
     [string] $Generator = "Visual Studio 17 2022",
     [string] $CudaArchs = "",       # empty = decide from the installed toolkit
     [switch] $WithInstallers,       # off until the UI folders exist
@@ -58,6 +58,26 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+# major.minor from CMakeLists.txt. $Version defaults to empty because param()
+# runs before this does.
+function Get-ProjectVersion {
+    $cmake = Join-Path $repo "CMakeLists.txt"
+    if (Test-Path $cmake) {
+        $match = [regex]::Match((Get-Content $cmake -Raw),
+                                'project\s*\([^)]*?VERSION\s+(\d+)\.(\d+)')
+        if ($match.Success) {
+            return "$($match.Groups[1].Value).$($match.Groups[2].Value)"
+        }
+    }
+    return ""
+}
+if (-not $Version) {
+    $Version = Get-ProjectVersion
+    if (-not $Version) {
+        throw "No -Version given and no version found in CMakeLists.txt"
+    }
+}
+
 # The installer's OutputBaseFilename starts with this, and signing has to name
 # the file it produced.
 $AppNameForSigning = "Fluid Solver"
