@@ -288,7 +288,18 @@ endif()
 if(NOT WIN32)
     # The tray thread and, on Linux, the OpenMP runtime.
     find_package(Threads REQUIRED)
-    target_link_libraries(cfd_app PRIVATE Threads::Threads)
+
+    set(CFD_WHOLE_PTHREAD OFF)
+    if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang"
+       AND NOT APPLE AND NOT CFD_ENABLE_CUDA)
+        set(CFD_WHOLE_PTHREAD ON)
+    endif()
+
+    if(CFD_WHOLE_PTHREAD)
+        target_compile_options(cfd_app PRIVATE -pthread)
+    else()
+        target_link_libraries(cfd_app PRIVATE Threads::Threads)
+    endif()
 endif()
 
 target_compile_definitions(cfd_app
