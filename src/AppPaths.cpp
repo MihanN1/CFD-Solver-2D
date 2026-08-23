@@ -106,16 +106,14 @@ std::filesystem::path userDataDir() {
     return base / kAppName;
 }
 
-std::filesystem::path resolveOutputDir(const std::string& outputDir) {
-    const std::filesystem::path requested(outputDir);
-
+std::filesystem::path resolveOutputDir(const std::filesystem::path& outputDir) {
     std::filesystem::path target;
     if (outputDir.empty())
         target = executableDir();
-    else if (requested.is_absolute())
-        target = requested;
+    else if (outputDir.is_absolute())
+        target = outputDir;
     else
-        target = executableDir() / requested;
+        target = executableDir() / outputDir;
 
     if (directoryAcceptsFiles(target))
         return target;
@@ -123,7 +121,8 @@ std::filesystem::path resolveOutputDir(const std::string& outputDir) {
     // Read-only install directory. Anywhere else is a surprise, so the path
     // that actually gets used is printed rather than left to be discovered.
     const std::filesystem::path fallback =
-        userDataDir() / (outputDir.empty() ? std::string("output") : outputDir);
+        userDataDir() /
+        (outputDir.empty() ? std::filesystem::path("output") : outputDir);
     if (directoryAcceptsFiles(fallback)) {
         std::cout << "Cannot write to " << target.string()
                   << "\n  frames go to " << fallback.string()

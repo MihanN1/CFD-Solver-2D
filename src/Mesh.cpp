@@ -1,5 +1,6 @@
 #include "Mesh.hpp"
 #include "AppPaths.hpp"
+#include "Restart.hpp"   // narrowToPath / pathToConsole, the Windows path encoding fix
 #include <stl_reader/stl_reader.h>
 #include <tiny_obj_loader.h>
 #include <algorithm>
@@ -34,7 +35,9 @@ bool pathExists(const std::filesystem::path& path) {
 }
 
 std::filesystem::path resolveGeometryPath(const std::string& filename) {
-    const std::filesystem::path requested(filename);
+    // Straight from the console or from argv, so it is not necessarily in the
+    // code page a path is built from. Same trap as restartFile.
+    const std::filesystem::path requested = narrowToPath(filename);
     if (pathExists(requested)) {
         return requested;
     }
@@ -64,17 +67,27 @@ double squaredDistance(const Mesh::Vertex& first, const Mesh::Vertex& second) {
     return deltaX * deltaX + deltaY * deltaY + deltaZ * deltaZ;
 }
 }
-Mesh::Mesh(const Config& cfg)
+Mesh::Mesh(const Config& cfg, const std::vector<uint8_t>* presetSolid)
     : nx(cfg.nx), ny(cfg.ny), cfg(cfg)
 {
     solid.resize(nx * ny, 0);
     createGrid();
+
+    if (presetSolid) {
+        // Restart: the mask came out of the frame, so no model is loaded, no
+        // section is cut and no fallback circle is generated
+        const int cells = nx * ny;
+        for (int id = 0; id < cells; ++id)
+            solid[id] = (*presetSolid)[id] ? 1 : 0;
+        return;
+    }
+
     const bool geometryLoaded = loadGeometry(cfg.geometryFile);
     buildSection();
     rasterizeSection();
     buildSolid();
 
-    if (!geometryLoaded || sectionContour.empty()) {
+    if (!geometryLoaded || !hasSection()) {
         const double cx = cfg.Lx / 2.0;
         const double cy = cfg.Ly / 2.0;
         const double radius = 0.1 * std::min(cfg.Lx, cfg.Ly);
@@ -102,7 +115,7 @@ void Mesh::clearSolid() {
 
 bool Mesh::loadGeometry(const std::string& filename) {
     triangles.clear();
-    sectionContour.clear();
+    sectionContours.clear();
 
     if (filename.empty() || lowercase(filename) == "none") {
         return false;
@@ -120,15 +133,28 @@ bool Mesh::loadGeometry(const std::string& filename) {
     } else if (extension == ".obj") {
         geometryType = GeometryType::OBJ;
     } else {
-        std::cerr << "Unsupported geometry format: " << path.string() << "\n";
+        std::cerr << "Unsupported geometry format: "
+                  << pathToConsole(path) << "\n";
         return false;
     }
 
-    switch (geometryType) {
-        case GeometryType::STL:
-            return loadSTL(path.string());
-        case GeometryType::OBJ:
-            return loadOBJ(path.string());
+    // Both loaders take a narrow file name and open it themselves, so the
+    // path has to be handed over in the encoding the C runtime reads back,
+    // which is exactly what path::string() produces. It throws on a path the
+    // runtime cannot express at all, hence the catch.
+    try {
+        switch (geometryType) {
+            case GeometryType::STL:
+                return loadSTL(path.string());
+            case GeometryType::OBJ:
+                return loadOBJ(path.string());
+        }
+    } catch (const std::exception& exception) {
+        std::cerr << "Cannot hand this path to the model loader: "
+                  << pathToConsole(path) << "\n"
+                  << "  (" << exception.what()
+                  << ") Put the model somewhere with a simpler path.\n";
+        return false;
     }
 
     return false;
@@ -233,7 +259,7 @@ bool Mesh::loadSTL(const std::string& filename) {
 }
 
 void Mesh::buildSection() {
-    sectionContour.clear();
+    sectionContours.clear();
     if (triangles.empty()) {
         return;
     }
@@ -419,7 +445,14 @@ void Mesh::buildSection() {
     }
 
     std::set<std::pair<int, int>> visitedEdges;
-    std::vector<int> largestLoop;
+    // Every closed loop, with the area it encloses. The largest used to be the
+    // only one kept; the rest are what a pair of aerofoils, a ring or a body
+    // with a hole in it are made of.
+    struct Loop {
+        std::vector<int> nodes;
+        double area = 0.0;
+    };
+    std::vector<Loop> loops;
     double largestArea = 0.0;
     const auto normalizedEdge = [](int first, int second) {
         return std::pair<int, int>{std::min(first, second), std::max(first, second)};
@@ -470,46 +503,68 @@ void Mesh::buildSection() {
         }
 
         const double area = 0.5 * std::abs(signedAreaTwice);
-        if (area > largestArea) {
-            largestArea = area;
-            largestLoop = loop;
-        }
+        largestArea = std::max(largestArea, area);
+        loops.push_back({std::move(loop), area});
     }
 
-    if (largestLoop.size() < 3) {
+    if (loops.empty() || largestArea <= 0.0) {
         return;
     }
 
-    sectionContour.reserve(largestLoop.size());
+    // A watertight mesh cut near a tangency throws off slivers - loops of three
+    // or four nodes enclosing almost nothing. Rasterizing one of those puts a
+    // stray solid cell in the middle of the flow, so anything under a
+    // ten-thousandth of the biggest loop is treated as noise rather than as
+    // geometry. A genuine second body is never that small next to the first.
+    const double areaFloor = 1e-4 * largestArea;
+
     const double rotation = cfg.sliceRotation * PI / 180.0;
     const double cosineRotation = std::cos(rotation);
     const double sineRotation = std::sin(rotation);
 
-    for (int nodeIndex : largestLoop) {
-        SectionPoint point = nodes[nodeIndex];
-        if (cfg.invertSection) {
-            point.x = -point.x;
+    sectionContours.reserve(loops.size());
+    for (const Loop& loop : loops) {
+        if (loop.nodes.size() < 3 || loop.area < areaFloor) {
+            continue;
         }
-        sectionContour.push_back({
-            cosineRotation * point.x - sineRotation * point.y,
-            sineRotation * point.x + cosineRotation * point.y
-        });
+        std::vector<SectionPoint> contour;
+        contour.reserve(loop.nodes.size());
+        for (int nodeIndex : loop.nodes) {
+            SectionPoint point = nodes[nodeIndex];
+            if (cfg.invertSection) {
+                point.x = -point.x;
+            }
+            contour.push_back({
+                cosineRotation * point.x - sineRotation * point.y,
+                sineRotation * point.x + cosineRotation * point.y
+            });
+        }
+        sectionContours.push_back(std::move(contour));
     }
 
+    if (sectionContours.empty()) {
+        return;
+    }
+
+    // One bounding box over all of them, so the loops keep their positions
+    // relative to each other. Fitting each contour to the domain on its own
+    // would stack two aerofoils on top of one another.
     double minimumX = std::numeric_limits<double>::max();
     double minimumY = std::numeric_limits<double>::max();
     double maximumX = std::numeric_limits<double>::lowest();
     double maximumY = std::numeric_limits<double>::lowest();
-    for (const SectionPoint& point : sectionContour) {
-        minimumX = std::min(minimumX, point.x);
-        minimumY = std::min(minimumY, point.y);
-        maximumX = std::max(maximumX, point.x);
-        maximumY = std::max(maximumY, point.y);
+    for (const std::vector<SectionPoint>& contour : sectionContours) {
+        for (const SectionPoint& point : contour) {
+            minimumX = std::min(minimumX, point.x);
+            minimumY = std::min(minimumY, point.y);
+            maximumX = std::max(maximumX, point.x);
+            maximumY = std::max(maximumY, point.y);
+        }
     }
 
     const double sectionSpan = std::max(maximumX - minimumX, maximumY - minimumY);
     if (sectionSpan <= tolerance) {
-        sectionContour.clear();
+        sectionContours.clear();
         return;
     }
 
@@ -520,15 +575,34 @@ void Mesh::buildSection() {
     const double sectionCentreY = 0.5 * (minimumY + maximumY);
 
     // Preserve the former circle diameter while centring imported geometry.
-    for (SectionPoint& point : sectionContour) {
-        point.x = cfg.Lx / 2.0 + scale * (point.x - sectionCentreX);
-        point.y = cfg.Ly / 2.0 + scale * (point.y - sectionCentreY);
+    for (std::vector<SectionPoint>& contour : sectionContours) {
+        for (SectionPoint& point : contour) {
+            point.x = cfg.Lx / 2.0 + scale * (point.x - sectionCentreX);
+            point.y = cfg.Ly / 2.0 + scale * (point.y - sectionCentreY);
+        }
     }
+}
+
+bool Mesh::hasSection() const {
+    for (const std::vector<SectionPoint>& contour : sectionContours) {
+        if (contour.size() >= 3) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::size_t Mesh::sectionPointCount() const {
+    std::size_t total = 0;
+    for (const std::vector<SectionPoint>& contour : sectionContours) {
+        total += contour.size();
+    }
+    return total;
 }
 
 void Mesh::rasterizeSection() {
     clearSolid();
-    if (sectionContour.size() < 3) {
+    if (!hasSection()) {
         return;
     }
 
@@ -554,19 +628,31 @@ void Mesh::rasterizeSection() {
         return std::hypot(pointX - closestX, pointY - closestY);
     };
 
-    // Mark cells touched by the polygon boundary before filling its interior.
+    // Mark cells touched by any contour's boundary before filling the
+    // interiors. "any" is the whole change here: the loop below used to see a
+    // single polygon.
     for (int j = 0; j < ny; ++j) {
         for (int i = 0; i < nx; ++i) {
             const double cellX = (i + 0.5) * dx;
             const double cellY = (j + 0.5) * dy;
+            bool touched = false;
 
-            for (std::size_t point = 0; point < sectionContour.size(); ++point) {
-                const SectionPoint& first = sectionContour[point];
-                const SectionPoint& second =
-                    sectionContour[(point + 1) % sectionContour.size()];
-                if (distanceToSegment(cellX, cellY, first, second) <=
-                    boundaryRadius) {
-                    solid[j * nx + i] = 1;
+            for (const std::vector<SectionPoint>& contour : sectionContours) {
+                if (contour.size() < 3) {
+                    continue;
+                }
+                for (std::size_t point = 0; point < contour.size(); ++point) {
+                    const SectionPoint& first = contour[point];
+                    const SectionPoint& second =
+                        contour[(point + 1) % contour.size()];
+                    if (distanceToSegment(cellX, cellY, first, second) <=
+                        boundaryRadius) {
+                        solid[j * nx + i] = 1;
+                        touched = true;
+                        break;
+                    }
+                }
+                if (touched) {
                     break;
                 }
             }
@@ -575,28 +661,37 @@ void Mesh::rasterizeSection() {
 }
 
 bool Mesh::pointInsideSection(double pointX, double pointY) const {
-    // Toggle once per horizontal-ray crossing (even-odd polygon rule).
+    // Toggle once per horizontal-ray crossing (even-odd polygon rule), counted
+    // across every contour at once rather than one polygon at a time. Two
+    // separate bodies each toggle their own cells; a loop drawn inside another
+    // loop toggles twice and comes out as a hole, which is what a ring or a
+    // duct actually is.
     bool inside = false;
-    for (std::size_t current = 0, previous = sectionContour.size() - 1;
-         current < sectionContour.size();
-         previous = current++) {
-        const SectionPoint& first = sectionContour[current];
-        const SectionPoint& second = sectionContour[previous];
-        const bool crossesRay =
-            ((first.y > pointY) != (second.y > pointY)) &&
-            (pointX <
-             (second.x - first.x) * (pointY - first.y) /
-                     (second.y - first.y) +
-                 first.x);
-        if (crossesRay) {
-            inside = !inside;
+    for (const std::vector<SectionPoint>& contour : sectionContours) {
+        if (contour.size() < 3) {
+            continue;
+        }
+        for (std::size_t current = 0, previous = contour.size() - 1;
+             current < contour.size();
+             previous = current++) {
+            const SectionPoint& first = contour[current];
+            const SectionPoint& second = contour[previous];
+            const bool crossesRay =
+                ((first.y > pointY) != (second.y > pointY)) &&
+                (pointX <
+                 (second.x - first.x) * (pointY - first.y) /
+                         (second.y - first.y) +
+                     first.x);
+            if (crossesRay) {
+                inside = !inside;
+            }
         }
     }
     return inside;
 }
 
 void Mesh::buildSolid() {
-    if (sectionContour.size() < 3) {
+    if (!hasSection()) {
         return;
     }
 
@@ -638,6 +733,7 @@ void Mesh::printInfo() const {
     for (int v : solid) if (v) ++count;
     std::cout << "  Number of solid cells = " << count << "\n";
     std::cout << "  Number of geometry triangles = " << triangles.size() << "\n";
-    std::cout << "  Number of section points = " << sectionContour.size() << "\n";
+    std::cout << "  Number of section contours = " << sectionContours.size()
+              << " (" << sectionPointCount() << " points)\n";
     std::cout << "=========================\n";
 }

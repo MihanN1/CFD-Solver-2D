@@ -1,37 +1,43 @@
 ; Inno Setup script for Fluid Solver.
 ;
-; One installer per architecture. It carries every feature variant built for
-; that architecture; the user ticks AVX2, OpenMP and CUDA independently and the
-; matching build is installed as "Fluid Solver.exe", so shortcuts, the UI and
-; any script the user writes never have to know which one it is.
+; ONE installer for every Windows architecture and every feature variant built
+; for them. It works out what this machine can use - AVX2, an NVIDIA driver,
+; more than one core - and installs the matching build as "Fluid Solver.exe",
+; so shortcuts, the UI and any script the user writes never have to know which
+; one it is. Nothing is asked unless the user opens "Let me choose" himself.
 ;
 ; Build it with:
-;   iscc /DAppVersion=0.1 /DArch=x64 /DDistDir=..\..\dist installer\windows\fluid-solver.iss
+;   iscc /DAppVersion=0.2 /DDistDir=..\..\dist installer\windows\fluid-solver.iss
+;
+; and, for a smaller download carrying one architecture only:
+;   iscc /DAppVersion=0.2 /DArch=x64 /DDistDir=..\..\dist installer\windows\fluid-solver.iss
 ;
 ; DistDir must contain the folders make-release.ps1 produced:
 ;   Fluid Solver <ver> windows-<arch> <feature>\Fluid Solver.exe
 ;   Fluid Solver <ver> windows-<arch> <feature>-ui\...   (optional, the UI)
 ;
+; <arch> is x64, x86 or arm64. The three are compiled into the same file and
+; picked at run time, because a person downloading a solver should not have to
+; know what is inside their laptop. An arm64 machine takes the arm64 build when
+; there is one and the x64 build otherwise - Windows 11 on ARM emulates x64,
+; slower but working - and an x64 machine falls back to x86 the same way.
+;
 ; The "-ui" folder is a complete install of its own - solver, UI, DLLs and
 ; output\ in one place, because the UI is a shell that starts the solver. So
 ; ticking the UI installs that folder INSTEAD of the plain one, never both.
 ;
-; Only the variants actually present in DistDir are compiled in, and a switch
-; is offered only when the payload has builds on BOTH sides of it - which is
-; how the 32-bit installer ends up without a CUDA box without anything being
-; written twice. Checking one side was not enough: a dist that only produced
-; AVX2 rows still showed the AVX2 box, and unticking it named a build that was
-; not in the file. An axis with builds on one side only is now pinned to that
-; side instead of asked about.
-; The UI is the same: the component is offered only when at least one "-ui"
-; folder is there, and a UI is only ever paired with the solver of its own
-; variant.
+; Only the variants actually present in DistDir are compiled in, and the manual
+; page offers a switch only when the payload has builds on BOTH sides of it -
+; which is how a 32-bit-only payload ends up without a CUDA box without
+; anything being written twice.
 
 #ifndef AppVersion
-  #define AppVersion "0.1"
+  #define AppVersion "0.2"
 #endif
+; "all" - the default - is every architecture in one file. x64, x86 or arm64
+; builds a single-architecture installer instead.
 #ifndef Arch
-  #define Arch "x64"
+  #define Arch "all"
 #endif
 #ifndef DistDir
   #define DistDir "..\..\dist"
@@ -39,53 +45,38 @@
 #define AppName "Fluid Solver"
 #define Publisher "MihanN1"
 #define AppUrl "https://github.com/MihanN1/CFD-Solver-2D"
-#define Variant(Feature) DistDir + "\" + AppName + " " + AppVersion + " windows-" + Arch + " " + Feature
-#define HaveVariant(Feature) DirExists(Variant(Feature))
-; The UI is built per variant exactly like the solver is, so it lives beside it
-; under "<variant>-ui" and is picked by the same tick boxes. HaveUi is the
-; question "is there a UI for anything at all", which is what decides whether
-; the component is offered; whether there is one for the variant the user
-; actually chose is a separate check, in NextButtonClick.
-#define UiVariant(Feature) DistDir + "\" + AppName + " " + AppVersion + " windows-" + Arch + " " + Feature + "-ui"
-#define HaveUiVariant(Feature) DirExists(UiVariant(Feature))
-#define HaveUi (HaveUiVariant('avx2-omp-cuda') || HaveUiVariant('avx2-omp') || HaveUiVariant('avx2-cuda') || HaveUiVariant('avx2') || HaveUiVariant('omp-cuda') || HaveUiVariant('omp') || HaveUiVariant('cuda') || HaveUiVariant('plain'))
 
-#define HaveAny (HaveVariant('avx2-omp-cuda') || HaveVariant('avx2-omp') || HaveVariant('avx2-cuda') || HaveVariant('avx2') || HaveVariant('omp-cuda') || HaveVariant('omp') || HaveVariant('cuda') || HaveVariant('plain'))
-#define HaveAnyAvx2 (HaveVariant('avx2-omp-cuda') || HaveVariant('avx2-omp') || HaveVariant('avx2-cuda') || HaveVariant('avx2'))
-#define HaveAnyOmp (HaveVariant('avx2-omp-cuda') || HaveVariant('avx2-omp') || HaveVariant('omp-cuda') || HaveVariant('omp'))
-#define HaveAnyCuda (HaveVariant('avx2-omp-cuda') || HaveVariant('avx2-cuda') || HaveVariant('omp-cuda') || HaveVariant('cuda'))
+#define WantArch(str A) ((Arch == "all") || (Arch == A))
+#define VariantDir(str A, str F) \
+    DistDir + "\" + AppName + " " + AppVersion + " windows-" + A + " " + F
+#define UiDir(str A, str F) VariantDir(A, F) + "-ui"
+; Both halves matter: an architecture the caller excluded must not be compiled
+; in even when its folder is sitting in DistDir.
+#define HaveV(str A, str F) (WantArch(A) && DirExists(VariantDir(A, F)))
+#define HaveU(str A, str F) (WantArch(A) && DirExists(UiDir(A, F)))
 
-; The other side of each axis. A box is only worth showing when both of these
-; are true for it; otherwise there is nothing to choose between.
-#define HaveNoAvx2 (HaveVariant('omp-cuda') || HaveVariant('omp') || HaveVariant('cuda') || HaveVariant('plain'))
-#define HaveNoOmp (HaveVariant('avx2-cuda') || HaveVariant('avx2') || HaveVariant('cuda') || HaveVariant('plain'))
-#define HaveNoCuda (HaveVariant('avx2-omp') || HaveVariant('avx2') || HaveVariant('omp') || HaveVariant('plain'))
+#define HaveArch(str A) ( \
+    HaveV(A, 'avx2-omp-cuda') || HaveV(A, 'avx2-omp') || HaveV(A, 'avx2-cuda') || \
+    HaveV(A, 'avx2') || HaveV(A, 'omp-cuda') || HaveV(A, 'omp') || \
+    HaveV(A, 'cuda') || HaveV(A, 'plain'))
+#define HaveUiArch(str A) ( \
+    HaveU(A, 'avx2-omp-cuda') || HaveU(A, 'avx2-omp') || HaveU(A, 'avx2-cuda') || \
+    HaveU(A, 'avx2') || HaveU(A, 'omp-cuda') || HaveU(A, 'omp') || \
+    HaveU(A, 'cuda') || HaveU(A, 'plain'))
 
-#define ShowAvx2 (HaveAnyAvx2 && HaveNoAvx2)
-#define ShowOmp (HaveAnyOmp && HaveNoOmp)
-#define ShowCuda (HaveAnyCuda && HaveNoCuda)
-
-; What a hidden axis is worth: the only value the payload has for it. Spelled
-; with #if rather than a ternary so this file needs nothing from the
-; preprocessor that the rest of it does not already use.
-#if HaveAnyAvx2
-  #define PinAvx2Value "True"
-#else
-  #define PinAvx2Value "False"
-#endif
-#if HaveAnyOmp
-  #define PinOmpValue "True"
-#else
-  #define PinOmpValue "False"
-#endif
-#if HaveAnyCuda
-  #define PinCudaValue "True"
-#else
-  #define PinCudaValue "False"
-#endif
+#define HaveAny (HaveArch('x64') || HaveArch('x86') || HaveArch('arm64'))
+#define HaveUi (HaveUiArch('x64') || HaveUiArch('x86') || HaveUiArch('arm64'))
 
 #if !HaveAny
   #error "No 'Fluid Solver <ver> windows-<arch> <feature>' folder found in DistDir. Run scripts\make-release.ps1 first."
+#endif
+
+; The name says what is in it. A single-architecture build keeps the old name
+; so an existing link to it still means the same thing.
+#if Arch == "all"
+  #define OutputName AppName + " " + AppVersion + " windows setup"
+#else
+  #define OutputName AppName + " " + AppVersion + " windows-" + Arch + " setup"
 #endif
 
 [Setup]
@@ -99,11 +90,12 @@ VersionInfoVersion={#AppVersion}.0.0
 DefaultDirName={autopf}\{#AppName}
 DefaultGroupName={#AppName}
 OutputDir={#DistDir}
-OutputBaseFilename={#AppName} {#AppVersion} windows-{#Arch} setup
+OutputBaseFilename={#OutputName}
 LicenseFile=..\..\LICENSE
 SetupIconFile=..\..\logo\fluid-solver.ico
 WizardImageFile=..\..\logo\wizard-164x314.bmp,..\..\logo\wizard-410x797.bmp
 WizardSmallImageFile=..\..\logo\wizard-small-55x55.bmp,..\..\logo\wizard-small-138x140.bmp
+UninstallDisplayIcon={app}\Fluid Solver.exe
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
@@ -115,9 +107,13 @@ DisableProgramGroupPage=yes
 ; back to the per-user data directory and says so.
 PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
-#if Arch == "x64"
-ArchitecturesAllowed=x64compatible
-ArchitecturesInstallIn64BitMode=x64compatible
+; Windows 7 and newer. (Unrelated to Inno's own version - but note that the
+; "x86compatible"/"arm64" spellings below need Inno Setup 6.3 or newer to
+; compile at all.)
+MinVersion=6.1
+#if (Arch == "all") || (Arch == "x64") || (Arch == "arm64")
+ArchitecturesAllowed=x86compatible or arm64
+ArchitecturesInstallIn64BitMode=x64compatible or arm64
 #endif
 
 [Languages]
@@ -143,15 +139,15 @@ Name: "models"; Description: "Example models"; Types: full
 [Tasks]
 Name: "desktopicon";  Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"
 Name: "startmenu";    Description: "Create a Start Menu shortcut"; GroupDescription: "{cm:AdditionalIcons}"
-; The third shortcut. Unlike the other two this one cannot be declared in
-; [Icons], because Windows has no installer-level way to pin anything - see
-; PinToTaskbar in [Code].
-Name: "taskbar";      Description: "Pin to the taskbar"; GroupDescription: "{cm:AdditionalIcons}"
+; There is deliberately no "Pin to the taskbar" task here any more. Windows 11
+; removed the shell verb that made it possible, and every installer that still
+; offers the box is either failing silently or lying. The last page says how to
+; do it by hand instead, which is two clicks and always works.
 #if HaveUi
 ; Where a shortcut goes and what it starts are two different questions, so they
 ; are two groups. This second one only appears when the UI is actually being
 ; installed - without it there is a single program to point at and nothing to
-; choose between. Both boxes apply to all three places above at once.
+; choose between. Both boxes apply to both places above at once.
 Name: "iconui";      Description: "Fluid Solver UI - the window"; GroupDescription: "Which program the shortcuts start:"; Components: ui
 Name: "iconconsole"; Description: "Fluid Solver - the console version, where every parameter is typed at the prompt"; GroupDescription: "Which program the shortcuts start:"; Components: ui; Flags: unchecked
 #endif
@@ -161,62 +157,105 @@ Name: "associatevtk"; Description: "Open .vtk files with the Fluid Solver UI"; C
 #endif
 
 [Files]
-; Exactly one of these is installed, chosen by the tick boxes below. Each line
-; only exists if that build is in DistDir. WantSolverOnly, not WantVariant:
-; when the UI component is ticked the "-ui" row further down installs instead,
-; because it already contains this same executable.
-#if HaveVariant('avx2-omp-cuda')
-Source: "{#Variant('avx2-omp-cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('avx2-omp-cuda'); Components: solver
+; Exactly one of these is installed, chosen by ActiveArch and SelectedFeature.
+; Each line only exists if that build is in DistDir. WantSolverOnly, not
+; WantVariant: when the UI component is ticked the "-ui" row further down
+; installs instead, because it already contains this same executable.
+#if HaveV('x64', 'avx2-omp-cuda')
+Source: "{#VariantDir('x64','avx2-omp-cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x64|avx2-omp-cuda'); Components: solver
 #endif
-#if HaveVariant('avx2-omp')
-Source: "{#Variant('avx2-omp')}\*";      DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('avx2-omp');      Components: solver
+#if HaveV('x64', 'avx2-omp')
+Source: "{#VariantDir('x64','avx2-omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x64|avx2-omp'); Components: solver
 #endif
-#if HaveVariant('avx2-cuda')
-Source: "{#Variant('avx2-cuda')}\*";     DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('avx2-cuda');     Components: solver
+#if HaveV('x64', 'avx2-cuda')
+Source: "{#VariantDir('x64','avx2-cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x64|avx2-cuda'); Components: solver
 #endif
-#if HaveVariant('avx2')
-Source: "{#Variant('avx2')}\*";          DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('avx2');          Components: solver
+#if HaveV('x64', 'avx2')
+Source: "{#VariantDir('x64','avx2')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x64|avx2'); Components: solver
 #endif
-#if HaveVariant('omp-cuda')
-Source: "{#Variant('omp-cuda')}\*";      DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('omp-cuda');      Components: solver
+#if HaveV('x64', 'omp-cuda')
+Source: "{#VariantDir('x64','omp-cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x64|omp-cuda'); Components: solver
 #endif
-#if HaveVariant('omp')
-Source: "{#Variant('omp')}\*";           DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('omp');           Components: solver
+#if HaveV('x64', 'omp')
+Source: "{#VariantDir('x64','omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x64|omp'); Components: solver
 #endif
-#if HaveVariant('cuda')
-Source: "{#Variant('cuda')}\*";          DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('cuda');          Components: solver
+#if HaveV('x64', 'cuda')
+Source: "{#VariantDir('x64','cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x64|cuda'); Components: solver
 #endif
-#if HaveVariant('plain')
-Source: "{#Variant('plain')}\*";         DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('plain');         Components: solver
+#if HaveV('x64', 'plain')
+Source: "{#VariantDir('x64','plain')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x64|plain'); Components: solver
+#endif
+
+#if HaveV('x86', 'avx2-omp')
+Source: "{#VariantDir('x86','avx2-omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x86|avx2-omp'); Components: solver
+#endif
+#if HaveV('x86', 'avx2')
+Source: "{#VariantDir('x86','avx2')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x86|avx2'); Components: solver
+#endif
+#if HaveV('x86', 'omp')
+Source: "{#VariantDir('x86','omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x86|omp'); Components: solver
+#endif
+#if HaveV('x86', 'plain')
+Source: "{#VariantDir('x86','plain')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('x86|plain'); Components: solver
+#endif
+
+; No AVX2 and no CUDA on ARM: the instruction set is not there and neither is
+; the toolkit, so those rows do not exist and are not looked for.
+#if HaveV('arm64', 'omp')
+Source: "{#VariantDir('arm64','omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('arm64|omp'); Components: solver
+#endif
+#if HaveV('arm64', 'plain')
+Source: "{#VariantDir('arm64','plain')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantSolverOnly('arm64|plain'); Components: solver
 #endif
 
 ; The UI half of the same choice, and the one that wins when the component is
 ; ticked: each of these folders holds the solver too. Same Check: as the solver
 ; row above, so the pair always matches - a plain solver never gets an AVX2 UI.
-#if HaveUiVariant('avx2-omp-cuda')
-Source: "{#UiVariant('avx2-omp-cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('avx2-omp-cuda'); Components: ui
+#if HaveU('x64', 'avx2-omp-cuda')
+Source: "{#UiDir('x64','avx2-omp-cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x64|avx2-omp-cuda'); Components: ui
 #endif
-#if HaveUiVariant('avx2-omp')
-Source: "{#UiVariant('avx2-omp')}\*";      DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('avx2-omp');      Components: ui
+#if HaveU('x64', 'avx2-omp')
+Source: "{#UiDir('x64','avx2-omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x64|avx2-omp'); Components: ui
 #endif
-#if HaveUiVariant('avx2-cuda')
-Source: "{#UiVariant('avx2-cuda')}\*";     DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('avx2-cuda');     Components: ui
+#if HaveU('x64', 'avx2-cuda')
+Source: "{#UiDir('x64','avx2-cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x64|avx2-cuda'); Components: ui
 #endif
-#if HaveUiVariant('avx2')
-Source: "{#UiVariant('avx2')}\*";          DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('avx2');          Components: ui
+#if HaveU('x64', 'avx2')
+Source: "{#UiDir('x64','avx2')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x64|avx2'); Components: ui
 #endif
-#if HaveUiVariant('omp-cuda')
-Source: "{#UiVariant('omp-cuda')}\*";      DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('omp-cuda');      Components: ui
+#if HaveU('x64', 'omp-cuda')
+Source: "{#UiDir('x64','omp-cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x64|omp-cuda'); Components: ui
 #endif
-#if HaveUiVariant('omp')
-Source: "{#UiVariant('omp')}\*";           DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('omp');           Components: ui
+#if HaveU('x64', 'omp')
+Source: "{#UiDir('x64','omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x64|omp'); Components: ui
 #endif
-#if HaveUiVariant('cuda')
-Source: "{#UiVariant('cuda')}\*";          DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('cuda');          Components: ui
+#if HaveU('x64', 'cuda')
+Source: "{#UiDir('x64','cuda')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x64|cuda'); Components: ui
 #endif
-#if HaveUiVariant('plain')
-Source: "{#UiVariant('plain')}\*";         DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('plain');         Components: ui
+#if HaveU('x64', 'plain')
+Source: "{#UiDir('x64','plain')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x64|plain'); Components: ui
 #endif
+
+#if HaveU('x86', 'avx2-omp')
+Source: "{#UiDir('x86','avx2-omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x86|avx2-omp'); Components: ui
+#endif
+#if HaveU('x86', 'avx2')
+Source: "{#UiDir('x86','avx2')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x86|avx2'); Components: ui
+#endif
+#if HaveU('x86', 'omp')
+Source: "{#UiDir('x86','omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x86|omp'); Components: ui
+#endif
+#if HaveU('x86', 'plain')
+Source: "{#UiDir('x86','plain')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('x86|plain'); Components: ui
+#endif
+
+#if HaveU('arm64', 'omp')
+Source: "{#UiDir('arm64','omp')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('arm64|omp'); Components: ui
+#endif
+#if HaveU('arm64', 'plain')
+Source: "{#UiDir('arm64','plain')}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs; Check: WantVariant('arm64|plain'); Components: ui
+#endif
+
 Source: "..\..\models\*"; DestDir: "{app}\models"; Flags: ignoreversion recursesubdirs skipifsourcedoesntexist; Components: models
 Source: "..\..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE";   DestDir: "{app}"; Flags: ignoreversion
@@ -245,12 +284,12 @@ Type: files; Name: "{autodesktop}\{#AppName}.lnk";    Check: NoConsoleIcon
 Name: "{app}\output"; Flags: uninsneveruninstall
 
 [Icons]
-Name: "{group}\{#AppName}";       Filename: "{app}\Fluid Solver.exe"; WorkingDir: "{app}"; Tasks: startmenu;   Check: WantConsoleIcon
+Name: "{group}\{#AppName}";       Filename: "{app}\Fluid Solver.exe"; WorkingDir: "{app}"; IconFilename: "{app}\Fluid Solver.exe"; Tasks: startmenu;   Check: WantConsoleIcon
 Name: "{group}\Output folder";    Filename: "{app}\output"; Tasks: startmenu
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\Fluid Solver.exe"; WorkingDir: "{app}"; Tasks: desktopicon; Check: WantConsoleIcon
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\Fluid Solver.exe"; WorkingDir: "{app}"; IconFilename: "{app}\Fluid Solver.exe"; Tasks: desktopicon; Check: WantConsoleIcon
 #if HaveUi
-Name: "{group}\{#AppName} UI";       Filename: "{app}\Fluid Solver UI.exe"; WorkingDir: "{app}"; Tasks: startmenu;   Components: ui; Check: WantUiIcon
-Name: "{autodesktop}\{#AppName} UI"; Filename: "{app}\Fluid Solver UI.exe"; WorkingDir: "{app}"; Tasks: desktopicon; Components: ui; Check: WantUiIcon
+Name: "{group}\{#AppName} UI";       Filename: "{app}\Fluid Solver UI.exe"; WorkingDir: "{app}"; IconFilename: "{app}\Fluid Solver UI.exe"; Tasks: startmenu;   Components: ui; Check: WantUiIcon
+Name: "{autodesktop}\{#AppName} UI"; Filename: "{app}\Fluid Solver UI.exe"; WorkingDir: "{app}"; IconFilename: "{app}\Fluid Solver UI.exe"; Tasks: desktopicon; Components: ui; Check: WantUiIcon
 #endif
 
 [Registry]
@@ -258,6 +297,10 @@ Root: HKA; Subkey: "Environment"; ValueType: expandsz; ValueName: "Path"; ValueD
 #if HaveUi
 Root: HKA; Subkey: "Software\Classes\.vtk"; ValueType: string; ValueName: ""; ValueData: "FluidSolver.vtk"; Flags: uninsdeletevalue; Tasks: associatevtk
 Root: HKA; Subkey: "Software\Classes\FluidSolver.vtk"; ValueType: string; ValueName: ""; ValueData: "VTK solution frame"; Flags: uninsdeletekey; Tasks: associatevtk
+; The solver executable, not the UI: its icon is compiled in by src/app.rc.in
+; and is therefore always there, while the UI's is written into the archive
+; afterwards by scripts\stamp-ui-icon.py and can be missing if that step was
+; skipped. The file still OPENS in the UI - that is the line below.
 Root: HKA; Subkey: "Software\Classes\FluidSolver.vtk\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\Fluid Solver.exe,0"; Tasks: associatevtk
 Root: HKA; Subkey: "Software\Classes\FluidSolver.vtk\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\Fluid Solver UI.exe"" ""%1"""; Tasks: associatevtk
 #endif
@@ -271,31 +314,23 @@ Filename: "{app}\README.md"; Description: "Open the README"; Flags: shellexec no
 
 [Code]
 var
-  FeaturePage: TInputOptionWizardPage;
-  Available: TStringList;
+  ChoicePage: TInputOptionWizardPage;   // automatic or manual
+  FeaturePage: TInputOptionWizardPage;  // the three switches, when manual
+  Available: TStringList;               // "arch|feature" entries in this file
   UiAvailable: TStringList;
   IdxAvx2, IdxOmp, IdxCuda: Integer;
-  // What an axis that is not shown is worth, filled in from the payload
-  PinAvx2, PinOmp, PinCuda: Boolean;
+  DetectedArch: String;
+  AutoFeature: String;
+  FeaturePageSeeded: Boolean;
 
 const
   // PF_AVX2_INSTRUCTIONS_AVAILABLE
   PF_AVX2 = 40;
-  // shell32.dll string resources: "Pin to taskbar" and "Unpin from taskbar".
-  // Reading the localised name is what lets the verb be found on a Windows
-  // that is not in English.
-  RES_PIN_TO_TASKBAR = 5386;
-  RES_UNPIN_FROM_TASKBAR = 5387;
-  LOAD_LIBRARY_AS_DATAFILE = $00000002;
 
 function IsProcessorFeaturePresent(Feature: DWORD): BOOL;
   external 'IsProcessorFeaturePresent@kernel32.dll stdcall';
-function LoadLibraryExW(FileName: String; F: THandle; Flags: DWORD): THandle;
-  external 'LoadLibraryExW@kernel32.dll stdcall';
-function FreeLibrary(Module: THandle): BOOL;
-  external 'FreeLibrary@kernel32.dll stdcall';
-function LoadStringW(Instance: THandle; Id: Cardinal; Buffer: String; BufferMax: Integer): Integer;
-  external 'LoadStringW@user32.dll stdcall';
+
+// ---- what this machine is ------------------------------------------------
 
 function HasAvx2: Boolean;
 begin
@@ -310,26 +345,73 @@ begin
   Result := FileExists(ExpandConstant('{sys}\nvcuda.dll'));
 end;
 
-function Checked(Index: Integer): Boolean;
+// OpenMP is worth having on anything with more than one core, and there is no
+// driver or instruction set for it to be missing - the runtime ships beside
+// the executable. One core is the only case where it costs more than it gives.
+function CoreCount: Integer;
+var
+  Text: String;
+begin
+  Result := 1;
+  Text := GetEnv('NUMBER_OF_PROCESSORS');
+  if Text <> '' then
+    Result := StrToIntDef(Text, 1);
+  if Result < 1 then
+    Result := 1;
+end;
+
+function HasManyCores: Boolean;
+begin
+  Result := CoreCount > 1;
+end;
+
+// ---- what the payload has ------------------------------------------------
+
+function Key(const A, F: String): String;
+begin
+  Result := A + '|' + F;
+end;
+
+function HasBuild(const A, F: String): Boolean;
+begin
+  Result := Available.IndexOf(Key(A, F)) >= 0;
+end;
+
+function ArchPresent(const A: String): Boolean;
+var
+  I: Integer;
 begin
   Result := False;
-  if FeaturePage = nil then Exit;
-  if (Index >= 0) and (Index < FeaturePage.CheckListBox.Items.Count) then
-    Result := FeaturePage.Values[Index];
+  for I := 0 to Available.Count - 1 do
+    if Pos(A + '|', Available[I]) = 1 then
+    begin
+      Result := True;
+      Exit;
+    end;
 end;
 
-// An axis with a box answers with the box. An axis without one keeps the value
-// the payload pinned it to, so the three answers can never name a build that
-// is not in the file.
-function AxisValue(Index: Integer; Pinned: Boolean): Boolean;
+// Which architecture's builds this machine gets. An arm64 Windows runs x64
+// through emulation, and an x64 Windows runs x86, so a payload missing the
+// native rows still installs something that works rather than refusing.
+function PickArch: String;
 begin
-  if Index < 0 then
-    Result := Pinned
+  case ProcessorArchitecture of
+    paArm64:
+      begin
+        if ArchPresent('arm64') then Result := 'arm64'
+        else if ArchPresent('x64') then Result := 'x64'
+        else Result := 'x86';
+      end;
+    paX64:
+      begin
+        if ArchPresent('x64') then Result := 'x64' else Result := 'x86';
+      end;
   else
-    Result := Checked(Index);
+    Result := 'x86';
+  end;
 end;
 
-// The three boxes name one build: "avx2-omp-cuda" down to "plain".
+// The three switches name one build: "avx2-omp-cuda" down to "plain".
 function ComposeFeature(Avx2, Omp, Cuda: Boolean): String;
 begin
   Result := '';
@@ -342,16 +424,88 @@ begin
     Result := Copy(Result, 1, Length(Result) - 1);
 end;
 
-function SelectedFeature: String;
+// The best build this machine can actually use, out of the ones in the file.
+// Every switch is dropped in turn rather than all at once, so a payload that
+// is missing "avx2-omp" still lands on "avx2" or "omp" instead of falling all
+// the way to "plain".
+function BestFeatureFor(const A: String): String;
+var
+  WantAvx2, WantOmp, WantCuda: Boolean;
 begin
-  Result := ComposeFeature(AxisValue(IdxAvx2, PinAvx2),
-                           AxisValue(IdxOmp, PinOmp),
-                           AxisValue(IdxCuda, PinCuda));
+  WantAvx2 := HasAvx2;
+  WantOmp := HasManyCores;
+  WantCuda := HasNvidia;
+
+  Result := ComposeFeature(WantAvx2, WantOmp, WantCuda);
+  if HasBuild(A, Result) then Exit;
+
+  // CUDA first: without a driver it is the switch that buys nothing, and with
+  // one the solver still runs on the CPU if the build is missing.
+  if WantCuda then
+  begin
+    Result := ComposeFeature(WantAvx2, WantOmp, False);
+    if HasBuild(A, Result) then Exit;
+  end;
+  if WantOmp then
+  begin
+    Result := ComposeFeature(WantAvx2, False, WantCuda);
+    if HasBuild(A, Result) then Exit;
+    Result := ComposeFeature(WantAvx2, False, False);
+    if HasBuild(A, Result) then Exit;
+  end;
+  if WantAvx2 then
+  begin
+    Result := ComposeFeature(False, WantOmp, WantCuda);
+    if HasBuild(A, Result) then Exit;
+    Result := ComposeFeature(False, WantOmp, False);
+    if HasBuild(A, Result) then Exit;
+    Result := ComposeFeature(False, False, False);
+    if HasBuild(A, Result) then Exit;
+  end;
+
+  // Nothing matched, which means the payload is odd rather than the machine.
+  // Anything in it that this CPU can execute beats stopping here.
+  if HasBuild(A, 'plain') then Result := 'plain'
+  else if (not WantAvx2) and HasBuild(A, 'omp') then Result := 'omp'
+  else if HasBuild(A, 'avx2-omp') then Result := 'avx2-omp'
+  else Result := 'plain';
 end;
 
-function WantVariant(Name: String): Boolean;
+function Checked(Index: Integer): Boolean;
 begin
-  Result := SelectedFeature = Name;
+  Result := False;
+  if FeaturePage = nil then Exit;
+  if (Index >= 0) and (Index < FeaturePage.CheckListBox.Items.Count) then
+    Result := FeaturePage.Values[Index];
+end;
+
+function AutomaticChosen: Boolean;
+begin
+  Result := True;
+  if ChoicePage <> nil then
+    Result := ChoicePage.SelectedValueIndex = 0;
+end;
+
+function SelectedFeature: String;
+begin
+  if AutomaticChosen or (FeaturePage = nil) then
+    Result := AutoFeature
+  else
+    Result := ComposeFeature(Checked(IdxAvx2), Checked(IdxOmp), Checked(IdxCuda));
+end;
+
+function ActiveArch: String;
+begin
+  Result := DetectedArch;
+end;
+
+// One string rather than two, because a [Files] Check: is the only caller and
+// "arch|feature" is exactly what Available already holds. Comparing the whole
+// key at once also means there is no way for the two halves to be checked
+// against different runs of the wizard.
+function WantVariant(VariantKey: String): Boolean;
+begin
+  Result := VariantKey = ActiveArch + '|' + SelectedFeature;
 end;
 
 function UiChosen: Boolean;
@@ -369,9 +523,9 @@ end;
 // archive REPLACES the solver archive rather than landing on top of it - laying
 // one over the other would copy the same executable twice and leave the result
 // depending on which [Files] line ran last.
-function WantSolverOnly(Name: String): Boolean;
+function WantSolverOnly(VariantKey: String): Boolean;
 begin
-  Result := WantVariant(Name) and (not UiChosen);
+  Result := WantVariant(VariantKey) and (not UiChosen);
 end;
 
 // Spelled as a function of its own rather than "not UiChosen" written into the
@@ -383,9 +537,9 @@ begin
 end;
 
 // What the shortcuts point at - the second question in [Tasks], asked in one
-// place and answered for the desktop, the Start Menu and the taskbar alike. An
-// install without the UI never sees those boxes, so it falls back to the only
-// program it has.
+// place and answered for the desktop and the Start Menu alike. An install
+// without the UI never sees those boxes, so it falls back to the only program
+// it has.
 function WantUiIcon: Boolean;
 begin
   Result := UiChosen and WizardIsTaskSelected('iconui');
@@ -409,112 +563,24 @@ begin
   Result := not WantConsoleIcon;
 end;
 
-// ---- the taskbar --------------------------------------------------------
-// Windows has no supported way for an installer to pin anything. Up to
-// Windows 10 the shell exposed a "Pin to taskbar" verb on the file itself, and
-// driving that verb is what every installer that manages it does. Windows 11
-// removed the verb, so on it this returns False and the user is told to do it
-// by hand rather than left wondering why nothing appeared.
-
-function StripAmp(const S: String): String;
-var
-  I: Integer;
+function HasUiFor(const A, F: String): Boolean;
 begin
-  Result := '';
-  for I := 1 to Length(S) do
-    if S[I] <> '&' then
-      Result := Result + S[I];
+  Result := UiAvailable.IndexOf(Key(A, F)) >= 0;
 end;
 
-// Whatever goes wrong in here - a shell32 that will not load, a Windows that
-// renumbered its resources - is not worth an error dialog: an empty string
-// just sends ShellVerb to its substring fallback.
-function ShellString(ResId: Integer): String;
-var
-  Lib: THandle;
-  Buffer: String;
-  Len: Integer;
+function DescribeMachine: String;
 begin
-  Result := '';
-  try
-    Lib := LoadLibraryExW(ExpandConstant('{sys}\shell32.dll'), 0, LOAD_LIBRARY_AS_DATAFILE);
-    if Lib = 0 then
-      Exit;
-    try
-      SetLength(Buffer, 512);
-      Len := LoadStringW(Lib, ResId, Buffer, 512);
-      if Len > 0 then
-        Result := Copy(Buffer, 1, Len);
-    finally
-      FreeLibrary(Lib);
-    end;
-  except
-    Result := '';
+  Result := 'This machine: ';
+  case ProcessorArchitecture of
+    paArm64: Result := Result + 'ARM64';
+    paX64:   Result := Result + '64-bit x86';
+  else       Result := Result + '32-bit x86';
   end;
-end;
-
-function ShellVerb(const FileName: String; ResId: Integer; const Fallback: String): Boolean;
-var
-  Shell, Folder, Item, Verbs, Verb: Variant;
-  I: Integer;
-  Wanted, Name: String;
-begin
-  Result := False;
-  if not FileExists(FileName) then
-    Exit;
-  Wanted := Lowercase(StripAmp(ShellString(ResId)));
-  try
-    Shell := CreateOleObject('Shell.Application');
-    Folder := Shell.NameSpace(ExtractFileDir(FileName));
-    if VarIsNull(Folder) or VarIsEmpty(Folder) then
-      Exit;
-    Item := Folder.ParseName(ExtractFileName(FileName));
-    if VarIsNull(Item) or VarIsEmpty(Item) then
-      Exit;
-    Verbs := Item.Verbs;
-    for I := 0 to Verbs.Count - 1 do
-    begin
-      Verb := Verbs.Item(I);
-      Name := Lowercase(StripAmp(Verb.Name));
-      if ((Wanted <> '') and (Name = Wanted)) or
-         ((Fallback <> '') and (Pos(Fallback, Name) > 0)) then
-      begin
-        Verb.DoIt;
-        Result := True;
-        Exit;
-      end;
-    end;
-  except
-    Result := False;
-  end;
-end;
-
-function PinToTaskbar(const FileName: String): Boolean;
-begin
-  Result := ShellVerb(FileName, RES_PIN_TO_TASKBAR, 'pin to taskbar');
-end;
-
-function UnpinFromTaskbar(const FileName: String): Boolean;
-begin
-  Result := ShellVerb(FileName, RES_UNPIN_FROM_TASKBAR, 'unpin from taskbar');
-end;
-
-// One attempt, folded into two running lists so the report at the end can say
-// what went up and what Windows refused in one dialog each rather than one per
-// program.
-procedure PinOne(const FileName, Title: String; var Pinned, Refused: String);
-begin
-  if not FileExists(FileName) then Exit;
-  if PinToTaskbar(FileName) then
-  begin
-    if Pinned <> '' then Pinned := Pinned + ' and ';
-    Pinned := Pinned + '"' + Title + '"';
-  end
-  else
-  begin
-    if Refused <> '' then Refused := Refused + ' and ';
-    Refused := Refused + '"' + Title + '"';
-  end;
+  Result := Result + ', ' + IntToStr(CoreCount) + ' core(s), ';
+  if HasAvx2 then Result := Result + 'AVX2' else Result := Result + 'no AVX2';
+  if HasNvidia then Result := Result + ', NVIDIA driver present'
+  else Result := Result + ', no NVIDIA driver';
+  Result := Result + '.';
 end;
 
 procedure InitializeWizard;
@@ -522,97 +588,180 @@ var
   Summary: String;
 begin
   Available := TStringList.Create;
-#if HaveVariant('avx2-omp-cuda')
-  Available.Add('avx2-omp-cuda');
+#if HaveV('x64', 'avx2-omp-cuda')
+  Available.Add('x64|avx2-omp-cuda');
 #endif
-#if HaveVariant('avx2-omp')
-  Available.Add('avx2-omp');
+#if HaveV('x64', 'avx2-omp')
+  Available.Add('x64|avx2-omp');
 #endif
-#if HaveVariant('avx2-cuda')
-  Available.Add('avx2-cuda');
+#if HaveV('x64', 'avx2-cuda')
+  Available.Add('x64|avx2-cuda');
 #endif
-#if HaveVariant('avx2')
-  Available.Add('avx2');
+#if HaveV('x64', 'avx2')
+  Available.Add('x64|avx2');
 #endif
-#if HaveVariant('omp-cuda')
-  Available.Add('omp-cuda');
+#if HaveV('x64', 'omp-cuda')
+  Available.Add('x64|omp-cuda');
 #endif
-#if HaveVariant('omp')
-  Available.Add('omp');
+#if HaveV('x64', 'omp')
+  Available.Add('x64|omp');
 #endif
-#if HaveVariant('cuda')
-  Available.Add('cuda');
+#if HaveV('x64', 'cuda')
+  Available.Add('x64|cuda');
 #endif
-#if HaveVariant('plain')
-  Available.Add('plain');
+#if HaveV('x64', 'plain')
+  Available.Add('x64|plain');
+#endif
+#if HaveV('x86', 'avx2-omp')
+  Available.Add('x86|avx2-omp');
+#endif
+#if HaveV('x86', 'avx2')
+  Available.Add('x86|avx2');
+#endif
+#if HaveV('x86', 'omp')
+  Available.Add('x86|omp');
+#endif
+#if HaveV('x86', 'plain')
+  Available.Add('x86|plain');
+#endif
+#if HaveV('arm64', 'omp')
+  Available.Add('arm64|omp');
+#endif
+#if HaveV('arm64', 'plain')
+  Available.Add('arm64|plain');
 #endif
 
   // The same list for the UI, which is built per variant too. It is a subset
   // of Available - possibly an empty one - and NextButtonClick uses it to catch
   // "UI ticked, but not for the build you chose" before anything is copied.
   UiAvailable := TStringList.Create;
-#if HaveUiVariant('avx2-omp-cuda')
-  UiAvailable.Add('avx2-omp-cuda');
+#if HaveU('x64', 'avx2-omp-cuda')
+  UiAvailable.Add('x64|avx2-omp-cuda');
 #endif
-#if HaveUiVariant('avx2-omp')
-  UiAvailable.Add('avx2-omp');
+#if HaveU('x64', 'avx2-omp')
+  UiAvailable.Add('x64|avx2-omp');
 #endif
-#if HaveUiVariant('avx2-cuda')
-  UiAvailable.Add('avx2-cuda');
+#if HaveU('x64', 'avx2-cuda')
+  UiAvailable.Add('x64|avx2-cuda');
 #endif
-#if HaveUiVariant('avx2')
-  UiAvailable.Add('avx2');
+#if HaveU('x64', 'avx2')
+  UiAvailable.Add('x64|avx2');
 #endif
-#if HaveUiVariant('omp-cuda')
-  UiAvailable.Add('omp-cuda');
+#if HaveU('x64', 'omp-cuda')
+  UiAvailable.Add('x64|omp-cuda');
 #endif
-#if HaveUiVariant('omp')
-  UiAvailable.Add('omp');
+#if HaveU('x64', 'omp')
+  UiAvailable.Add('x64|omp');
 #endif
-#if HaveUiVariant('cuda')
-  UiAvailable.Add('cuda');
+#if HaveU('x64', 'cuda')
+  UiAvailable.Add('x64|cuda');
 #endif
-#if HaveUiVariant('plain')
-  UiAvailable.Add('plain');
+#if HaveU('x64', 'plain')
+  UiAvailable.Add('x64|plain');
+#endif
+#if HaveU('x86', 'avx2-omp')
+  UiAvailable.Add('x86|avx2-omp');
+#endif
+#if HaveU('x86', 'avx2')
+  UiAvailable.Add('x86|avx2');
+#endif
+#if HaveU('x86', 'omp')
+  UiAvailable.Add('x86|omp');
+#endif
+#if HaveU('x86', 'plain')
+  UiAvailable.Add('x86|plain');
+#endif
+#if HaveU('arm64', 'omp')
+  UiAvailable.Add('arm64|omp');
+#endif
+#if HaveU('arm64', 'plain')
+  UiAvailable.Add('arm64|plain');
 #endif
 
-  Summary := 'This machine: ';
-  if HasAvx2 then Summary := Summary + 'AVX2 supported' else Summary := Summary + 'no AVX2';
-  if HasNvidia then Summary := Summary + ', NVIDIA driver present' else Summary := Summary + ', no NVIDIA driver';
-  Summary := Summary + '.' + #13#10 +
-    'Every build produces the same numbers - they differ only in speed. The boxes' + #13#10 +
-    'are already ticked for what this machine can use.';
+  DetectedArch := PickArch;
+  AutoFeature := BestFeatureFor(DetectedArch);
 
-  FeaturePage := CreateInputOptionPage(wpSelectComponents,
-    'Solver build', 'Which parts should the installed solver use?',
-    Summary, False, False);
+  Summary := DescribeMachine + #13#10 +
+    'Picked for it: the ' + DetectedArch + ' "' + AutoFeature + '" build.' + #13#10#13#10 +
+    'These change how fast a run is, not what it solves. Leave the first' + #13#10 +
+    'option alone unless you have a reason not to.';
+
+  ChoicePage := CreateInputOptionPage(wpSelectComponents,
+    'Solver build', 'Which build should be installed?',
+    Summary, True, False);
+  ChoicePage.Add('Choose automatically for this machine (recommended)');
+  ChoicePage.Add('Let me pick AVX2, OpenMP and CUDA myself');
+  ChoicePage.SelectedValueIndex := 0;
 
   IdxAvx2 := -1;
   IdxOmp := -1;
   IdxCuda := -1;
 
-  // What a hidden axis is worth. Set for all three, and used by AxisValue for
-  // whichever of them ended up without a box.
-  PinAvx2 := {#PinAvx2Value};
-  PinOmp := {#PinOmpValue};
-  PinCuda := {#PinCudaValue};
-
-  // A switch is shown only when the payload has builds both with and without
-  // it. That is what keeps CUDA off the 32-bit installer without a second copy
-  // of this file, and what stops a box from offering a build that is not here.
-#if ShowAvx2
+  FeaturePage := CreateInputOptionPage(ChoicePage.ID,
+    'Solver build', 'Which parts should the installed solver use?',
+    'Only the switches this download has builds on both sides of are shown.' + #13#10 +
+    'The boxes start where the automatic choice left them.',
+    False, False);
   IdxAvx2 := FeaturePage.Add('AVX2 - vector kernels. Needs an Intel or AMD CPU from about 2013 on.');
-#endif
-#if ShowOmp
   IdxOmp := FeaturePage.Add('OpenMP - use every core of the CPU instead of one.');
-#endif
-#if ShowCuda
   IdxCuda := FeaturePage.Add('CUDA - run the pressure solve on an NVIDIA GPU.');
-#endif
+end;
 
-  if IdxAvx2 >= 0 then FeaturePage.Values[IdxAvx2] := HasAvx2;
-  if IdxOmp  >= 0 then FeaturePage.Values[IdxOmp]  := True;
-  if IdxCuda >= 0 then FeaturePage.Values[IdxCuda] := HasNvidia;
+// The manual page is filled in when it is reached rather than in
+// InitializeWizard, because which switches are worth showing depends on the
+// architecture that was picked, and a combined installer does not know that
+// until it is running.
+procedure CurPageChanged(CurPageID: Integer);
+var
+  A: String;
+  HasOn, HasOff: Boolean;
+  I: Integer;
+  Feature: String;
+begin
+  if (FeaturePage = nil) or (CurPageID <> FeaturePage.ID) then Exit;
+  A := ActiveArch;
+
+  // Seeded from the automatic choice the first time the page is opened, and
+  // left alone after that: going Back and Next again must not throw away what
+  // the user just ticked.
+  if not FeaturePageSeeded then
+  begin
+    FeaturePageSeeded := True;
+    FeaturePage.Values[IdxAvx2] := Pos('avx2', AutoFeature) > 0;
+    FeaturePage.Values[IdxOmp] := Pos('omp', AutoFeature) > 0;
+    FeaturePage.Values[IdxCuda] := Pos('cuda', AutoFeature) > 0;
+  end;
+
+  // A switch is only worth a box when the payload has builds both with and
+  // without it for this architecture. That is what keeps CUDA off the 32-bit
+  // and ARM pages without a second copy of this file.
+
+  HasOn := False; HasOff := False;
+  for I := 0 to Available.Count - 1 do
+    if Pos(A + '|', Available[I]) = 1 then
+    begin
+      Feature := Copy(Available[I], Length(A) + 2, Length(Available[I]));
+      if Pos('avx2', Feature) > 0 then HasOn := True else HasOff := True;
+    end;
+  FeaturePage.CheckListBox.ItemEnabled[IdxAvx2] := HasOn and HasOff;
+
+  HasOn := False; HasOff := False;
+  for I := 0 to Available.Count - 1 do
+    if Pos(A + '|', Available[I]) = 1 then
+    begin
+      Feature := Copy(Available[I], Length(A) + 2, Length(Available[I]));
+      if Pos('omp', Feature) > 0 then HasOn := True else HasOff := True;
+    end;
+  FeaturePage.CheckListBox.ItemEnabled[IdxOmp] := HasOn and HasOff;
+
+  HasOn := False; HasOff := False;
+  for I := 0 to Available.Count - 1 do
+    if Pos(A + '|', Available[I]) = 1 then
+    begin
+      Feature := Copy(Available[I], Length(A) + 2, Length(Available[I]));
+      if Pos('cuda', Feature) > 0 then HasOn := True else HasOff := True;
+    end;
+  FeaturePage.CheckListBox.ItemEnabled[IdxCuda] := HasOn and HasOff;
 end;
 
 function NeedsPath(Dir: String): Boolean;
@@ -624,16 +773,25 @@ begin
   Result := Pos(';' + Uppercase(Dir) + ';', ';' + Uppercase(Existing) + ';') = 0;
 end;
 
+// The manual page is skipped unless the user asked for it on the page before.
+function ShouldSkipPage(PageID: Integer): Boolean;
+begin
+  Result := False;
+  if (FeaturePage <> nil) and (PageID = FeaturePage.ID) then
+    Result := AutomaticChosen;
+end;
+
 function NextButtonClick(CurPageID: Integer): Boolean;
 var
-  Feature, List: String;
+  Feature, List, A: String;
   I: Integer;
 begin
   Result := True;
   if FeaturePage = nil then Exit;
   if CurPageID <> FeaturePage.ID then Exit;
 
-  if AxisValue(IdxAvx2, PinAvx2) and (not HasAvx2) then
+  A := ActiveArch;
+  if Checked(IdxAvx2) and (not HasAvx2) then
   begin
     MsgBox('This CPU does not support AVX2. That build would stop with an ' +
            '"illegal instruction" error on the first run.' + #13#10#13#10 +
@@ -646,16 +804,18 @@ begin
   // missing a toolkit produces fewer, and the installer only carries what it
   // was given.
   Feature := SelectedFeature;
-  if Available.IndexOf(Feature) < 0 then
+  if not HasBuild(A, Feature) then
   begin
     List := '';
     for I := 0 to Available.Count - 1 do
-      List := List + #13#10 + '    ' + Available[I];
+      if Pos(A + '|', Available[I]) = 1 then
+        List := List + #13#10 + '    ' +
+                Copy(Available[I], Length(A) + 2, Length(Available[I]));
     // The '+' leads the line on purpose: a line whose first non-blank
     // character is '#' is a preprocessor directive to ISPP, and '#13' is not
     // one of them, so wrapping before the constant instead of after it is what
     // makes this compile at all.
-    MsgBox('This installer does not carry the "' + Feature + '" build.'
+    MsgBox('This installer does not carry the ' + A + ' "' + Feature + '" build.'
            + #13#10#13#10 + 'It has:' + List, mbError, MB_OK);
     Result := False;
     Exit;
@@ -665,14 +825,16 @@ begin
   // The UI ships per variant as well, so ticking the component is not enough:
   // there has to be a UI for the build that was just chosen. Saying so here
   // beats installing a solver with nothing beside it and no explanation.
-  if IsComponentSelected('ui') and (UiAvailable.IndexOf(Feature) < 0) then
+  if UiChosen and (not HasUiFor(A, Feature)) then
   begin
     List := '';
     for I := 0 to UiAvailable.Count - 1 do
-      List := List + #13#10 + '    ' + UiAvailable[I];
+      if Pos(A + '|', UiAvailable[I]) = 1 then
+        List := List + #13#10 + '    ' +
+                Copy(UiAvailable[I], Length(A) + 2, Length(UiAvailable[I]));
     if List = '' then
       List := #13#10 + '    (none)';
-    MsgBox('There is no desktop UI built for the "' + Feature + '" solver.'
+    MsgBox('There is no desktop UI built for the ' + A + ' "' + Feature + '" solver.'
            + #13#10#13#10 + 'The UI is built per variant, and this installer has one for:'
            + List + #13#10#13#10
            + 'Either pick one of those, or go back and untick the UI component.',
@@ -684,78 +846,47 @@ begin
 
   // A CUDA build without a driver still starts - it says so and runs on the
   // CPU - but the user ticked the box for a reason, so it is worth saying now.
-  if AxisValue(IdxCuda, PinCuda) and (not HasNvidia) then
+  if Checked(IdxCuda) and (not HasNvidia) then
     if MsgBox('No NVIDIA driver was found on this machine, so the CUDA build ' +
               'will fall back to the CPU every time it runs.' + #13#10#13#10 +
               'Install it anyway?', mbConfirmation, MB_YESNO) = IDNO then
       Result := False;
 end;
 
-// When every axis is pinned there is nothing on the page, so it is skipped
-// rather than shown empty.
-function ShouldSkipPage(PageID: Integer): Boolean;
-begin
-  Result := False;
-  if (FeaturePage <> nil) and (PageID = FeaturePage.ID) then
-    Result := FeaturePage.CheckListBox.Items.Count = 0;
-end;
-
-// The AVX2 guard again, for the run where the page above was skipped. A payload
-// that varies on nothing pins all three axes, and the check that lives in
-// NextButtonClick then never fires - which is how a dist of AVX2-only rows
-// could install one on a CPU that cannot execute it, with nothing said.
+// The automatic path never shows the page above, so its AVX2 guard never fires
+// there. BestFeatureFor already refuses to pick an AVX2 build on a CPU without
+// AVX2, and this is the belt to that pair of braces: a payload so odd that
+// nothing else was left would otherwise install a binary that dies on its
+// first instruction.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
   Result := '';
-  if (FeaturePage <> nil) and (FeaturePage.CheckListBox.Items.Count > 0) then Exit;
-  if AxisValue(IdxAvx2, PinAvx2) and (not HasAvx2) then
-    Result := 'This installer only carries AVX2 builds, and this CPU does not ' +
-              'support AVX2. The solver would stop with an "illegal instruction" ' +
-              'error on the first run.';
+  if (Pos('avx2', SelectedFeature) > 0) and (not HasAvx2) then
+    Result := 'The only build this installer has for your machine uses AVX2, ' +
+              'and this CPU does not support it. The solver would stop with an ' +
+              '"illegal instruction" error on the first run.';
 end;
 
+// What used to be a "Pin to the taskbar" tick box. Windows 11 removed the
+// shell verb an installer could drive, so the box could only ever fail on a
+// current machine; saying how to do it by hand is the honest version of the
+// same feature. Shown once, at the end, and only when a shortcut was actually
+// created - with nothing in the Start Menu there is nothing to right-click.
 procedure CurStepChanged(CurStep: TSetupStep);
 var
-  Pinned, Refused: String;
+  What: String;
 begin
-  // Before the files move. [InstallDelete] is about to take the shortcuts this
-  // run does not want back out, and the shell can only unpin a file that is
-  // still on disk.
-  if CurStep = ssInstall then
-  begin
-    if NoUiIcon then
-      UnpinFromTaskbar(ExpandConstant('{app}\Fluid Solver UI.exe'));
-    if NoConsoleIcon then
-      UnpinFromTaskbar(ExpandConstant('{app}\Fluid Solver.exe'));
-    Exit;
-  end;
   if CurStep <> ssPostInstall then Exit;
-  if not WizardIsTaskSelected('taskbar') then Exit;
+  if not WizardIsTaskSelected('startmenu') then Exit;
 
-  // Both, one or neither - whatever the second group of tick boxes said.
-  Pinned := '';
-  Refused := '';
   if WantUiIcon then
-    PinOne(ExpandConstant('{app}\Fluid Solver UI.exe'), 'Fluid Solver UI', Pinned, Refused);
-  if WantConsoleIcon then
-    PinOne(ExpandConstant('{app}\Fluid Solver.exe'), 'Fluid Solver', Pinned, Refused);
+    What := 'Fluid Solver UI'
+  else
+    What := 'Fluid Solver';
 
-  if Pinned <> '' then
-    MsgBox(Pinned + ' has been pinned to the taskbar.', mbInformation, MB_OK);
-  if Refused <> '' then
-    MsgBox('Windows would not let the installer pin ' + Refused + ' to the ' +
-           'taskbar. Since Windows 11 this is blocked for every program, not ' +
-           'just this one.' + #13#10#13#10 +
-           'Open the Start Menu, right-click it and choose "Pin to taskbar".',
-           mbInformation, MB_OK);
-end;
-
-procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
-begin
-  // Before the files go, so the shell still has something to unpin.
-  if CurUninstallStep = usUninstall then
-  begin
-    UnpinFromTaskbar(ExpandConstant('{app}\Fluid Solver UI.exe'));
-    UnpinFromTaskbar(ExpandConstant('{app}\Fluid Solver.exe'));
-  end;
+  MsgBox('One thing Windows will not let an installer do: pin to the taskbar.' + #13#10#13#10 +
+         'Open the Start Menu, find "' + What + '", right-click it and choose ' +
+         '"Pin to taskbar". Since Windows 11 that is the only way, for every ' +
+         'program - it is not this one being awkward.',
+         mbInformation, MB_OK);
 end;

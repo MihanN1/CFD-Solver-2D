@@ -4,6 +4,8 @@
     x64  : AVX2 {on,off} x OpenMP {on,off} x CUDA {on,off}  = 8
     Win32: AVX2 {on,off} x OpenMP {on,off}                  = 4
            (there is no 32-bit CUDA and has not been since CUDA 9)
+    ARM64: OpenMP {on,off}                                  = 2
+           (AVX2 is an x86 instruction set; no CUDA target here either)
 
     Needs Visual Studio with the C++ workload, and the CUDA Toolkit with its
     Visual Studio Integration component for the CUDA rows. Rows whose
@@ -17,22 +19,44 @@
 [CmdletBinding()]
 param(
     [string]   $Generator  = "Visual Studio 18 2026",
-    [string]   $Version    = "0.1.0",
+    [string]   $Version    = "",    # empty = whatever CMakeLists.txt says
     [string]   $OutDir     = "dist",
     # CUDA 12.x covers sm_50..sm_90. CUDA 13 dropped everything below Turing,
     # so drop 50;60;61;70 from this list if that is the toolkit installed.
     [string]   $CudaArchs  = "75;80;86;89;90",
-    [switch]   $SkipCuda
+    [switch]   $SkipCuda,
+    [switch]   $SkipArm
 )
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+# major.minor from CMakeLists.txt. $Version defaults to empty because param()
+# runs before this does.
+function Get-ProjectVersion {
+    $cmake = Join-Path $repo "CMakeLists.txt"
+    if (Test-Path $cmake) {
+        $match = [regex]::Match((Get-Content $cmake -Raw),
+                                'project\s*\([^)]*?VERSION\s+(\d+)\.(\d+)')
+        if ($match.Success) {
+            return "$($match.Groups[1].Value).$($match.Groups[2].Value)"
+        }
+    }
+    return ""
+}
+if (-not $Version) {
+    $Version = Get-ProjectVersion
+    if (-not $Version) {
+        throw "No -Version given and no version found in CMakeLists.txt"
+    }
+}
+
 $dist = Join-Path $repo $OutDir
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 
 # vcomp140.dll is the one runtime MSVC cannot link statically, so the OpenMP
 # rows carry it beside them. Newer toolsets bump the VC1xx directory name.
 function Find-VcompDll {
+    param([string] $Bits = "x64")
     $roots = @()
     if ($env:VCToolsRedistDir) { $roots += $env:VCToolsRedistDir }
     $roots += Get-ChildItem "${env:ProgramFiles}\Microsoft Visual Studio" -Directory -ErrorAction SilentlyContinue |
@@ -40,7 +64,7 @@ function Find-VcompDll {
               ForEach-Object { $_.FullName }
     foreach ($root in $roots) {
         $hit = Get-ChildItem $root -Recurse -Filter "vcomp140.dll" -ErrorAction SilentlyContinue |
-               Where-Object { $_.FullName -match "\\x64\\" } | Select-Object -First 1
+               Where-Object { $_.FullName -match "\\$Bits\\" } | Select-Object -First 1
         if ($hit) { return $hit.FullName }
     }
     return $null
@@ -54,14 +78,20 @@ function Build-Row {
     if ($OpenMp) { $tags += "omp"  }
     if ($Cuda)   { $tags += "cuda" }
     $feature = if ($tags.Count) { $tags -join "-" } else { "plain" }
-    $label   = if ($Arch -eq "x64") { "windows-x64" } else { "windows-x86" }
+    # CMake's spelling of the architecture and the release's are not the same:
+    # the generator wants Win32 and ARM64, the file names want x86 and arm64.
+    $label   = switch ($Arch) {
+        "x64"   { "windows-x64" }
+        "ARM64" { "windows-arm64" }
+        default { "windows-x86" }
+    }
     $name    = "Fluid Solver $Version $label $feature"
     $build   = Join-Path $repo "build-$label-$feature"
 
     Write-Host "==> $name" -ForegroundColor Cyan
     Remove-Item $build -Recurse -Force -ErrorAction SilentlyContinue
 
-    $cmakeArch = if ($Arch -eq "x64") { "x64" } else { "Win32" }
+    $cmakeArch = $Arch
     $args = @(
         "-S", $repo, "-B", $build,
         "-G", $Generator, "-A", $cmakeArch,
@@ -101,7 +131,8 @@ function Build-Row {
     Copy-Item $exe (Join-Path $rowDir "Fluid Solver.exe") -Force
 
     if ($OpenMp) {
-        $vcomp = Find-VcompDll
+        $bits = switch ($Arch) { "x64" { "x64" } "ARM64" { "arm64" } default { "x86" } }
+        $vcomp = Find-VcompDll $bits
         if ($vcomp) {
             Copy-Item $vcomp $rowDir -Force
             Write-Host "    + vcomp140.dll" -ForegroundColor DarkGray
@@ -123,6 +154,9 @@ foreach ($avx2 in $true, $false) {
         }
         $rows += ,@("Win32", $avx2, $omp, $false)
     }
+}
+if (-not $SkipArm) {
+    foreach ($omp in $true, $false) { $rows += ,@("ARM64", $false, $omp, $false) }
 }
 
 foreach ($row in $rows) { Build-Row -Arch $row[0] -Avx2 $row[1] -OpenMp $row[2] -Cuda $row[3] }

@@ -2,17 +2,26 @@
 # Payload script of the self-extracting Linux installer.
 #
 # makeself runs this from inside the unpacked archive, so every variant file
-# is right here in the working directory. Exactly one of them gets installed as
-# "Fluid Solver", so nothing downstream has to know which.
+# for every architecture is right here in the working directory. The machine is
+# measured, one of them is installed as "Fluid Solver", and nothing downstream
+# has to know which.
 #
-# Interactive:   ./Fluid-Solver-<ver>-linux-<arch>.run
-# Unattended:    ./Fluid-Solver-<ver>-linux-<arch>.run -- --avx2 --openmp --cuda \
-#                    --ui --prefix=/opt/fluid-solver --menu --desktop --taskbar --yes
+# Interactive:   ./Fluid-Solver-<ver>-linux.run
+# Pick by hand:  ./Fluid-Solver-<ver>-linux.run -- --choose
+# Unattended:    ./Fluid-Solver-<ver>-linux.run -- --avx2 --openmp --cuda \
+#                    --ui --prefix=/opt/fluid-solver --menu --desktop --yes
 #
-# The three shortcut switches are separate because they land in three different
-# places: --menu writes the .desktop entry the application menu reads, --desktop
-# drops a copy on the desktop itself, and --taskbar adds it to the dock's
-# favourites. --shortcut is kept as an alias for --menu.
+# By default the three accelerator switches are not asked about at all: AVX2
+# comes from /proc/cpuinfo, CUDA from whether an NVIDIA driver is loaded,
+# OpenMP from the core count, and the best build the payload has for that
+# answer is what goes in. --choose brings back the questions; naming a switch
+# on the command line overrides it for that switch alone.
+#
+# The two shortcut switches are separate because they land in two different
+# places: --menu writes the .desktop entry the application menu reads, and
+# --desktop drops a copy on the desktop itself. --shortcut is kept as an alias
+# for --menu. There is deliberately no --taskbar any more - see the note the
+# installer prints at the end.
 #
 # Which program those shortcuts start is a second, independent question:
 # --icon-ui and --icon-console, either, both or neither. Defaults to the UI
@@ -23,23 +32,26 @@ set -uo pipefail
 
 APP="Fluid Solver"
 VERSION="__VERSION__"
-ARCH="__ARCH__"
 
 PREFIX=""
+ARCH=""
 WANT_AVX2=""
 WANT_OMP=""
 WANT_CUDA=""
 WANT_UI=""
 WANT_MENU=""
 WANT_DESKTOP=""
-WANT_TASKBAR=""
 WANT_ICON_UI=""
 WANT_ICON_CONSOLE=""
 ASSUME_YES=0
+CHOOSE=0
 
 for arg in "$@"; do
     case "$arg" in
         --prefix=*)  PREFIX="${arg#--prefix=}" ;;
+        --arch=*)    ARCH="${arg#--arch=}" ;;
+        --choose)    CHOOSE=1 ;;
+        --auto)      CHOOSE=0 ;;
         --avx2)      WANT_AVX2=1 ;;
         --no-avx2)   WANT_AVX2=0 ;;
         --openmp)    WANT_OMP=1 ;;
@@ -52,19 +64,34 @@ for arg in "$@"; do
         --no-menu|--no-shortcut) WANT_MENU=0 ;;
         --desktop)    WANT_DESKTOP=1 ;;
         --no-desktop) WANT_DESKTOP=0 ;;
-        --taskbar)    WANT_TASKBAR=1 ;;
-        --no-taskbar) WANT_TASKBAR=0 ;;
         --icon-ui)         WANT_ICON_UI=1 ;;
         --no-icon-ui)      WANT_ICON_UI=0 ;;
         --icon-console)    WANT_ICON_CONSOLE=1 ;;
         --no-icon-console) WANT_ICON_CONSOLE=0 ;;
         --yes|-y)    ASSUME_YES=1 ;;
         --help|-h)
-            sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,29p' "$0" | sed 's/^# \{0,1\}//'
             exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
+
+# What this machine is. The names match the ones in the file names, not the
+# ones uname prints. An aarch64 box with no arm64 rows in the payload has no
+# fallback the way Windows on ARM does, so it is told so rather than handed an
+# x86 binary it cannot execute.
+if [ -z "$ARCH" ]; then
+    case "$(uname -m)" in
+        x86_64|amd64)   ARCH=x64 ;;
+        aarch64|arm64)  ARCH=arm64 ;;
+        i386|i486|i586|i686) ARCH=x86 ;;
+        *) ARCH="$(uname -m)" ;;
+    esac
+    # A 64-bit kernel running a 32-bit userspace, and 32-bit-only payloads.
+    if [ "$ARCH" = x64 ] && ! ls "$APP $VERSION linux-x64 "* >/dev/null 2>&1; then
+        ls "$APP $VERSION linux-x86 "* >/dev/null 2>&1 && ARCH=x86
+    fi
+fi
 
 # A desktop file and a dock favourite belong to a person, not to a machine, so
 # under sudo they go to whoever ran sudo rather than to root, who has no
@@ -112,8 +139,14 @@ for a in 1 0; do for o in 1 0; do for c in 1 0; do
 done; done; done
 
 if [ "${#FEATURES[@]}" -eq 0 ]; then
-    echo "This installer carries no linux-$ARCH build at all - it was packed from" >&2
-    echo "an empty dist/. Please report it." >&2
+    echo "This installer carries no linux-$ARCH build." >&2
+    echo "What it does have:" >&2
+    for other in x64 x86 arm64; do
+        ls "$APP $VERSION linux-$other "* >/dev/null 2>&1 &&
+            echo "  linux-$other" >&2
+    done
+    echo "Pass --arch=<one of those> to install it anyway, if your machine can" >&2
+    echo "run it." >&2
     exit 1
 fi
 
@@ -162,7 +195,11 @@ ask() {   # ask <question> <default 0|1> -> echoes 0 or 1
     esac
 }
 
-if [ "$ASSUME_YES" != 1 ]; then
+# Only when asked for. The default is that nobody is asked anything about the
+# accelerators: the three answers above already came from the machine, and a
+# question whose right answer the installer already knows is a question that
+# only gives the user a chance to get it wrong.
+if [ "$CHOOSE" = 1 ] && [ "$ASSUME_YES" != 1 ]; then
     echo
     varies 0 && WANT_AVX2=$(ask "Use the AVX2 build?"   "$WANT_AVX2")
     varies 1 && WANT_OMP=$(ask  "Use the OpenMP build?" "$WANT_OMP")
@@ -177,20 +214,50 @@ if [ "$WANT_CUDA" = 1 ] && [ "$HAS_NVIDIA" = 0 ]; then
     echo "note: no NVIDIA driver here, so the CUDA build will run on the CPU anyway."
 fi
 
+# Every switch is dropped in turn rather than all at once, so a payload missing
+# "avx2-omp" still lands on "avx2" or "omp" instead of falling to "plain".
+# CUDA goes first: without a driver it is the one that buys nothing.
+best_feature() {
+    local a="$1" o="$2" c="$3"
+    local try
+    for try in "$a$o$c" "$a${o}0" "${a}0$c" "${a}00" "0$o$c" "0${o}0" "000"; do
+        if have_combo "$try"; then
+            # An AVX2 build on a CPU without AVX2 is never a candidate, whatever
+            # else is missing: it dies on its first instruction.
+            [ "${try:0:1}" = 1 ] && [ "$HAS_AVX2" = 0 ] && continue
+            printf '%s' "$try"
+            return 0
+        fi
+    done
+    return 1
+}
+
 FEAT="$(feature_of "$WANT_AVX2" "$WANT_OMP" "$WANT_CUDA")"
 if ! have_combo "$WANT_AVX2$WANT_OMP$WANT_CUDA"; then
-    echo
-    echo "This installer does not carry the '$FEAT' build. It has:"
-    i=1; for f in "${FEATURES[@]}"; do echo "  $i) $f"; i=$((i+1)); done
-    [ "$ASSUME_YES" = 1 ] && exit 1
-    read -r -p "Install which one? [1] " reply </dev/tty || reply=""
-    [ -z "$reply" ] && reply=1
-    case "$reply" in *[!0-9]*) echo "not a number" >&2; exit 1 ;; esac
-    if [ "$reply" -lt 1 ] || [ "$reply" -gt "${#FEATURES[@]}" ]; then
-        echo "out of range" >&2; exit 1
+    PICKED="$(best_feature "$WANT_AVX2" "$WANT_OMP" "$WANT_CUDA")"
+    if [ -n "$PICKED" ]; then
+        WANT_AVX2="${PICKED:0:1}"; WANT_OMP="${PICKED:1:1}"; WANT_CUDA="${PICKED:2:1}"
+        NEW_FEAT="$(feature_of "$WANT_AVX2" "$WANT_OMP" "$WANT_CUDA")"
+        echo "note: no '$FEAT' build in this installer; using '$NEW_FEAT' instead."
+        FEAT="$NEW_FEAT"
+    else
+        echo
+        echo "This installer does not carry the '$FEAT' build. It has:"
+        i=1; for f in "${FEATURES[@]}"; do echo "  $i) $f"; i=$((i+1)); done
+        [ "$ASSUME_YES" = 1 ] && exit 1
+        read -r -p "Install which one? [1] " reply </dev/tty || reply=""
+        [ -z "$reply" ] && reply=1
+        case "$reply" in *[!0-9]*) echo "not a number" >&2; exit 1 ;; esac
+        if [ "$reply" -lt 1 ] || [ "$reply" -gt "${#FEATURES[@]}" ]; then
+            echo "out of range" >&2; exit 1
+        fi
+        FEAT="${FEATURES[$((reply-1))]}"
     fi
-    FEAT="${FEATURES[$((reply-1))]}"
 fi
+
+echo "Installing the '$FEAT' build."
+[ "$CHOOSE" = 0 ] && [ "$ASSUME_YES" != 1 ] &&
+    echo "(rerun with --choose to pick AVX2/OpenMP/CUDA yourself)"
 
 SRC="$APP $VERSION linux-$ARCH $FEAT"
 
@@ -198,7 +265,7 @@ SRC="$APP $VERSION linux-$ARCH $FEAT"
 # lives in ui/<feature>/. So the question comes after the feature is settled:
 # asking earlier would mean offering a UI that may not exist for the build the
 # user is about to get, which is the same lie the feature boxes avoid.
-UI_SRC="ui/$FEAT"
+UI_SRC="ui/$ARCH/$FEAT"
 if [ ! -d "$UI_SRC" ]; then
     [ "$WANT_UI" = 1 ] && echo "note: this installer carries no UI for the '$FEAT' build."
     WANT_UI=0
@@ -332,11 +399,11 @@ EOF
     fi
 }
 
-# Three separate questions, because they are three separate places: the
-# application menu, the desktop itself, and the dock's favourites.
+# Two separate questions, because they are two separate places: the application
+# menu and the desktop itself. The dock used to be a third; it is not asked
+# about any more - see the note at the end of the run.
 [ -z "$WANT_MENU" ]    && WANT_MENU=$(ask "Create an application menu entry?" 1)
 [ -z "$WANT_DESKTOP" ] && WANT_DESKTOP=$(ask "Put a shortcut on the desktop?" 1)
-[ -z "$WANT_TASKBAR" ] && WANT_TASKBAR=$(ask "Add it to the taskbar (dock favourites)?" 0)
 
 # Where the shortcuts go is one question, which program they start is another,
 # and this is the second one. It is only worth asking when a UI actually went
@@ -345,7 +412,6 @@ EOF
 WANT_ANY_PLACE=0
 [ "$WANT_MENU" = 1 ]    && WANT_ANY_PLACE=1
 [ "$WANT_DESKTOP" = 1 ] && WANT_ANY_PLACE=1
-[ "$WANT_TASKBAR" = 1 ] && WANT_ANY_PLACE=1
 
 if [ "$HAVE_UI" = 1 ] && [ "$WANT_ANY_PLACE" = 1 ]; then
     [ -z "$WANT_ICON_UI" ] &&
@@ -360,12 +426,11 @@ else
     WANT_ICON_CONSOLE=1
 fi
 
-# The .desktop files in the menu directory are what both the menu and the dock
-# favourites refer to, so they are written whenever either was asked for - but
-# only for the programs the boxes above named.
+# The .desktop files in the menu directory. They are also what a dock favourite
+# would refer to, so writing them is what makes pinning by hand possible at all
+# - the note at the end of the run depends on this having happened.
 NEED_ENTRY=0
 [ "$WANT_MENU" = 1 ] && NEED_ENTRY=1
-[ "$WANT_TASKBAR" = 1 ] && NEED_ENTRY=1
 
 if [ "$NEED_ENTRY" = 1 ]; then
     if [ "$WANT_ICON_CONSOLE" = 1 ]; then
@@ -418,48 +483,14 @@ if [ "$WANT_DESKTOP" = 1 ]; then
 fi
 
 # ---- the taskbar -----------------------------------------------------------
-# There is no cross-desktop way to do this. GNOME keeps its dock in a gsettings
-# list of desktop-file ids, which is scriptable and stable. Plasma keeps its
-# task manager's launchers inside one appletsrc file whose layout changes
-# between releases, so it is left to the user rather than corrupted.
-pin_entry() {   # pin_entry <entry file name> -> 0 when it is in the favourites
-    local entry="$1" current
-    command -v gsettings >/dev/null 2>&1 || return 1
-    as_target_user gsettings get org.gnome.shell favorite-apps >/dev/null 2>&1 || return 1
-    current="$(as_target_user gsettings get org.gnome.shell favorite-apps 2>/dev/null)"
-    case "$current" in
-        *"'$entry'"*) return 0 ;;
-        "@as []"|"[]")
-            as_target_user gsettings set org.gnome.shell favorite-apps \
-                "['$entry']" 2>/dev/null && return 0 ;;
-        \[*\])
-            as_target_user gsettings set org.gnome.shell favorite-apps \
-                "${current%]}, '$entry']" 2>/dev/null && return 0 ;;
-    esac
-    return 1
-}
-
-# Called once per program rather than once, so ticking both boxes puts both in
-# the dock. gsettings is re-read inside pin_entry every time, or the second call
-# would write a list that does not have the first one in it.
-PINNED_NAMES=""
-UNPINNED_NAMES=""
-if [ "$WANT_TASKBAR" = 1 ]; then
-    if [ "$HAVE_UI" = 1 ] && [ "$WANT_ICON_UI" = 1 ]; then
-        if pin_entry fluid-solver-ui.desktop; then PINNED_NAMES="$PINNED_NAMES Fluid-Solver-UI"
-        else UNPINNED_NAMES="$UNPINNED_NAMES Fluid-Solver-UI"; fi
-    fi
-    if [ "$WANT_ICON_CONSOLE" = 1 ]; then
-        if pin_entry fluid-solver.desktop; then PINNED_NAMES="$PINNED_NAMES Fluid-Solver"
-        else UNPINNED_NAMES="$UNPINNED_NAMES Fluid-Solver"; fi
-    fi
-    if [ -n "$UNPINNED_NAMES" ]; then
-        echo
-        echo "This desktop does not expose its taskbar to a script, so$UNPINNED_NAMES"
-        echo "was not pinned. Open the application menu, right-click it and choose"
-        echo "\"Pin to Dash\" or \"Add to Favourites\" - one click, same result."
-    fi
-fi
+# It used to try. GNOME keeps its dock in a gsettings list of desktop-file ids,
+# which is scriptable; Plasma keeps its launchers inside one appletsrc file
+# whose layout changes between releases; XFCE, Cinnamon and the rest each have
+# their own. So on most desktops the box did nothing and printed an apology,
+# and on the one where it worked it was rewriting a list that belongs to the
+# user's session. Doing it by hand is one right-click and works everywhere, so
+# that is what the end of this script says. The menu entry written above is
+# what makes it possible.
 
 # ---- uninstaller -----------------------------------------------------------
 cat > "$PREFIX/uninstall.sh" <<EOF
@@ -474,9 +505,12 @@ set -u
 rm -f "$BINDIR/fluid-solver" "$BINDIR/fluid-solver-ui" 2>/dev/null
 rm -f "$APPDIR/fluid-solver.desktop" "$APPDIR/fluid-solver-ui.desktop" 2>/dev/null
 $(for f in ${DESKTOP_SHORTCUTS[@]+"${DESKTOP_SHORTCUTS[@]}"}; do printf 'rm -f "%s" 2>/dev/null\n' "$f"; done)
-# Take the dock favourites back out, if they went in and this desktop has one.
-# Both entry names, whichever of them the install actually pinned: removing a
-# name that is not in the list is a no-op, and guessing wrong is not.
+# Take the dock favourites back out. This installer no longer puts them in,
+# but 0.1 did, and an upgrade over that install would otherwise leave a
+# favourite pointing at a .desktop file that is about to be deleted - which
+# GNOME draws as a blank tile nobody can get rid of.
+# Both entry names, whichever of them the older install actually pinned:
+# removing a name that is not in the list is a no-op, and guessing wrong is not.
 # The "|| true" is load-bearing on any desktop that is not GNOME: gsettings is
 # installed with glib, so it is on PATH, but reading a schema it does not have
 # exits non-zero.
@@ -512,7 +546,7 @@ EOF
 chmod 0755 "$PREFIX/uninstall.sh"
 
 echo
-echo "Installed the $FEAT build to $PREFIX"
+echo "Installed the linux-$ARCH $FEAT build to $PREFIX"
 [ "$HAVE_UI" = 1 ] && echo "  the desktop UI went in beside it"
 if [ "$WANT_MENU" = 1 ]; then
     [ "$HAVE_UI" = 1 ] && [ "$WANT_ICON_UI" = 1 ] && echo "  menu entry:    $APPDIR/fluid-solver-ui.desktop"
@@ -521,7 +555,18 @@ fi
 for f in ${DESKTOP_SHORTCUTS[@]+"${DESKTOP_SHORTCUTS[@]}"}; do
     echo "  desktop icon:  $f"
 done
-[ -n "$PINNED_NAMES" ] && echo "  taskbar:      $PINNED_NAMES added to the favourites"
 echo "  run it with:   fluid-solver          (if $BINDIR is on your PATH)"
 echo "  frames go to:  $PREFIX/output"
 echo "  uninstall:     $PREFIX/uninstall.sh"
+
+# What the "add it to the taskbar" box used to promise, said plainly instead.
+if [ "$WANT_MENU" = 1 ]; then
+    if [ "$HAVE_UI" = 1 ] && [ "$WANT_ICON_UI" = 1 ]; then PIN_NAME="Fluid Solver UI"
+    else PIN_NAME="Fluid Solver"; fi
+    echo
+    echo "One thing this installer no longer tries to do for you: the taskbar."
+    echo "Open the application menu, find \"$PIN_NAME\", right-click it and choose"
+    echo "\"Pin to Dash\", \"Add to Favourites\" or \"Add to Panel\", whichever your"
+    echo "desktop calls it. One click, and it works on all of them - which is more"
+    echo "than the box that used to be here could say."
+fi

@@ -1,4 +1,5 @@
 #include "Multigrid.hpp"
+#include "Runtime.hpp"
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
@@ -327,7 +328,7 @@ void Multigrid::smoothSOR(
                 int i = 0;
 #ifdef __AVX2__
                 const __m256i lane = parity ? laneOdd : laneEven;
-                for (; i + 8 <= nx; i += 8) {
+                for (; runtime::avx2 && i + 8 <= nx; i += 8) {
                     const int id = row + i;
 
                     const __m256 pCentre =
@@ -402,7 +403,7 @@ void Multigrid::computeResidual(int level) {
 
         int i = 0;
 #ifdef __AVX2__
-        for (; i + 8 <= nx; i += 8) {
+        for (; runtime::avx2 && i + 8 <= nx; i += 8) {
             const int id = row + i;
             const __m256 pCentre =
                 _mm256_loadu_ps(pressure + id);
@@ -452,6 +453,10 @@ float Multigrid::computeVectorNorm(const float* values, int count) {
     double total = 0.0;
     int start = 0;
 #ifdef __AVX2__
+    // Same runtime switch as the two kernels above: with AVX2 turned off the
+    // whole vector block is skipped and start stays at zero, so the scalar
+    // loop below covers every element rather than only the tail.
+    if (runtime::avx2) {
     #pragma omp parallel reduction(+ : total) if (count >= 8192)
     {
         __m256 acc = _mm256_setzero_ps();
@@ -464,6 +469,7 @@ float Multigrid::computeVectorNorm(const float* values, int count) {
         total += static_cast<double>(horizontalSum(acc));
     }
     start = (count / 8) * 8;
+    }
 #endif
     for (int i = start; i < count; ++i)
         total += static_cast<double>(values[i]) * static_cast<double>(values[i]);

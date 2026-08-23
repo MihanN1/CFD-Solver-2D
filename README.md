@@ -18,7 +18,6 @@ The project is designed to simulate external incompressible flow around arbitrar
 
 Possible future extensions include:
 
-- Uploading last .vtk of some past simulations to continue on with it.
 - Adaptive mesh refinement (AMR)
 - Turbulence models
 - Compressible flow solver
@@ -89,6 +88,8 @@ is its own executable and drives the solver as a child process.
 - ✅ Velocity vectors
 - ✅ Solid mask
 - ✅ ParaView compatible
+- ✅ Full run state embedded in every frame
+- ✅ Continue a stopped simulation from any frame
 
 ---
 
@@ -196,6 +197,7 @@ CFD-Solver-2D/
 │   ├── AppPaths.cpp                <- resolves paths against the executable
 │   ├── Config.cpp
 │   ├── Mesh.cpp
+│   ├── Restart.cpp
 │   ├── Solver.cpp
 │   ├── Multigrid.cpp
 │   ├── MultigridCuda.cu
@@ -205,6 +207,7 @@ CFD-Solver-2D/
 │   ├── AppPaths.hpp
 │   ├── Config.hpp
 │   ├── Mesh.hpp
+│   ├── Restart.hpp
 │   ├── Solver.hpp
 │   ├── Multigrid.hpp
 │   ├── MultigridCuda.cuh
@@ -225,16 +228,10 @@ CFD-Solver-2D/
 # Requirements
 
 - C++17 compatible compiler
-- CMake 3.28+
-- CUDA Toolkit (optional, for the GPU pressure solver)
-- OpenMP (optional, picked up automatically when present)
-- A CPU with AVX2 (optional; without it every vector kernel falls back to the
-  scalar loop it already carries)
-- ParaView (optional, for looking at the output)
-
-There are no other dependencies. `tiny_obj_loader` and `stl_reader` are
-header-only and vendored, so a plain configure-and-build works out of the box.
-SFML is in `lib/` for the separate UI and is not linked into the solver.
+- CMake 3.28+ (what `cmake_minimum_required` asks for; `scripts/make-release.sh`
+  installs a newer one into `.toolchain/` when the system copy is older)
+- SFML
+- ParaView (optional)
 
 Supported compilers:
 
@@ -285,12 +282,9 @@ folder as well.
 .\install\bin\"Fluid Solver.exe"
 ```
 
-Frames are written to an `output` folder **beside the executable**, whatever
-directory the program was started from, so a desktop shortcut and a terminal
-put them in the same place. `outputDir` overrides it; an absolute path is taken
-as given. If the folder the program lives in is read-only, which an install
-under `Program Files` is for a standard user, it falls back to the per-user data
-directory and prints the path it used.
+The CMake target is still `cfd_app`, but the file it produces is named
+`Fluid Solver` — `CFD_APP_NAME` sets it, and there will be other solvers next
+to this one.
 
 Configure:
 
@@ -305,10 +299,210 @@ Configure:
 
 After confirmation the simulation starts immediately.
 
-> Reynolds number is deliberately not an input. The solver is dimensional and
-> integrates with `nu` directly, so `Re = U0 * D / nu` is a consequence of the
-> other settings, where `D = 0.2 * min(Lx, Ly)` is the obstacle diameter. To
-> drive a run by `Re`, convert on the way in: `nu = U0 * D / Re`.
+## Acceleration, and where the choice is kept
+
+The banner says which build this is:
+
+```
+=== CFD-Solver-2D 0.2 (avx2-omp-cuda) ===
+```
+
+AVX2, OpenMP and CUDA can each be turned off without changing which download
+you are running. What that changes is speed, not what is being solved: the
+velocity field comes out the same to the last digit a float holds, and the
+pressure lands on a slightly different multigrid iterate — about a thousandth
+of its peak — the same way the separate AVX2 and non-AVX2 downloads always have
+between them.
+
+An interactive run offers the switches before it asks anything else, and
+
+```powershell
+"Fluid Solver.exe" --settings
+```
+
+opens the same menu on its own. The answers go into `settings.ini` — beside the
+executable when that folder can be written to, which is what a portable unpack
+gives, and in the per-user data directory when it cannot, which is what an
+install under Program Files gives — and are used by every later run.
+
+For one run only, without touching that file:
+
+```powershell
+"Fluid Solver.exe" avx2=0 openmp=1 threads=4 useCuda=0 tray=0 nx=256 ny=128 ...
+```
+
+and the environment overrides everything: `FLUID_SOLVER_NO_AVX2`,
+`FLUID_SOLVER_NO_OPENMP`, `FLUID_SOLVER_NO_CUDA`, `FLUID_SOLVER_NO_TRAY`,
+`FLUID_SOLVER_NO_UPDATE_CHECK`.
+
+A switch for something this build was not compiled with is shown as
+"not in this build" rather than hidden — the menu explains why one machine is
+slower than the one next to it instead of leaving it a mystery.
+
+## While it runs
+
+On Windows the solver puts an icon in the tray for the length of a run. Its
+tooltip is the progress in simulated seconds — `Fluid Solver - 12.5 / 30 s
+(41%)` — the same number fills the taskbar button, and the tray menu can send
+the console window away and bring it back, open the output folder, or ask the
+run to stop.
+
+"Stop" there, and a first Ctrl+C anywhere, mean the same thing: finish the step
+that is running, write the frame, and return. The run can then be continued
+from that frame exactly as described below — which is the point of stopping
+that way rather than killing the process halfway through a file. A second
+Ctrl+C is left to the default handler and kills it outright.
+
+Elsewhere there is no tray a static console binary can reach without dragging
+in a desktop toolkit, so the same progress goes into the terminal's title,
+which is what the taskbar entry or the Dock shows for that window.
+
+`tray=0`, or `tray` in `--settings`, turns all of it off. Ctrl+C keeps working
+either way.
+
+## New releases
+
+At startup the solver asks GitHub once whether anything newer than this build
+has been published, and offers to open the release page if so. Any version
+greater than this one counts, whether it moved the major or only the minor,
+and the comparison is numeric — 0.10 is newer than 0.9, not older.
+
+The request has a short timeout and no network at all is the normal case
+rather than an error: nothing is printed unless there is something newer. On
+Windows it goes through WinHTTP; elsewhere through whichever of `curl` and
+`wget` the machine has.
+
+```powershell
+"Fluid Solver.exe" --check-updates     # ask now, and say so either way
+```
+
+`checkForUpdates=0` in `settings.ini`, or `FLUID_SOLVER_NO_UPDATE_CHECK=1`,
+stops it asking.
+
+# Continuing a run
+
+The first thing the configuration asks is whether this is a new simulation or a
+continuation of an old one:
+
+```text
+Start a new simulation or continue an old one?
+  0 = new simulation
+  1 = continue from a saved .vtk
+>
+```
+
+Answer `1` and give it either a frame or the folder the frames live in — a
+folder means "take the newest one". Every parameter of the old run comes back
+out of that file, and the usual confirmation screen opens on top of it, so
+anything can still be changed before the run starts. The typical reason to
+continue is precisely that: the flow looked interesting somewhere in the middle
+and you want denser output from there on, so you continue with a smaller
+`saveInterval` and a longer `totalTime`.
+
+The same thing from the command line, where anything after `restartFile`
+overrides what the frame remembers:
+
+```powershell
+.\install\bin\cfd_app.exe restart=1 restartFile=output totalTime=30 saveInterval=5
+```
+
+**What a continuation writes.** Frames are named after the file they were
+started from, and carry their own step number, so the name says both where the
+run came from and how far it got. Continuing from step 200 with
+`saveInterval = 100`:
+
+```text
+output/solution_200.vtk          <- what you continued from
+output/solution_200_300.vtk      <- step 300
+output/solution_200_400.vtk
+output/solution_200_522.vtk      <- final step
+```
+
+Nothing is ever overwritten and it stays obvious which run produced what.
+Continue from `solution_200_400.vtk` and the next series is
+`solution_200_400_450.vtk` and so on. A fresh run is unchanged:
+`solution_<step>.vtk`.
+
+**What can and cannot change.**
+
+| Parameter | On a continuation |
+|---|---|
+| `nx`, `ny`, `Lx`, `Ly` | fixed by the frame, changing them is refused |
+| geometry (`geometryFile`, slice angles, `invertSection`) | ignored — the solid mask comes out of the frame, the model file is not needed any more |
+| `totalTime` | must be larger than the time already reached, otherwise there is nothing to compute |
+| `saveInterval`, `outputDir`, `CFL`, `dtSafety`, `dtUpdateInterval`, `omega`, `smootherOmega`, `mgIterations`, `mgTolerance`, `mgMinCoarseSize`, `useCuda` | free |
+| `U0`, `nu` | allowed, but it is a discontinuity in the physics, not a continuation of the same problem |
+| `ro` | free — it only scales the pressure on the way out to Pa, the frame stores the kinematic field |
+
+Continuing from the last frame of a run and letting it go further produces
+**bit-identical** results to never having stopped at all.
+Piece 3 — deep-dive section, matches the tone of ## 9. Output
+markdown
+## 10. Continuing a run
+
+Every frame is also a checkpoint. That is less obvious than it sounds, because
+what a frame shows and what the solver needs are not the same thing.
+
+**Why the visible arrays are not enough.** The solver lives on a staggered
+grid: `u` sits on `(nx+1)×ny` vertical faces, `v` on `nx×(ny+1)` horizontal
+ones. A VTK frame is cell centred, so what gets written is the average of the
+two faces around each cell — `0.5*(u[i] + u[i+1])`. Averaging throws away
+exactly one degree of freedom per row, and no amount of cleverness gets it
+back. Reading a frame and interpolating back onto the faces gives a field that
+looks right and is not divergence free, which the projection then has to repair
+with a visible kick.
+
+So every frame carries a `FIELD RestartData` block at the very end, after the
+arrays ParaView cares about:
+
+```text
+FIELD RestartData 4
+configText 1 <n> char     the whole configuration as key=value lines,
+                          plus restartTime, restartStep and restartDt
+uFace 1 (nx+1)*ny float   the raw face velocities, not averages
+vFace 1 nx*(ny+1) float
+pRaw  1 nx*ny     float   kinematic, unlike SCALARS pressure which is in Pa
+```
+
+`FIELD` is the only legacy VTK block that lets each array declare its own tuple
+count, which is the whole reason it is used — `(nx+1)*ny` simply does not fit
+in a `CELL_DATA` section. It is written through the same 16 KB byte-swap buffer
+as everything else, straight from the live arrays, so there are no temporaries
+and no copies. It costs about 60% more file size, and it is the difference
+between a frame you can look at and a frame you can resume.
+
+The configuration is serialized in the same `key=value` form the command line
+already speaks, so reading it back is `setParam()` on each line, and unknown
+keys are skipped instead of rejected — old frames stay loadable and new frames
+do not break old builds.
+
+**The two things that make it exact.** Restoring `u`, `v`, `p` and the clock is
+not quite enough, and both leftovers are easy to miss:
+
+*The time step in flight.* `dt` is only recomputed every `dtUpdateInterval`
+steps. A continuation that recomputes it immediately would shift that cadence
+by a fraction of a step and drift away from the original trajectory, so the
+frame stores the `dt` that was live when it was written and the solver takes it
+back instead of recomputing.
+
+*The nested iteration.* The first pressure solve of a run does one full
+multigrid pass to build a field out of nothing. A continuation is not starting
+from nothing — it has the converged pressure of the step it stopped at, which is
+a better guess than that pass produces — so the pass is skipped. Leave it in and
+the field gets nudged, and the two trajectories separate within a few steps.
+
+With both pinned, continuing from frame *k* and running on gives byte-for-byte
+the same frames as the uninterrupted run would have.
+
+**Frames written before all this existed** still load. The face velocities get
+rebuilt from the cell averages, the state is projected once before the first
+step, and it says so loudly. It is a restart, not *the* restart: use it to
+rescue an old run, not to claim continuity.
+
+**The mask comes from the frame**, not from the model. `Mesh` takes an optional
+preset mask and skips loading, slicing and rasterizing entirely when it gets
+one. The STL does not have to still exist, and no rasterizer change can ever
+move a boundary in the middle of a run.
 
 ---
 

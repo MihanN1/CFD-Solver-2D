@@ -17,7 +17,10 @@ std::filesystem::path executableDir();
 // own directory. Creates it, and if that fails - an install under Program Files
 // is not writable by a standard user - falls back to the per-user data
 // directory and says which path it settled on.
-std::filesystem::path resolveOutputDir(const std::string& outputDir);
+// Takes a path rather than a string so a caller that already converted the
+// text itself - narrowToPath, on the branches that carry it - does not get the
+// conversion done a second time with the wrong code page.
+std::filesystem::path resolveOutputDir(const std::filesystem::path& outputDir);
 
 // Per-user writable location, used only as the fallback above.
 // %LOCALAPPDATA% on Windows, $XDG_DATA_HOME or ~/.local/share elsewhere,

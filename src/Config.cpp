@@ -1,8 +1,10 @@
 #include "Config.hpp"
 #include <cctype>
 #include <cstdlib>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 
 namespace {
 std::string readGeometryPath() {
@@ -29,6 +31,21 @@ std::string toLower(const std::string& s) {
 
 void Config::readFromConsole() {
     std::cout << "=== CFD-Solver-2D Configuration ===\n";
+    std::cout << "Start a new simulation or continue an old one?\n";
+    std::cout << "  0 = new simulation\n";
+    std::cout << "  1 = continue from a saved .vtk\n> ";
+    std::cin >> restart;
+    if (restart) {
+        // Everything else comes out of the file, so there is nothing left to
+        // ask here. main() restores the configuration and then drops into the
+        // usual confirm() loop, so some parameters can be changed for some
+        // experiments or something, i dont really care but its cool ahhaha
+        std::cout << "Enter path to the .vtk to continue from"
+                     " (or the folder with the frames, newest one wins): ";
+        restartFile = readGeometryPath();
+        std::cout << "Configuration will be restored from that frame.\n";
+        return;
+    }
     std::cout << "Enter domain width Lx (m): ";
     std::cin >> Lx;
     std::cout << "Enter domain height Ly (m): ";
@@ -43,31 +60,6 @@ void Config::readFromConsole() {
     std::cin >> nu;
     std::cout << "Enter density ro. Make sure that the gas/liquid is incompressible(meaning for air speed its less than 0.3M)(kg/m^3): ";
     std::cin >> ro;
-    // Reynolds number is intentionally NOT asked for and NOT stored.
-    // The solver is dimensional: it integrates the momentum equations using nu
-    // directly (Solver.cpp, diffusion term and the dtDiff limit in computeDt()).
-    // Re is therefore not an input but a consequence of the other inputs:
-    //
-    //     Re = U0 * D / nu
-    //
-    // where D is the obstacle diameter, which is fixed by the domain size:
-    //
-    //     D = OBSTACLE_DOMAIN_FRACTION * min(Lx, Ly) = 0.2 * min(Lx, Ly)
-    //
-    // See Mesh.cpp: OBSTACLE_DOMAIN_FRACTION (anonymous namespace) is used in
-    // buildSection() to scale imported STL/OBJ geometry to that span, and the
-    // fallback verification circle in the Mesh constructor uses
-    // radius = 0.1 * min(Lx, Ly), i.e. the same diameter.
-    //
-    // Example: U0 = 5, nu = 0.01, Lx = Ly = 1  ->  D = 0.2, Re = 100.
-    //
-    // The old prompt asked for Re with "0 to auto-compute later", but nothing
-    // ever consumed the value or computed it - the field was only echoed back
-    // by print(). It was removed to avoid implying that typing a Re would
-    // change the simulation. To drive a run by Re instead of nu, convert on the
-    // way in: nu = U0 * D / Re.
-    // So basically we arent stupid and avoid asking for a parameter that is not used anywhere in the code,
-    // My bad for forgetting about it completely, ahahaha
     std::cout << "Enter CFL number (recommended 0.3-0.5): ";
     std::cin >> CFL;
     std::cout << "Enter total simulation time(seconds): ";
@@ -103,6 +95,12 @@ void Config::readFromConsole() {
 }
 void Config::print() const {
     std::cout << "\n--- Current Configuration ---\n";
+    std::cout << "  mode             = " << (restart ? "CONTINUE" : "NEW") << "\n";
+    if (restart) {
+        std::cout << "  restartFile      = " << restartFile << "\n";
+        std::cout << "  addTime          = " << addTime
+                  << " s (0 = totalTime is used as is)\n";
+    }
     std::cout << "  Lx               = " << Lx << " m\n";
     std::cout << "  Ly               = " << Ly << " m\n";
     std::cout << "  nx               = " << nx << "\n";
@@ -127,6 +125,47 @@ void Config::print() const {
     std::cout << "  sliceRotation    = " << sliceRotation << " deg\n";
     std::cout << " CUDA? Yes/No:       " << (useCuda ? "Yes" : "No") << "\n";
     std::cout << "--------------------------------\n";
+}
+
+std::string Config::serialize() const {
+    std::ostringstream out;
+
+    // max_digits10 is the shortest decimal form that round-trips back to the
+    // exact same binary value, so a continuation resumes from bit-identical
+    // parameters instead of something 1e-7 off
+    out << std::setprecision(std::numeric_limits<float>::max_digits10)
+        << "Lx=" << Lx << "\n"
+        << "Ly=" << Ly << "\n"
+        << "nx=" << nx << "\n"
+        << "ny=" << ny << "\n"
+        << "U0=" << U0 << "\n"
+        << "nu=" << nu << "\n"
+        << "ro=" << ro << "\n"
+        << "CFL=" << CFL << "\n"
+        << "dtUpdateInterval=" << dtUpdateInterval << "\n"
+        << "dtSafety=" << dtSafety << "\n"
+        << "omega=" << omega << "\n"
+        << "smootherOmega=" << smootherOmega << "\n"
+        << "mgIterations=" << mgIterations << "\n"
+        << "mgTolerance=" << mgTolerance << "\n"
+        << "mgMinCoarseSize=" << mgMinCoarseSize << "\n"
+        << "saveInterval=" << saveInterval << "\n"
+        << "useCuda=" << (useCuda ? 1 : 0) << "\n"
+        << "sliceAngleX=" << sliceAngleX << "\n"
+        << "sliceAngleZ=" << sliceAngleZ << "\n"
+        << "sliceRotation=" << sliceRotation << "\n"
+        << "invertSection=" << (invertSection ? 1 : 0) << "\n";
+
+    out << std::setprecision(std::numeric_limits<double>::max_digits10)
+        << "totalTime=" << totalTime << "\n";
+
+    // Paths go last and unquoted: the reader splits on the first '=' only, so
+    // spaces and drive letters survive. A newline inside a path would not, but
+    // neither would it survive the command line.
+    out << "outputDir=" << outputDir << "\n"
+        << "geometryFile=" << geometryFile << "\n";
+
+    return out.str();
 }
 
 bool Config::setParam(const std::string& key, const std::string& value) {
@@ -156,6 +195,9 @@ bool Config::setParam(const std::string& key, const std::string& value) {
     else if (lower == "invertsection")    invertSection = (std::atoi(value.c_str()) != 0);
     else if (lower == "ro")               ro = std::strtof(value.c_str(), nullptr);
     else if (lower == "usecuda")          useCuda = (std::atoi(value.c_str()) != 0);
+    else if (lower == "restart")          restart = (std::atoi(value.c_str()) != 0);
+    else if (lower == "restartfile")      restartFile = value;
+    else if (lower == "addtime")          addTime = std::strtod(value.c_str(), nullptr);
     else return false;
 
     return true;
@@ -237,11 +279,15 @@ bool Config::modifyParam(const std::string& name) {
         std::cout << "New ro(kg/m^3): ";
         std::cin >> ro;
     } else if (lower == "usecuda") {
-        // setParam took this from the start, but the edit prompt did not, so
-        // typing the name of a parameter that plainly exists answered
-        // "Unknown parameter".
         std::cout << "New useCuda (0 = no, 1 = yes): ";
         std::cin >> useCuda;
+    } else if (lower == "restartfile") {
+        std::cout << "New restartFile: ";
+        restartFile = readGeometryPath();
+        usedFormattedInput = false;
+    } else if (lower == "addtime") {
+        std::cout << "New addTime (seconds to add on top of the frame): ";
+        std::cin >> addTime;
     } else {
         std::cout << "Unknown parameter: " << name << "\n";
         return false;

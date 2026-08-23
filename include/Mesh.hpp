@@ -1,5 +1,6 @@
 #pragma once
 #include "Config.hpp"
+#include <cstdint>
 #include <string>
 #include <vector>
 
@@ -22,7 +23,11 @@ public:
         OBJ
     };
 
-    explicit Mesh(const Config& cfg);
+    // presetSolid short-circuits the whole geometry pipeline: a continuation
+    // already has the mask in its frame, so the model file does not have to
+    // exist any more and the rasterizer cannot drift between runs.
+    explicit Mesh(const Config& cfg,
+                  const std::vector<uint8_t>* presetSolid = nullptr);
 
     std::vector<double> x, y;
     std::vector<int> solid;   // 1 = inside body, 0 = fluid
@@ -47,9 +52,18 @@ private:
     };
 
     const Config& cfg;
-    std::vector<SectionPoint> sectionContour;
+    // Every closed loop the section plane cut out of the model, not just the
+    // biggest one. Two aerofoils side by side, a ring, a body with a hole
+    // through it - all of these are several loops, and keeping only the
+    // largest silently dropped the rest. The even-odd fill in
+    // pointInsideSection runs across the whole set, so a loop inside another
+    // loop comes out as a hole rather than as solid, which is what it is.
+    std::vector<std::vector<SectionPoint>> sectionContours;
 
     void createGrid();
     void clearSolid();
     bool pointInsideSection(double x, double y) const;
+    // At least one loop with enough points to enclose anything.
+    bool hasSection() const;
+    std::size_t sectionPointCount() const;
 };

@@ -2,7 +2,7 @@
 # One command. It checks the toolchain, installs what is missing, builds every
 # row this machine can produce and assembles release/<version>.
 #
-#     bash scripts/make-release.sh 0.1
+#     bash scripts/make-release.sh 0.2
 #
 # Called through bash on purpose: a checkout that came from Windows has no
 # executable bit on it, and this way that does not matter.
@@ -14,21 +14,30 @@
 #
 #     linux-x64      AVX2 {on,off} x OpenMP {on,off} x CUDA {on,off} = 8
 #     linux-x86      AVX2 {on,off} x OpenMP {on,off}                 = 4
+#     linux-arm64    OpenMP {on,off}                                 = 2
 #     macos-arm64    OpenMP {on,off}                                 = 2
 #     macos-x64      AVX2 {on,off} x OpenMP {on,off}                 = 4
 #
-# There is no 32-bit CUDA and has not been since CUDA 9, and no CUDA on macOS
-# at all. One Mac builds both macOS architectures: the second one is a cross
-# build, and the libomp it needs is fetched as a Homebrew bottle rather than
-# installed. "plain" - no AVX2, no OpenMP, no CUDA - is the row that runs on
-# anything, and on Linux the only fully static one, because libcudart_static
+# There is no 32-bit CUDA and has not been since CUDA 9, no CUDA on macOS at
+# all, and no AVX2 on ARM - that is an x86 instruction set. The arm64 Linux
+# rows are cross-built with the aarch64 toolchain when this machine is not
+# itself an ARM box. One Mac builds both macOS architectures: the second one is
+# a cross build, and the libomp it needs is fetched as a Homebrew bottle rather
+# than installed. "plain" - no AVX2, no OpenMP, no CUDA - is the row that runs
+# on anything, and on Linux the only fully static one, because libcudart_static
 # needs dlopen and pthread and so rules -static out.
+#
+# The installers are one file per platform, not one per architecture: a .run
+# carries every Linux row and picks by uname, a .pkg carries both Macs and
+# picks by sysctl. Nobody downloading a solver should have to know what is
+# inside their laptop.
 #
 #     --docker           build the Linux rows inside an old-glibc container, so
 #                        they also run on distributions older than this one
 #     --with-installers  also build the .run / .pkg
 #     --no-deps          do not install anything, use what is already here
 #     --skip-32          skip the 32-bit rows
+#     --skip-arm         skip the arm64 rows
 #     --skip-cuda        skip the CUDA rows
 #     --only=<step>      all | build | installers | package
 #     --from-release[=<dir>]
@@ -49,10 +58,21 @@ REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # -h has to be caught before the version is read, or it is taken as the version
 # number and the run happily assembles release/--help.
 case "${1:-}" in
-    -h|--help) sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 esac
 
-VERSION="${1:-0.1}"; shift 2>/dev/null || true
+
+# major.minor from CMakeLists.txt, so no version is typed twice.
+project_version() {
+    sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9]\+\.[0-9]\+\).*/\1/p' \
+        "$REPO/CMakeLists.txt" 2>/dev/null | head -1
+}
+
+VERSION="${1:-}"; shift 2>/dev/null || true
+[ -n "$VERSION" ] || VERSION="$(project_version)"
+if [ -z "$VERSION" ]; then
+    echo "no version given and none found in CMakeLists.txt" >&2; exit 1
+fi
 
 DIST="$REPO/dist"
 REL="$REPO/release/$VERSION"
@@ -77,7 +97,7 @@ toolchain_tag() {
 }
 TOOLCHAIN="$REPO/.toolchain/$(toolchain_tag)"
 
-SKIP_32=0; SKIP_CUDA=0; ONLY=all; WITH_INSTALLERS=0; NO_DEPS=0; USE_DOCKER=0
+SKIP_32=0; SKIP_ARM=0; SKIP_CUDA=0; ONLY=all; WITH_INSTALLERS=0; NO_DEPS=0; USE_DOCKER=0
 # auto = only when --only=installers finds dist/ empty; yes = always; no = never.
 FROM_RELEASE=auto; FROM_RELEASE_DIR=""
 CUDA_ARCHS="${CUDA_ARCHS:-}"
@@ -86,6 +106,7 @@ DOCKER_IMAGE="${DOCKER_IMAGE:-nvidia/cuda:12.6.3-devel-ubuntu20.04}"
 for arg in "$@"; do
     case "$arg" in
         --skip-32)          SKIP_32=1 ;;
+        --skip-arm)         SKIP_ARM=1 ;;
         --skip-cuda)        SKIP_CUDA=1 ;;
         --with-installers)  WITH_INSTALLERS=1 ;;
         --no-deps)          NO_DEPS=1 ;;
@@ -96,7 +117,7 @@ for arg in "$@"; do
         --from-dist)        FROM_RELEASE=no ;;
         --cuda-archs=*)     CUDA_ARCHS="${arg#--cuda-archs=}" ;;
         --docker-image=*)   DOCKER_IMAGE="${arg#--docker-image=}" ;;
-        -h|--help)          sed -n '2,43p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)          sed -n '2,52p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 2 ;;
     esac
 done
@@ -113,7 +134,12 @@ note() { PROBLEMS+=("$1"); PROBLEM_COUNT=$((PROBLEM_COUNT + 1)); }
 
 case "$(uname -s)" in
     Darwin) PLATFORM=macos; HOSTARCH="$(uname -m)"; [ "$HOSTARCH" = "x86_64" ] && HOSTARCH=x64 ;;
-    *)      PLATFORM=linux; HOSTARCH=x64 ;;
+    *)      PLATFORM=linux
+            case "$(uname -m)" in
+                aarch64|arm64) HOSTARCH=arm64 ;;
+                i?86)          HOSTARCH=x86 ;;
+                *)             HOSTARCH=x64 ;;
+            esac ;;
 esac
 
 # Filled in by prepare_macos_openmp; empty means that architecture gets no
@@ -215,6 +241,30 @@ probe_m32() {
     rm -f /tmp/.m32probe /tmp/.m32probe.c
 }
 
+# The aarch64 rows. On an ARM machine the native compiler is the one; anywhere
+# else it is the cross toolchain, which Debian and Ubuntu ship as
+# crossbuild-essential-arm64. ARM_CXX stays empty when neither is there, and
+# the two arm64 rows are then reported as skipped rather than failed.
+HAVE_ARM64=0
+ARM_CXX=""
+ARM_CC=""
+probe_arm64() {
+    HAVE_ARM64=0; ARM_CXX=""; ARM_CC=""
+    if [ "$HOSTARCH" = arm64 ]; then
+        command -v g++ >/dev/null 2>&1 && { HAVE_ARM64=1; ARM_CXX="$(command -v g++)"; ARM_CC="$(command -v gcc)"; }
+        return
+    fi
+    local triple
+    for triple in aarch64-linux-gnu aarch64-none-linux-gnu; do
+        if command -v "$triple-g++" >/dev/null 2>&1; then
+            HAVE_ARM64=1
+            ARM_CXX="$(command -v "$triple-g++")"
+            ARM_CC="$(command -v "$triple-gcc")"
+            return
+        fi
+    done
+}
+
 HAVE_NVCC=0
 probe_nvcc() {
     command -v nvcc >/dev/null 2>&1 && { HAVE_NVCC=1; return; }
@@ -260,6 +310,23 @@ ensure_tools_linux() {
         else
             say "not available - the four 32-bit rows will be skipped"
             note "linux-x86 rows skipped - ${why:-install gcc-multilib g++-multilib}"
+        fi
+    fi
+
+    item "arm64 (cross toolchain)"
+    if [ "$SKIP_ARM" = 1 ]; then say "skipped by --skip-arm"; HAVE_ARM64=0
+    elif [ "$HOSTARCH" = arm64 ]; then probe_arm64; say "native"
+    else
+        local why=""
+        probe_arm64
+        if [ "$HAVE_ARM64" = 0 ]; then
+            why="$(apt_install crossbuild-essential-arm64)"
+            probe_arm64
+        fi
+        if [ "$HAVE_ARM64" = 1 ]; then say "$(basename "$ARM_CXX")"
+        else
+            say "not available - the two arm64 rows will be skipped"
+            note "linux-arm64 rows skipped - ${why:-install crossbuild-essential-arm64}"
         fi
     fi
 
@@ -381,6 +448,7 @@ ensure_tools() {
         say "  for the CUDA rows."
         item "cmake"; ensure_cmake
         [ "$SKIP_32" = 0 ] && probe_m32
+        [ "$SKIP_ARM" = 0 ] && probe_arm64
         [ "$SKIP_CUDA" = 0 ] && probe_nvcc
     fi
 }
@@ -423,6 +491,13 @@ build_row() {
     [ "$cuda" = ON ] && args+=(-DCFD_ENABLE_CUDA_EXPLICIT=ON -DCFD_CUDA_ARCHITECTURES="$archs")
     [ "$omp" = ON ] && args+=(-DCFD_ENABLE_OPENMP_EXPLICIT=ON)
     [ "$arch" = "x86" ] && args+=(-DCMAKE_CXX_FLAGS=-m32 -DCMAKE_C_FLAGS=-m32)
+    # A cross build has to be told, or CMake probes the host compiler and
+    # produces an x86-64 binary under an arm64 name. On an ARM host ARM_CXX is
+    # the native g++ and this is a no-op that costs one variable.
+    if [ "$arch" = "arm64" ] && [ "$PLATFORM" = linux ] && [ "$HOSTARCH" != arm64 ]; then
+        args+=(-DCMAKE_SYSTEM_NAME=Linux -DCMAKE_SYSTEM_PROCESSOR=aarch64
+               -DCMAKE_CXX_COMPILER="$ARM_CXX" -DCMAKE_C_COMPILER="$ARM_CC")
+    fi
 
     if [ "$PLATFORM" = macos ]; then
         local osxarch omproot
@@ -446,8 +521,17 @@ build_row() {
 
     mkdir -p "$DIST"
     cp "$exe" "$DIST/$name"
-    if [ "$PLATFORM" = macos ]; then strip -x "$DIST/$name" 2>/dev/null
-    else strip "$DIST/$name" 2>/dev/null; fi
+    if [ "$PLATFORM" = macos ]; then
+        strip -x "$DIST/$name" 2>/dev/null
+    elif [ "$arch" = arm64 ] && [ "$HOSTARCH" != arm64 ]; then
+        # The host strip does not know this object format. Its own strip does,
+        # and where there is none the binary simply keeps its symbol table -
+        # bigger, not broken.
+        command -v aarch64-linux-gnu-strip >/dev/null 2>&1 &&
+            aarch64-linux-gnu-strip "$DIST/$name" 2>/dev/null
+    else
+        strip "$DIST/$name" 2>/dev/null
+    fi
     say "ok, $(du -h "$DIST/$name" | cut -f1), $(file -b "$DIST/$name" | grep -o 'statically linked\|dynamically linked' || echo 'Mach-O')"
 }
 
@@ -478,6 +562,7 @@ build_all() {
     local rows=4
     [ "$HAVE_NVCC" = 1 ] && rows=$((rows + 4))
     [ "$SKIP_32" = 0 ] && [ "$HAVE_M32" = 1 ] && rows=$((rows + 4))
+    [ "$SKIP_ARM" = 0 ] && [ "$HAVE_ARM64" = 1 ] && rows=$((rows + 2))
     step "Building the executables ($rows rows)"
     [ "$HAVE_NVCC" = 1 ] && say "  CUDA architectures: $archs"
 
@@ -492,6 +577,14 @@ build_all() {
             fi
         done
     done
+
+    # AVX2 is an x86 instruction set and CUDA on ARM is a Jetson-only toolkit
+    # nothing here targets, so OpenMP is the only axis arm64 varies on.
+    if [ "$SKIP_ARM" = 0 ] && [ "$HAVE_ARM64" = 1 ]; then
+        for omp in ON OFF; do
+            build_row arm64 OFF "$omp" OFF "$archs"
+        done
+    fi
 }
 
 # ---- dist out of the published archives ------------------------------------
@@ -565,11 +658,13 @@ build_installer() {
     step "Building the installer"
     if [ "$PLATFORM" = macos ]; then
         if [ -f "$REPO/installer/macos/build-pkg.sh" ]; then
-            for a in arm64 x64; do
-                ls "$DIST"/"Fluid Solver $VERSION macos-$a "* >/dev/null 2>&1 || continue
-                bash "$REPO/installer/macos/build-pkg.sh" "$VERSION" "$a" \
-                    || note "macos-$a installer - build-pkg.sh failed"
-            done
+            # One package for both Macs. The Installer reads hostArchitectures
+            # and only unpacks the half that matches, so there is nothing to
+            # gain from shipping two files and one more thing to pick wrong.
+            ls "$DIST"/"Fluid Solver $VERSION macos-"* >/dev/null 2>&1 || {
+                say "  nothing to package - skipped"; return; }
+            bash "$REPO/installer/macos/build-pkg.sh" "$VERSION" all \
+                || note "macos installer - build-pkg.sh failed"
         else
             note "macos installer - installer/macos/build-pkg.sh is missing"
         fi
@@ -579,39 +674,42 @@ build_installer() {
         say "  makeself is not installed - skipped"
         note "linux installer - makeself is not installed"; return
     fi
-    for arch in x64 x86; do
-        [ "$arch" = x86 ] && [ "$SKIP_32" = 1 ] && continue
-        ls "$DIST"/"Fluid Solver $VERSION linux-$arch "* >/dev/null 2>&1 || {
-            printf '  %-52s' "linux-$arch"; say "nothing to package - skipped"; continue; }
-        printf '  %-52s' "linux-$arch"
-        local pkg row feat; pkg="$(mktemp -d)"
-        # Solver rows only, and only the ones that are single files. A
-        # "<feature>-ui" entry is a folder and belongs in ui/ further down, not
-        # in the payload root, where install.sh scans for variant names - and a
-        # plain cp of it fails with "omitting directory" besides.
-        for row in "$DIST"/"Fluid Solver $VERSION linux-$arch "*; do
-            case "$row" in *-ui) continue ;; esac
-            [ -f "$row" ] && cp "$row" "$pkg/"
-        done
-        for f in README.md LICENSE; do [ -f "$REPO/$f" ] && cp "$REPO/$f" "$pkg/"; done
-        [ -d "$REPO/models" ] && cp -r "$REPO/models" "$pkg/" 2>/dev/null
-        mkdir -p "$pkg/icons"; cp "$REPO"/logo/fluid-solver-*.png "$pkg/icons/" 2>/dev/null
-        # The UI is built per variant like the solver is, so it goes in as
-        # ui/<feature>/ and install.sh only offers it once the feature is
-        # settled. A platform with no UI build simply never asks.
-        for row in "$DIST"/"Fluid Solver $VERSION linux-$arch "*-ui; do
-            [ -d "$row" ] || continue
-            feat="$(basename "$row")"; feat="${feat##* }"; feat="${feat%-ui}"
-            mkdir -p "$pkg/ui/$feat"; cp -r "$row"/. "$pkg/ui/$feat/"
-        done
-        sed -e "s/__VERSION__/$VERSION/" -e "s/__ARCH__/$arch/" \
-            "$REPO/installer/linux/install.sh" > "$pkg/install.sh"
-        chmod +x "$pkg/install.sh"
-        if makeself --quiet "$pkg" "$DIST/Fluid-Solver-$VERSION-linux-$arch.run" \
-                    "Fluid Solver $VERSION" ./install.sh >/dev/null 2>&1
-        then say "ok"; else say "failed"; note "linux-$arch installer - makeself failed"; fi
-        rm -rf "$pkg"
+
+    # One .run for every Linux architecture in dist/. install.sh reads uname
+    # and installs the matching rows; the file names already carry the
+    # architecture, so the payload is simply all of them side by side.
+    ls "$DIST"/"Fluid Solver $VERSION linux-"* >/dev/null 2>&1 || {
+        printf '  %-52s' "linux"; say "nothing to package - skipped"; return; }
+    printf '  %-52s' "linux (x64 + x86 + arm64, whichever were built)"
+    local pkg row feat arch; pkg="$(mktemp -d)"
+    # Solver rows only, and only the ones that are single files. A
+    # "<feature>-ui" entry is a folder and belongs in ui/ further down, not in
+    # the payload root, where install.sh scans for variant names - and a plain
+    # cp of it fails with "omitting directory" besides.
+    for row in "$DIST"/"Fluid Solver $VERSION linux-"*; do
+        case "$row" in *-ui) continue ;; esac
+        [ -f "$row" ] && cp "$row" "$pkg/"
     done
+    for f in README.md LICENSE; do [ -f "$REPO/$f" ] && cp "$REPO/$f" "$pkg/"; done
+    [ -d "$REPO/models" ] && cp -r "$REPO/models" "$pkg/" 2>/dev/null
+    mkdir -p "$pkg/icons"; cp "$REPO"/logo/fluid-solver-*.png "$pkg/icons/" 2>/dev/null
+    # The UI is built per architecture and variant like the solver is, so it
+    # goes in as ui/<arch>/<feature>/ and install.sh only offers it once both
+    # are settled. A combination with no UI build simply never asks.
+    for row in "$DIST"/"Fluid Solver $VERSION linux-"*-ui; do
+        [ -d "$row" ] || continue
+        feat="$(basename "$row")"
+        arch="${feat#Fluid Solver $VERSION linux-}"; arch="${arch%% *}"
+        feat="${feat##* }"; feat="${feat%-ui}"
+        mkdir -p "$pkg/ui/$arch/$feat"; cp -r "$row"/. "$pkg/ui/$arch/$feat/"
+    done
+    sed -e "s/__VERSION__/$VERSION/" \
+        "$REPO/installer/linux/install.sh" > "$pkg/install.sh"
+    chmod +x "$pkg/install.sh"
+    if makeself --quiet "$pkg" "$DIST/Fluid-Solver-$VERSION-linux.run" \
+                "Fluid Solver $VERSION" ./install.sh >/dev/null 2>&1
+    then say "ok"; else say "failed"; note "linux installer - makeself failed"; fi
+    rm -rf "$pkg"
 }
 
 # ---- release folder --------------------------------------------------------
@@ -652,6 +750,17 @@ package() {
 
     cp "$REPO/README.md" "$REL/README.md"; say "  README.md"
 
+    # The guide belongs beside the files it describes. Somebody opening
+    # release/0.2/ six months from now should not have to go back to the branch
+    # to find out what a "-ui" archive is or which of the 34 rows to take.
+    [ -f "$REPO/RELEASE-GUIDE.md" ] && {
+        cp "$REPO/RELEASE-GUIDE.md" "$REL/RELEASE-GUIDE.md"; say "  RELEASE-GUIDE.md"; }
+    # Release notes are written per version, so this is the one file that is
+    # copied only when it exists for this one.
+    for notes in "$REPO/release/RELEASE-NOTES-$VERSION.md" "$REPO/RELEASE-NOTES-$VERSION.md"; do
+        [ -f "$notes" ] && { cp "$notes" "$REL/"; say "  $(basename "$notes")"; break; }
+    done
+
     # Written outside and moved in: created in place, the file already exists
     # when the glob runs and ends up listing a checksum of itself, taken halfway
     # through being written.
@@ -681,6 +790,7 @@ run_in_docker() {
 
     local inner="--only=build"
     [ "$SKIP_32" = 1 ]   && inner="$inner --skip-32"
+    [ "$SKIP_ARM" = 1 ]  && inner="$inner --skip-arm"
     [ "$SKIP_CUDA" = 1 ] && inner="$inner --skip-cuda"
     # Quoted, or the semicolons in the architecture list end up separating
     # commands for the shell inside the container instead of staying together.

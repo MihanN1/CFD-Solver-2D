@@ -9,14 +9,21 @@
 
         windows-x64    AVX2 {on,off} x OpenMP {on,off} x CUDA {on,off} = 8
         windows-x86    AVX2 {on,off} x OpenMP {on,off}                 = 4
+        windows-arm64  OpenMP {on,off}                                 = 2
 
-    There is no 32-bit CUDA and has not been since CUDA 9. "plain" - no AVX2,
-    no OpenMP, no CUDA - is the row that runs on anything, and the only one
-    with no vcomp140.dll beside it.
+    There is no 32-bit CUDA and has not been since CUDA 9, and no AVX2 or CUDA
+    on ARM at all - AVX2 is an x86 instruction set and the toolkit has no
+    Windows-on-ARM target. "plain" - no AVX2, no OpenMP, no CUDA - is the row
+    that runs on anything, and the only one with no vcomp140.dll beside it.
 
-        pwsh -File scripts\make-release.ps1 -Version 0.1
-        pwsh -File scripts\make-release.ps1 -Version 0.1 -WithInstallers
-        pwsh -File scripts\make-release.ps1 -Version 0.1 -Only Package
+    The installer is ONE file for all three architectures: it reads the
+    processor at run time and unpacks the matching build, so nobody downloading
+    a solver has to know what is inside their laptop. -PerArch builds the three
+    single-architecture installers as well, for a smaller download.
+
+        pwsh -File scripts\make-release.ps1 -Version 0.2
+        pwsh -File scripts\make-release.ps1 -Version 0.2 -WithInstallers
+        pwsh -File scripts\make-release.ps1 -Version 0.2 -Only Package
 
     -FromRelease fills dist\ from the published archives in release\<version>,
     or in -ReleaseDir <path>, instead of from a build, and cuts the two Windows
@@ -24,7 +31,7 @@
     "<variant>-ui" archive is put together by hand and no build produces one.
     -Only Installers does it by itself when dist\ holds no Windows rows.
 
-        pwsh -File scripts\make-release.ps1 -Version 0.1 -Only Installers
+        pwsh -File scripts\make-release.ps1 -Version 0.2 -Only Installers
 
     Needs Visual Studio with the C++ workload. The CUDA rows additionally need
     the CUDA Toolkit with its Visual Studio Integration component; without it
@@ -35,11 +42,13 @@
 
 [CmdletBinding()]
 param(
-    [string] $Version   = "0.1",
+    [string] $Version   = "",       # empty = whatever CMakeLists.txt says
     [string] $Generator = "Visual Studio 17 2022",
     [string] $CudaArchs = "",       # empty = decide from the installed toolkit
     [switch] $WithInstallers,       # off until the UI folders exist
     [switch] $Skip32,
+    [switch] $SkipArm,
+    [switch] $PerArch,              # also cut one installer per architecture
     [switch] $FromRelease,          # rebuild dist\ from the published archives
     [switch] $FromDist,             # never do that, use dist\ as it stands
     [string] $ReleaseDir = "",      # empty = release\<version>
@@ -49,6 +58,29 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+# major.minor from CMakeLists.txt. $Version defaults to empty because param()
+# runs before this does.
+function Get-ProjectVersion {
+    $cmake = Join-Path $repo "CMakeLists.txt"
+    if (Test-Path $cmake) {
+        $match = [regex]::Match((Get-Content $cmake -Raw),
+                                'project\s*\([^)]*?VERSION\s+(\d+)\.(\d+)')
+        if ($match.Success) {
+            return "$($match.Groups[1].Value).$($match.Groups[2].Value)"
+        }
+    }
+    return ""
+}
+if (-not $Version) {
+    $Version = Get-ProjectVersion
+    if (-not $Version) {
+        throw "No -Version given and no version found in CMakeLists.txt"
+    }
+}
+
+# The installer's OutputBaseFilename starts with this, and signing has to name
+# the file it produced.
+$AppNameForSigning = "Fluid Solver"
 $dist = Join-Path $repo "dist"
 $rel  = Join-Path $repo "release\$Version"
 $problems = New-Object System.Collections.Generic.List[string]
@@ -96,6 +128,18 @@ function Find-Vcomp($Bits) {
     return $null
 }
 
+# Authenticode, when a certificate is configured. scripts\sign-windows.ps1
+# decides that for itself and says so when there is none, so this is a call
+# rather than a condition.
+function Invoke-Signing($TargetPaths) {
+    $script = Join-Path $PSScriptRoot "sign-windows.ps1"
+    if (-not (Test-Path $script)) { return }
+    & pwsh -NoLogo -NoProfile -File $script @TargetPaths
+    if ($LASTEXITCODE -ne 0) {
+        $problems.Add("signing failed for: " + ($TargetPaths -join ", "))
+    }
+}
+
 function Find-Iscc {
     $c = Get-Command iscc -ErrorAction SilentlyContinue
     if ($c) { return $c.Source }
@@ -117,6 +161,11 @@ foreach ($avx2 in $true, $false) {
         $Rows += @{ Arch = "Win32"; Avx2 = $avx2; OpenMp = $omp; Cuda = $false }
     }
 }
+# ARM64 varies on OpenMP alone: AVX2 is an x86 instruction set, and the CUDA
+# toolkit has no Windows-on-ARM target.
+foreach ($omp in $true, $false) {
+    $Rows += @{ Arch = "ARM64"; Avx2 = $false; OpenMp = $omp; Cuda = $false }
+}
 
 function Build-Row($Row, $Archs) {
     $tags = @()
@@ -124,7 +173,13 @@ function Build-Row($Row, $Archs) {
     if ($Row.OpenMp) { $tags += "omp"  }
     if ($Row.Cuda)   { $tags += "cuda" }
     $feature = if ($tags.Count) { $tags -join "-" } else { "plain" }
-    $label   = if ($Row.Arch -eq "x64") { "windows-x64" } else { "windows-x86" }
+    # The generator's spelling of the architecture and the release's are not the
+    # same: CMake wants Win32 and ARM64, the file names want x86 and arm64.
+    $label   = switch ($Row.Arch) {
+        "x64"   { "windows-x64" }
+        "ARM64" { "windows-arm64" }
+        default { "windows-x86" }
+    }
     $name    = "Fluid Solver $Version $label $feature"
     $build   = Join-Path $repo "build-$label-$feature"
 
@@ -191,11 +246,21 @@ function Build-Row($Row, $Archs) {
     # MSVC has no static OpenMP runtime; the build does not start without this.
     $extra = ""
     if ($Row.OpenMp) {
-        $bits = if ($Row.Arch -eq "x64") { "x64" } else { "x86" }
+        # The redist tree is laid out by architecture folder: x64, x86, arm64.
+        $bits = switch ($Row.Arch) {
+            "x64"   { "x64" }
+            "ARM64" { "arm64" }
+            default { "x86" }
+        }
         $dll = Find-Vcomp $bits
         if ($dll) { Copy-Item $dll $rowDir -Force; $extra = " + vcomp140.dll" }
         else { $problems.Add("$name - vcomp140.dll not found, this build will not start") }
     }
+
+    # Signed here, one row at a time, rather than after the fact: the installer
+    # carries these executables verbatim, so signing them now is what makes the
+    # installed program signed as well as the installer that put it there.
+    Invoke-Signing @((Join-Path $rowDir "Fluid Solver.exe"))
 
     $mb = [math]::Round((Get-Item (Join-Path $rowDir "Fluid Solver.exe")).Length / 1MB, 2)
     Write-Host "ok, $mb MB$extra" -ForegroundColor Green
@@ -215,6 +280,7 @@ function Build-All {
 
     foreach ($row in $Rows) {
         if ($row.Arch -eq "Win32" -and $Skip32) { continue }
+        if ($row.Arch -eq "ARM64" -and $SkipArm) { continue }
         if ($row.Cuda -and -not $haveNvcc) { continue }
         Build-Row $row $archs
     }
@@ -251,7 +317,7 @@ function Expand-ReleaseRows {
         # A space or a dot between the parts: GitHub rewrites spaces to dots in
         # release asset filenames, so the same archive downloaded from a tag
         # arrives as "Fluid.Solver.0.1.windows-x64.avx2.zip".
-        if ($_.BaseName -notmatch "^Fluid[ .]Solver[ .]$([regex]::Escape($Version))[ .]windows-(x64|x86)[ .][a-z0-9-]+$") { return }
+        if ($_.BaseName -notmatch "^Fluid[ .]Solver[ .]$([regex]::Escape($Version))[ .]windows-(x64|x86|arm64)[ .][a-z0-9-]+$") { return }
 
         $stage = Join-Path ([System.IO.Path]::GetTempPath()) ([guid]::NewGuid())
         Expand-Archive -LiteralPath $_.FullName -DestinationPath $stage -Force
@@ -265,7 +331,7 @@ function Expand-ReleaseRows {
         # dist\ always holds the spaced form, because that is what the .iss
         # variant folders are looked up by.
         $target = Join-Path $dist ($_.BaseName -replace "^Fluid[ .]Solver[ .]", "Fluid Solver " `
-                                              -replace "[ .](windows-(?:x64|x86))[ .]", ' $1 ')
+                                              -replace "[ .](windows-(?:x64|x86|arm64))[ .]", ' $1 ')
         Remove-Item $target -Recurse -Force -ErrorAction SilentlyContinue
         Move-Item $inner[0].FullName $target
         Remove-Item $stage -Recurse -Force -ErrorAction SilentlyContinue
@@ -327,14 +393,40 @@ function Build-Installers {
         return
     }
     $iss = Join-Path $repo "installer\windows\fluid-solver.iss"
-    foreach ($arch in "x64", "x86") {
+
+    # The one everybody downloads: all three architectures in a single file,
+    # picked at run time. /DArch is left out entirely, which is what the script
+    # reads as "all".
+    $anyRow = Get-ChildItem $dist -Directory -ErrorAction SilentlyContinue |
+              Where-Object { $_.Name -like "Fluid Solver $Version windows-* *" }
+    if (-not $anyRow) {
+        Write-Host "  nothing to package - skipped" -ForegroundColor Yellow
+        $problems.Add("installers - no windows rows in dist\")
+        return
+    }
+    Write-Host "  windows (x64 + x86 + arm64, whichever were built) ... " -NoNewline
+    & $iscc "/DAppVersion=$Version" "/DDistDir=$dist" $iss 2>&1 | Out-String | Write-Verbose
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "ok" -ForegroundColor Green
+        Invoke-Signing @((Join-Path $dist "$AppNameForSigning $Version windows setup.exe"))
+    }
+    else { Write-Host "failed" -ForegroundColor Yellow; $problems.Add("windows installer - iscc failed, rerun with -Verbose") }
+
+    if (-not $PerArch) { return }
+
+    # The smaller downloads, for people who know which one they want.
+    foreach ($arch in "x64", "x86", "arm64") {
         if ($arch -eq "x86" -and $Skip32) { continue }
+        if ($arch -eq "arm64" -and $SkipArm) { continue }
         $any = Get-ChildItem $dist -Directory -ErrorAction SilentlyContinue |
                Where-Object { $_.Name -like "Fluid Solver $Version windows-$arch *" }
         if (-not $any) { Write-Host "  windows-$arch ... nothing to package - skipped" -ForegroundColor Yellow; continue }
         Write-Host "  windows-$arch ... " -NoNewline
         & $iscc "/DAppVersion=$Version" "/DArch=$arch" "/DDistDir=$dist" $iss 2>&1 | Out-String | Write-Verbose
-        if ($LASTEXITCODE -eq 0) { Write-Host "ok" -ForegroundColor Green }
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "ok" -ForegroundColor Green
+            Invoke-Signing @((Join-Path $dist "$AppNameForSigning $Version windows-$arch setup.exe"))
+        }
         else { Write-Host "failed" -ForegroundColor Yellow; $problems.Add("windows-$arch installer - iscc failed, rerun with -Verbose") }
     }
 }
@@ -397,6 +489,25 @@ function Package {
 
     Copy-Item (Join-Path $repo "README.md") $rel -Force
     Write-Host "  README.md"
+
+    # The guide belongs beside the files it describes. Somebody opening
+    # release\0.2\ six months from now should not have to go back to the branch
+    # to find out what a "-ui" archive is or which of the 34 rows to take.
+    $guide = Join-Path $repo "RELEASE-GUIDE.md"
+    if (Test-Path $guide) {
+        Copy-Item $guide $rel -Force
+        Write-Host "  RELEASE-GUIDE.md"
+    }
+    # Release notes are written per version, so this is the one file that is
+    # copied only when it exists for this one.
+    foreach ($candidate in @((Join-Path $repo "release\RELEASE-NOTES-$Version.md"),
+                             (Join-Path $repo "RELEASE-NOTES-$Version.md"))) {
+        if (Test-Path $candidate) {
+            Copy-Item $candidate $rel -Force
+            Write-Host "  $(Split-Path $candidate -Leaf)"
+            break
+        }
+    }
 
     Get-ChildItem $rel -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" } | ForEach-Object {
         "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name

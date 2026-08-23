@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(CFD-Solver-2D
-    VERSION 0.1.0
+    VERSION 0.2.0
     LANGUAGES CXX
 )
 
@@ -28,6 +28,17 @@ set(CFD_OPENMP_ROOT "" CACHE PATH
 set(CFD_APP_NAME "Fluid Solver" CACHE STRING
     "File name of the produced executable, without the extension"
 )
+
+# Which repository the update check asks about. Split in two because the API
+# host and the web host spell the same thing differently.
+set(CFD_REPO_OWNER "MihanN1" CACHE STRING "GitHub owner of the release repo")
+set(CFD_REPO_NAME "CFD-Solver-2D" CACHE STRING "GitHub name of the release repo")
+
+# What the release is called - "0.2", not "0.2.0". Archive names, the release
+# folder and the git tag all use the short form, and the update check has to
+# compare against the same thing it would find on GitHub.
+set(CFD_RELEASE_VERSION "${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}"
+    CACHE STRING "Version string used for release artefacts and update checks")
 
 # Release builds ship as one file. What that costs differs per platform, and
 # getting it wrong is quiet rather than loud, so it lives here instead of in
@@ -160,14 +171,32 @@ set(CFD_SOURCES
     src/tiny_obj_loader_impl.cpp
     src/AppPaths.cpp
     src/Config.cpp
+    src/Restart.cpp
     src/Mesh.cpp
     src/Solver.cpp
     src/Multigrid.cpp
+    src/Runtime.cpp
+    src/UpdateCheck.cpp
+    src/Progress.cpp
 )
 
 if(CFD_ENABLE_CUDA)
     list(APPEND CFD_SOURCES src/MultigridCuda.cu)
 endif()
+
+# ---- what this binary knows about itself ------------------------------------
+# The version, the repository the update check asks about, and which of the
+# three accelerators were actually compiled in. Generated rather than written
+# by hand, because a literal pasted into the resource script, the update check
+# and the tray tooltip is a literal that drifts.
+# CFD_ENABLE_CUDA has already been turned off above if no toolkit was found, so
+# these two are final. OpenMP is settled further down, after find_package has
+# had its say, and the feature string is composed there from all three.
+set(CFD_BUILT_WITH_AVX2 ${CFD_ENABLE_AVX2})
+set(CFD_BUILT_WITH_CUDA ${CFD_ENABLE_CUDA})
+set(CFD_BUILT_WITH_OPENMP ${CFD_ENABLE_OPENMP})
+
+set(CFD_GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
 
 # The icon and the version block live in a resource script, which is a Windows
 # concept only. Elsewhere the icon belongs to the .desktop file or the app
@@ -229,7 +258,10 @@ if(CFD_ENABLE_CUDA)
     )
 endif()
 
-target_include_directories(cfd_app PRIVATE "${CFD_INCLUDE_DIR}")
+target_include_directories(cfd_app PRIVATE
+    "${CFD_INCLUDE_DIR}"
+    "${CFD_GENERATED_DIR}"
+)
 
 target_link_libraries(cfd_app
     PRIVATE
@@ -243,6 +275,20 @@ if(CFD_ENABLE_CUDA)
     else()
         target_link_libraries(cfd_app PRIVATE CUDA::cudart)
     endif()
+endif()
+
+if(WIN32)
+    # winhttp  the update check
+    # shell32  the tray icon, and opening the release page in a browser
+    # ole32    ITaskbarList3, which draws the progress on the taskbar button
+    # user32   the hidden window the tray icon posts its clicks to
+    target_link_libraries(cfd_app PRIVATE winhttp shell32 ole32 user32)
+endif()
+
+if(NOT WIN32)
+    # The tray thread and, on Linux, the OpenMP runtime.
+    find_package(Threads REQUIRED)
+    target_link_libraries(cfd_app PRIVATE Threads::Threads)
 endif()
 
 target_compile_definitions(cfd_app
@@ -323,6 +369,63 @@ if(CFD_ENABLE_OPENMP)
             )
         endif()
         message(STATUS "OpenMP: not found; building without OpenMP")
+        # The switch in the program has to say "not in this build" rather than
+        # "off", so what actually happened is recorded rather than what was
+        # asked for.
+        set(CFD_BUILT_WITH_OPENMP OFF)
+    endif()
+else()
+    set(CFD_BUILT_WITH_OPENMP OFF)
+endif()
+
+# The feature tag of this build - the same "avx2-omp-cuda" down to "plain" the
+# release archives and the installers are indexed by. Composed from what was
+# actually compiled in rather than from what was asked for, so a machine
+# missing a toolkit cannot produce a binary that calls itself something it is
+# not.
+set(CFD_BUILD_FEATURES "")
+if(CFD_BUILT_WITH_AVX2)
+    string(APPEND CFD_BUILD_FEATURES "avx2-")
+endif()
+if(CFD_BUILT_WITH_OPENMP)
+    string(APPEND CFD_BUILD_FEATURES "omp-")
+endif()
+if(CFD_BUILT_WITH_CUDA)
+    string(APPEND CFD_BUILD_FEATURES "cuda-")
+endif()
+if(CFD_BUILD_FEATURES STREQUAL "")
+    set(CFD_BUILD_FEATURES "plain")
+else()
+    string(REGEX REPLACE "-$" "" CFD_BUILD_FEATURES "${CFD_BUILD_FEATURES}")
+endif()
+
+# Now that all three answers are final, the header the program reads them from.
+# include/Version.hpp includes this one and fills in stand-ins when it has not
+# been generated yet, which is what stops an editor from underlining every
+# CFD_* macro before the first configure.
+configure_file(
+    "${CFD_INCLUDE_DIR}/VersionGenerated.hpp.in"
+    "${CFD_GENERATED_DIR}/VersionGenerated.hpp"
+    @ONLY
+)
+
+# Everything except MSVC, which was handled by CMAKE_MSVC_RUNTIME_LIBRARY above.
+if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    if(APPLE)
+        # No static libSystem exists; only the C++ runtime can be pulled in.
+        target_link_options(cfd_app PRIVATE -static-libstdc++)
+    elseif(CFD_ENABLE_CUDA)
+        # libcudart_static wants dlopen and pthread, so the executable stays
+        # dynamically linked against libc and the driver.
+        target_link_options(cfd_app PRIVATE -static-libgcc -static-libstdc++)
+    else()
+        target_link_options(cfd_app PRIVATE
+            -static -static-libgcc -static-libstdc++)
+        # std::thread in Progress.cpp and, on an OpenMP build, libgomp both
+        # need pthread pulled in whole - a static libpthread that is only
+        # referenced weakly links to stubs that fail at run time.
+        target_link_options(cfd_app PRIVATE
+            -Wl,--whole-archive -lpthread -Wl,--no-whole-archive -ldl)
     endif()
 endif()
 
@@ -383,11 +486,16 @@ install(
 )
 
 message(STATUS "CFD Solver configuration")
-message(STATUS "  CUDA:         ${CFD_ENABLE_CUDA}")
-if(CFD_ENABLE_CUDA)
+message(STATUS "  Release:      ${CFD_RELEASE_VERSION} (project ${PROJECT_VERSION})")
+message(STATUS "  Executable:   ${CFD_APP_NAME}")
+message(STATUS "  Feature tag:  ${CFD_BUILD_FEATURES}")
+message(STATUS "  CUDA:         ${CFD_BUILT_WITH_CUDA}")
+if(CFD_BUILT_WITH_CUDA)
     message(STATUS "  CUDA toolkit: ${CUDAToolkit_VERSION}")
     message(STATUS "  CUDA arch:    ${CFD_CUDA_ARCHITECTURES}")
 endif()
-message(STATUS "  OpenMP:       ${CFD_ENABLE_OPENMP}")
-message(STATUS "  AVX2:         ${CFD_ENABLE_AVX2}")
+message(STATUS "  OpenMP:       ${CFD_BUILT_WITH_OPENMP}")
+message(STATUS "  AVX2:         ${CFD_BUILT_WITH_AVX2}")
+message(STATUS "  Static:       ${CFD_STATIC}")
+message(STATUS "  Updates from: ${CFD_REPO_OWNER}/${CFD_REPO_NAME}")
 message(STATUS "  Build dir:    ${CMAKE_BINARY_DIR}")

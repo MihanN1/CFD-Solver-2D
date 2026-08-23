@@ -3,6 +3,16 @@
 #include <vector>
 
 struct Config {
+    // Run mode. This is the first thing the configuration asks for: a fresh
+    // run, or a continuation of one that already produced VTK frames.
+    // restartFile is either a solution_*.vtk or the folder holding them, in
+    // which case the newest frame in it is taken.
+    bool restart = false;
+    std::string restartFile = "";
+    // Overrides totalTime when it is greater than zero. Never stored
+    // in a frame, see serialize(), otherwise will work really weird ahaha
+    double addTime = 0.0;
+
     // Domain
     float Lx = 1.0, Ly = 1.0;
     int nx = 50, ny = 50;
@@ -20,11 +30,6 @@ struct Config {
     int dtUpdateInterval = 5;   // steps between dt recomputations
     float dtSafety = 0.9f;      // covers the velocity growth in between
 
-    // SOR
-    // omega is used on the coarsest multigrid level, where the smoother acts as
-    // a solver. Inside a V-cycle the relaxation is clamped to smootherOmega,
-    // because strong over-relaxation is a bad high-frequency smoother even
-    // though it is a good stand-alone solver.
     float omega = 1.85f;
     float smootherOmega = 1.15f;
 
@@ -33,9 +38,6 @@ struct Config {
     float mgTolerance = 1e-4f;   // relative residual ||r|| / ||rhs||
     int mgMinCoarseSize = 8;     // stop coarsening below this many cells per axis
 
-    // Backend. Ignored when the binary was built without CUDA support.
-    // Set to 0 to force the CPU path on a CUDA build, which is how the two
-    // implementations are compared against each other.
     bool useCuda = true;
 
     // Output
@@ -55,7 +57,10 @@ struct Config {
     bool modifyParam(const std::string& name);
     bool confirm();   // returns true if confirmed, false if modified
 
-    // Non-interactive setup: "key=value" pairs, used by the command line
-    // front end and by regression runs. Returns false for an unknown key.
     bool setParam(const std::string& key, const std::string& value);
+
+    // The same "key=value" lines, one per parameter. This is what gets
+    // embedded into every VTK frame so a continuation can restore the run
+    // without the user retyping anything. Reading it back is just setParam().
+    std::string serialize() const;
 };
