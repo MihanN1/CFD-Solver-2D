@@ -26,6 +26,7 @@ Possible future extensions include:
 - Moving objects (NO idea how to do it for now, but ill figure that out)
 - Flow start coordinates and width of the flow
 - Multiphase(multiple liquids/gases)(painting with them too and making profile OPTIONAL)
+- Surface tension
 - MAY add several other solvers(deforming solver + electronic solver + thermal solver) and merge all of them into one
 - MAY make a full on website where u would download it all, but only if the previous point is done
 
