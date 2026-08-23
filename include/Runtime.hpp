@@ -92,6 +92,10 @@ extern bool avx2;
 // Threads OpenMP is allowed to use right now, for printing.
 int threadCount();
 
+// Tray and update check, with FLUID_SOLVER_NO_TRAY / _NO_UPDATE_CHECK honoured.
+bool trayEnabled();
+bool updateCheckEnabled();
+
 // One line per accelerator: what it is, whether it is on, and if not, why.
 std::string summary();
 

@@ -291,7 +291,7 @@ jobs:
           python3 scripts/unpack-release.py "${{ needs.version.outputs.value }}" zips dist --platform linux
 
       - name: makeself
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq makeself
+        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq makeself
 
       - name: Build both .run installers
         run: bash scripts/make-release.sh "${{ needs.version.outputs.value }}" --only=installers

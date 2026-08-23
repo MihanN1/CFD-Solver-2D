@@ -368,7 +368,7 @@ void begin(const std::string& title, double startAt, double total,
     std::signal(SIGTERM, interruptHandler);
 #endif
 
-    if (!runtime::settings().tray) {
+    if (!runtime::trayEnabled()) {
         g_active.store(false);
         return;
     }
