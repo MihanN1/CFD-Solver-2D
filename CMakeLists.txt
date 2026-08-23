@@ -115,7 +115,7 @@ if(CFD_ENABLE_CUDA)
     set(CMAKE_CUDA_STANDARD_REQUIRED ON)
     set(CMAKE_CUDA_EXTENSIONS OFF)
 
-    if(MSVC AND MSVC_VERSION GREATER_EQUAL 1950 AND CUDAToolkit_VERSION VERSION_LESS "13.2")
+    if(MSVC AND MSVC_VERSION GREATER_EQUAL 1950 AND CUDAToolkit_VERSION VERSION_LESS 13.2)
         message(FATAL_ERROR
             "Visual Studio 2026 requires CUDA Toolkit 13.2 or newer. "
             "Detected CUDA ${CUDAToolkit_VERSION}."
@@ -421,30 +421,18 @@ if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     else()
         target_link_options(cfd_app PRIVATE
             -static -static-libgcc -static-libstdc++)
-        # std::thread in Progress.cpp and, on an OpenMP build, libgomp both
-        # need pthread pulled in whole - a static libpthread that is only
-        # referenced weakly links to stubs that fail at run time.
-        target_link_options(cfd_app PRIVATE
-            -Wl,--whole-archive -lpthread -Wl,--no-whole-archive -ldl)
-    endif()
-endif()
-
-# Everything except MSVC, which was handled by CMAKE_MSVC_RUNTIME_LIBRARY above.
-if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    if(APPLE)
-        # No static libSystem exists; only the C++ runtime can be pulled in.
-        target_link_options(cfd_app PRIVATE -static-libstdc++)
-    elseif(CFD_ENABLE_CUDA)
-        # libcudart_static wants dlopen and pthread, so the executable stays
-        # dynamically linked against libc and the driver.
-        target_link_options(cfd_app PRIVATE -static-libgcc -static-libstdc++)
-    else()
-        target_link_options(cfd_app PRIVATE
-            -static -static-libgcc -static-libstdc++)
-        if(CFD_ENABLE_OPENMP)
-            target_link_options(cfd_app PRIVATE
-                -Wl,--whole-archive -lpthread -ldl -Wl,--no-whole-archive)
-        endif()
+        # A static link only resolves backwards, so pthread and dl have to come
+        # AFTER libgomp.a - otherwise libgomp's dlopen/dlsym calls in
+        # gomp_target_init are still undefined when the linker gets to them,
+        # which is what killed every static OpenMP row. Neither link_options
+        # nor link_libraries can be made to land there; CMAKE_CXX_STANDARD_
+        # LIBRARIES is appended at the very end of the line, which is exactly
+        # what this needs.
+        #
+        # pthread is pulled in whole because a weakly referenced static
+        # libpthread links to stubs that fail at run time.
+        string(APPEND CMAKE_CXX_STANDARD_LIBRARIES
+            " -Wl,--whole-archive -lpthread -Wl,--no-whole-archive -ldl")
     endif()
 endif()
 

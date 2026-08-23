@@ -128,10 +128,16 @@ function Find-Vcomp($Bits) {
     return $null
 }
 
-# Authenticode, when a certificate is configured. scripts\sign-windows.ps1
-# decides that for itself and says so when there is none, so this is a call
-# rather than a condition.
+# Authenticode, when a certificate is configured. Decided once. With no certificate this used to print the same eleven-line
+# paragraph after every row, which buried the build output it was printed
+# between.
+$script:SigningOn = [bool]($env:CFD_SIGN_THUMBPRINT -or $env:CFD_SIGN_PFX)
+if (-not $script:SigningOn) {
+    Write-Host "  signing: no certificate configured (CFD_SIGN_THUMBPRINT or CFD_SIGN_PFX), nothing will be signed" -ForegroundColor DarkGray
+}
+
 function Invoke-Signing($TargetPaths) {
+    if (-not $script:SigningOn) { return }
     $script = Join-Path $PSScriptRoot "sign-windows.ps1"
     if (-not (Test-Path $script)) { return }
     & pwsh -NoLogo -NoProfile -File $script @TargetPaths
