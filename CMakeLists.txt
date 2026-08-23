@@ -400,9 +400,12 @@ else()
 endif()
 
 # Now that all three answers are final, the header the program reads them from.
+# include/Version.hpp includes this one and fills in stand-ins when it has not
+# been generated yet, which is what stops an editor from underlining every
+# CFD_* macro before the first configure.
 configure_file(
-    "${CFD_INCLUDE_DIR}/Version.hpp.in"
-    "${CFD_GENERATED_DIR}/Version.hpp"
+    "${CFD_INCLUDE_DIR}/VersionGenerated.hpp.in"
+    "${CFD_GENERATED_DIR}/VersionGenerated.hpp"
     @ONLY
 )
 

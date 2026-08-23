@@ -60,7 +60,16 @@ static bool applyRuntimeArg(const std::string& key, const std::string& value) {
     return false;
 }
 
+// Referenced through a volatile pointer so no compiler decides the strings are
+// unused and drops them: the UI finds this build's version and feature set by
+// searching the executable's bytes for them, without having to run it.
+namespace {
+const char* const kBuildMarkers[] = {CFD_VERSION_MARKER, CFD_FEATURES_MARKER};
+const char* const* const kBuildMarkersKeepAlive = kBuildMarkers;
+}   // namespace
+
 int main(int argc, char** argv) {
+    (void)kBuildMarkersKeepAlive;
     std::cout << "=== CFD-Solver-2D " << CFD_RELEASE_VERSION << " ("
               << CFD_BUILD_FEATURES << ") ===\n\n";
 
@@ -80,6 +89,17 @@ int main(int argc, char** argv) {
             const std::string arg = argv[a];
             if (arg == "-h" || arg == "--help") {
                 printUsage(argv[0]);
+                return 0;
+            }
+            if (arg == "--version" || arg == "-v") {
+                // Two machine-readable lines first, then the sentence. The UI
+                // reads the same two strings straight out of the file, so what
+                // is printed here and what is found there cannot disagree.
+                std::cout << CFD_VERSION_MARKER << "\n"
+                          << CFD_FEATURES_MARKER << "\n"
+                          << CFD_APP_NAME << " " << CFD_RELEASE_VERSION
+                          << " (build " << CFD_APP_VERSION << ", "
+                          << CFD_BUILD_FEATURES << ")\n";
                 return 0;
             }
             if (arg == "--settings" || arg == "--accel") {

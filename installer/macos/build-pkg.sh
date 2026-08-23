@@ -70,6 +70,49 @@ variants_for() {   # variants_for <arch>
 
 echo "Building the$SUFFIX package for $VERSION ($ARCHES)"
 
+# ---- signing ---------------------------------------------------------------
+# Every binary is signed before it is packed, the finished .pkg is signed after
+# it is built, and the .pkg is notarised last. scripts/sign-macos.sh holds the
+# identities and explains what to set; with nothing configured it says so and
+# the build carries on unsigned.
+#
+# The order matters and is not interchangeable: notarisation checks the
+# signature of everything inside the package, so a binary signed after pkgbuild
+# has copied it is a binary Apple never sees signed. Hence sign_code runs on the
+# staged copy in $WORK, not on the original in dist/.
+#
+# The .app wrappers are deliberately not signed. They are written by the
+# postinstall script on the user's own machine, and a file created locally
+# carries no quarantine attribute, so Gatekeeper never assesses it. Signing them
+# would mean shipping a signature for a file that does not exist yet.
+SIGN="$REPO/scripts/sign-macos.sh"
+SIGN_REQUIRE="${CFD_SIGN_REQUIRE:-0}"
+
+# Whether there is anything to sign with is decided once, here, rather than
+# eight times inside the loop: an unconfigured machine should say so on one line
+# and get on with the build, not repeat the same paragraph for every variant.
+SIGN_CODE_ON=0
+if [ ! -f "$SIGN" ]; then
+    echo "  signing: scripts/sign-macos.sh is missing, nothing will be signed"
+elif [ -n "${CFD_SIGN_MACOS_APP_IDENTITY:-}" ]; then
+    SIGN_CODE_ON=1
+    echo "  signing: ${CFD_SIGN_MACOS_APP_IDENTITY}"
+elif [ "$SIGN_REQUIRE" = 1 ]; then
+    bash "$SIGN" --require code /dev/null   # says which variable is missing
+    exit 1                                  # ... and never returns, but be sure
+else
+    echo "  signing: no Developer ID Application identity, binaries stay unsigned"
+fi
+
+sign_code() {   # sign_code <file> ...
+    [ "$SIGN_CODE_ON" = 1 ] || return 0
+    if [ "$SIGN_REQUIRE" = 1 ]; then
+        bash "$SIGN" --require code "$@"
+    else
+        bash "$SIGN" code "$@"
+    fi
+}
+
 # ---- the icon ---------------------------------------------------------------
 # A Mach-O executable holds no icon of its own; on macOS the icon belongs to the
 # .app bundle. So one .icns is built here from the PNG set the repo already has,
@@ -143,6 +186,7 @@ for v in $(variants_for "$a"); do
     [ -d "$REPO/models" ] && cp -R "$REPO/models" "$root/" 2>/dev/null || true
     cp "$REPO/README.md" "$REPO/LICENSE" "$root/" 2>/dev/null || true
     normalise_root "$root"
+    sign_code "$root/Fluid Solver"
 
     # A system-wide install leaves "output" owned by root, and the solver writes
     # its frames there. Hand it to whoever is actually logged in.
@@ -209,6 +253,13 @@ POST
     [ -d "$REPO/models" ] && cp -R "$REPO/models" "$uiroot/" 2>/dev/null || true
     cp "$REPO/README.md" "$REPO/LICENSE" "$uiroot/" 2>/dev/null || true
     normalise_root "$uiroot"
+    # Both binaries, and any dylib the UI carries beside them - notarisation
+    # walks the whole payload, and one unsigned .dylib fails the submission for
+    # the entire package.
+    sign_code "$uiroot/Fluid Solver" "$uiroot/Fluid Solver UI"
+    for lib in "$uiroot"/*.dylib; do
+        [ -f "$lib" ] && sign_code "$lib"
+    done
     pkgbuild --root "$WORK/root-ui-$tag" \
              --scripts "$WORK/scripts-$tag" \
              --identifier "$IDENT.ui.$tag" \
@@ -489,6 +540,17 @@ or, once it is running:
 Frames are written to /Applications/Fluid Solver/output.
 CONCLUSION
 
+# productbuild refuses a Distribution that names a resource file it cannot find,
+# so both of these are elements only when the file behind them actually exists.
+LICENSE_LINE=""
+if cp "$REPO/LICENSE" "$WORK/LICENSE" 2>/dev/null; then
+    LICENSE_LINE='<license file="LICENSE"/>'
+fi
+BACKGROUND_LINE=""
+if cp "$REPO/logo/fluid-solver-256.png" "$WORK/background.png" 2>/dev/null; then
+    BACKGROUND_LINE='<background file="background.png" mime-type="image/png" alignment="bottomleft" scaling="proportional"/>'
+fi
+
 cat > "$WORK/Distribution.xml" <<EOF
 <?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2">
@@ -496,9 +558,9 @@ cat > "$WORK/Distribution.xml" <<EOF
     <organization>com.mihann1</organization>
     <options customize="always" require-scripts="false" hostArchitectures="$HOSTARCHS"/>
     <domains enable_anywhere="true" enable_currentUserHome="true" enable_localSystem="true"/>
-    <license file="LICENSE"/>
+    $LICENSE_LINE
     <conclusion file="conclusion.txt"/>
-    <background file="background.png" mime-type="image/png" alignment="bottomleft" scaling="proportional"/>
+    $BACKGROUND_LINE
     <script><![CDATA[
 // Which machine this is. hw.optional.arm64 does not exist on Intel, where
 // sysctl throws rather than returning 0, so both are wrapped.
@@ -522,7 +584,6 @@ function hasManyCores() {
 </installer-gui-script>
 EOF
 
-cp "$REPO/LICENSE" "$WORK/LICENSE"
 cp "$REPO/logo/fluid-solver-256.png" "$WORK/background.png" 2>/dev/null || true
 
 OUT="$DIST/Fluid Solver $VERSION$SUFFIX.pkg"
@@ -532,17 +593,55 @@ productbuild --distribution "$WORK/Distribution.xml" \
              "$OUT"
 
 echo "Built: $OUT  ($FOUND_COUNT build(s):$FOUND$([ "$HAVE_UI" = 1 ] && echo ' + UI') + Launchpad/Desktop)"
-cat <<'NOTE'
 
-Gatekeeper will refuse to open this on any machine but the one that built it
-until it is signed and notarised. With an Apple Developer account:
+# ---- sign and notarise the finished package --------------------------------
+# Signing proves who built it; notarising proves Apple has looked at it. Since
+# macOS 10.15 the second one is what actually removes the warning, so both run
+# here, in that order, and either is skipped with an explanation when its
+# credentials are absent.
+PKG_SIGNED=0
+if [ -f "$SIGN" ]; then
+    if [ "$SIGN_REQUIRE" = 1 ]; then
+        bash "$SIGN" --require pkg "$OUT"
+        bash "$SIGN" --require notary "$OUT"
+        PKG_SIGNED=1
+    elif [ -n "${CFD_SIGN_MACOS_INSTALLER_IDENTITY:-}" ]; then
+        bash "$SIGN" pkg "$OUT"
+        PKG_SIGNED=1
+        # Notarising something unsigned is refused by Apple, so this only runs
+        # once the package actually carries a signature.
+        bash "$SIGN" notary "$OUT"
+    fi
+fi
 
-    productsign --sign "Developer ID Installer: <name> (<team>)" in.pkg out.pkg
-    xcrun notarytool submit out.pkg --apple-id <id> --team-id <team> \
-          --password <app-specific-password> --wait
-    xcrun stapler staple out.pkg
+# Whether that worked is worth stating plainly rather than leaving in the log.
+# spctl is the same check Gatekeeper itself runs, so it is the answer when it is
+# available; when it is not, what was configured is the next best thing.
+if [ "$PKG_SIGNED" = 1 ]; then
+    if command -v spctl >/dev/null 2>&1; then
+        if spctl --assess --type install "$OUT" >/dev/null 2>&1; then
+            echo "Gatekeeper accepts this package."
+        else
+            echo "Signed, but Gatekeeper still refuses it - which normally means it"
+            echo "has not been notarised. See the notary section of scripts/sign-macos.sh."
+        fi
+    else
+        echo "Signed. spctl is not here to confirm Gatekeeper accepts it."
+    fi
+else
+    cat <<'NOTE'
 
-Without one, users have to right-click the package and choose Open, then
-confirm a warning that says the developer cannot be verified. Say so in the
-release notes rather than letting them find out.
+This package is not yet signed and notarised, so users have to right-click it
+and choose Open, then confirm a warning that the developer cannot be verified.
+To fix that, with an Apple Developer Program membership:
+
+    export CFD_SIGN_MACOS_APP_IDENTITY="Developer ID Application: NAME (TEAM)"
+    export CFD_SIGN_MACOS_INSTALLER_IDENTITY="Developer ID Installer: NAME (TEAM)"
+    xcrun notarytool store-credentials cfd-notary \
+          --apple-id <id> --team-id <team> --password <app-specific-password>
+    export CFD_NOTARY_PROFILE=cfd-notary
+
+then build again. `security find-identity -v` prints the two identity strings.
+See scripts/sign-macos.sh, which does the work, for what each one is for.
 NOTE
+fi

@@ -739,6 +739,17 @@ package() {
 
     cp "$REPO/README.md" "$REL/README.md"; say "  README.md"
 
+    # The guide belongs beside the files it describes. Somebody opening
+    # release/0.2/ six months from now should not have to go back to the branch
+    # to find out what a "-ui" archive is or which of the 34 rows to take.
+    [ -f "$REPO/RELEASE-GUIDE.md" ] && {
+        cp "$REPO/RELEASE-GUIDE.md" "$REL/RELEASE-GUIDE.md"; say "  RELEASE-GUIDE.md"; }
+    # Release notes are written per version, so this is the one file that is
+    # copied only when it exists for this one.
+    for notes in "$REPO/release/RELEASE-NOTES-$VERSION.md" "$REPO/RELEASE-NOTES-$VERSION.md"; do
+        [ -f "$notes" ] && { cp "$notes" "$REL/"; say "  $(basename "$notes")"; break; }
+    done
+
     # Written outside and moved in: created in place, the file already exists
     # when the glob runs and ends up listing a checksum of itself, taken halfway
     # through being written.

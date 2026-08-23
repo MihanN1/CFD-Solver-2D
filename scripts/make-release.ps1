@@ -58,6 +58,9 @@ param(
 
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
+# The installer's OutputBaseFilename starts with this, and signing has to name
+# the file it produced.
+$AppNameForSigning = "Fluid Solver"
 $dist = Join-Path $repo "dist"
 $rel  = Join-Path $repo "release\$Version"
 $problems = New-Object System.Collections.Generic.List[string]
@@ -103,6 +106,18 @@ function Find-Vcomp($Bits) {
         if ($hit) { return $hit.FullName }
     }
     return $null
+}
+
+# Authenticode, when a certificate is configured. scripts\sign-windows.ps1
+# decides that for itself and says so when there is none, so this is a call
+# rather than a condition.
+function Invoke-Signing($TargetPaths) {
+    $script = Join-Path $PSScriptRoot "sign-windows.ps1"
+    if (-not (Test-Path $script)) { return }
+    & pwsh -NoLogo -NoProfile -File $script @TargetPaths
+    if ($LASTEXITCODE -ne 0) {
+        $problems.Add("signing failed for: " + ($TargetPaths -join ", "))
+    }
 }
 
 function Find-Iscc {
@@ -221,6 +236,11 @@ function Build-Row($Row, $Archs) {
         if ($dll) { Copy-Item $dll $rowDir -Force; $extra = " + vcomp140.dll" }
         else { $problems.Add("$name - vcomp140.dll not found, this build will not start") }
     }
+
+    # Signed here, one row at a time, rather than after the fact: the installer
+    # carries these executables verbatim, so signing them now is what makes the
+    # installed program signed as well as the installer that put it there.
+    Invoke-Signing @((Join-Path $rowDir "Fluid Solver.exe"))
 
     $mb = [math]::Round((Get-Item (Join-Path $rowDir "Fluid Solver.exe")).Length / 1MB, 2)
     Write-Host "ok, $mb MB$extra" -ForegroundColor Green
@@ -366,7 +386,10 @@ function Build-Installers {
     }
     Write-Host "  windows (x64 + x86 + arm64, whichever were built) ... " -NoNewline
     & $iscc "/DAppVersion=$Version" "/DDistDir=$dist" $iss 2>&1 | Out-String | Write-Verbose
-    if ($LASTEXITCODE -eq 0) { Write-Host "ok" -ForegroundColor Green }
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "ok" -ForegroundColor Green
+        Invoke-Signing @((Join-Path $dist "$AppNameForSigning $Version windows setup.exe"))
+    }
     else { Write-Host "failed" -ForegroundColor Yellow; $problems.Add("windows installer - iscc failed, rerun with -Verbose") }
 
     if (-not $PerArch) { return }
@@ -380,7 +403,10 @@ function Build-Installers {
         if (-not $any) { Write-Host "  windows-$arch ... nothing to package - skipped" -ForegroundColor Yellow; continue }
         Write-Host "  windows-$arch ... " -NoNewline
         & $iscc "/DAppVersion=$Version" "/DArch=$arch" "/DDistDir=$dist" $iss 2>&1 | Out-String | Write-Verbose
-        if ($LASTEXITCODE -eq 0) { Write-Host "ok" -ForegroundColor Green }
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "ok" -ForegroundColor Green
+            Invoke-Signing @((Join-Path $dist "$AppNameForSigning $Version windows-$arch setup.exe"))
+        }
         else { Write-Host "failed" -ForegroundColor Yellow; $problems.Add("windows-$arch installer - iscc failed, rerun with -Verbose") }
     }
 }
@@ -443,6 +469,25 @@ function Package {
 
     Copy-Item (Join-Path $repo "README.md") $rel -Force
     Write-Host "  README.md"
+
+    # The guide belongs beside the files it describes. Somebody opening
+    # release\0.2\ six months from now should not have to go back to the branch
+    # to find out what a "-ui" archive is or which of the 34 rows to take.
+    $guide = Join-Path $repo "RELEASE-GUIDE.md"
+    if (Test-Path $guide) {
+        Copy-Item $guide $rel -Force
+        Write-Host "  RELEASE-GUIDE.md"
+    }
+    # Release notes are written per version, so this is the one file that is
+    # copied only when it exists for this one.
+    foreach ($candidate in @((Join-Path $repo "release\RELEASE-NOTES-$Version.md"),
+                             (Join-Path $repo "RELEASE-NOTES-$Version.md"))) {
+        if (Test-Path $candidate) {
+            Copy-Item $candidate $rel -Force
+            Write-Host "  $(Split-Path $candidate -Leaf)"
+            break
+        }
+    }
 
     Get-ChildItem $rel -File | Where-Object { $_.Name -ne "SHA256SUMS.txt" } | ForEach-Object {
         "{0}  {1}" -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower(), $_.Name

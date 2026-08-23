@@ -902,9 +902,43 @@ void Solver::run() {
         if (step % dtUpdateInterval == 0)
             computeDt();
 
+        // How the last step of a run is chosen, and why it is not simply
+        // "whatever is left".
+        //
+        // The projection builds its right-hand side as the divergence left by
+        // the predictor divided by the step being taken, so the pressure it
+        // solves for scales as 1/dt. Over a normal step that is fine: the
+        // divergence is itself proportional to dt and the two cancel. Over a
+        // step a millionth of dt it does not: what is left is the previous
+        // step's round-off, and dividing that by almost nothing writes a
+        // pressure field millions of times larger than every frame before it.
+        // The velocities stay right - the correction is dt * grad(p), and the
+        // dt cancels again - but that one frame then set the colour range for
+        // the whole series and made everything else render flat. That is what
+        // "the pressure comes out very strange" was.
+        //
+        // Such steps were unavoidable before, because currentTime is a double
+        // adding up float-sized steps: after "the last step" it lands a few
+        // parts in 1e10 short of totalTime rather than on it, and the loop
+        // dutifully went round again for the remainder. Twice.
+        //
+        // So: anything left under a thousandth of a step is round-off rather
+        // than simulation and ends the run; a remainder between one and one
+        // and a half steps is split in two so neither half is tiny; and the
+        // step that does land on totalTime says so exactly instead of leaving
+        // the sliver behind for the next iteration to find.
+        const double remaining = cfg.totalTime - currentTime;
+        if (remaining <= 1e-3 * static_cast<double>(dt))
+            break;
+
         float stepDt = dt;
-        if (currentTime + stepDt > cfg.totalTime)
-            stepDt = static_cast<float>(cfg.totalTime - currentTime);
+        bool finalStep = false;
+        if (remaining < static_cast<double>(stepDt)) {
+            stepDt = static_cast<float>(remaining);
+            finalStep = true;
+        } else if (remaining < 1.5 * static_cast<double>(stepDt)) {
+            stepDt = static_cast<float>(remaining * 0.5);
+        }
         if (!(stepDt > 0.f))
             break;
         const float savedDt = dt;
@@ -915,6 +949,11 @@ void Solver::run() {
         corrector();
 
         currentTime += dt;
+        // The step was cut to land on totalTime, and then rounded to a float
+        // on the way. The target did not round, so it is the one to keep -
+        // otherwise the loop comes back for a remainder of 2e-10 seconds.
+        if (finalStep)
+            currentTime = cfg.totalTime;
         step++;
         dt = savedDt;
 
