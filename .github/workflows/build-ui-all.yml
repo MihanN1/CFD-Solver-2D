@@ -117,6 +117,7 @@ jobs:
             g++-multilib \
             libc6-dev-i386 \
             "lib32stdc++-${gccmajor}-dev" \
+            linux-libc-dev \
             pkg-config \
             libx11-dev \
             libxrandr-dev \
@@ -187,6 +188,24 @@ jobs:
           python3 --version
           cmake --version
           g++ --version
+          # gcc -m32 does NOT search /usr/include/i386-linux-gnu; its only
+          # multiarch-free path is /usr/include, and the kernel headers get
+          # there through the /usr/include/asm symlink. Adding the i386
+          # architecture drops that symlink, and then every 32-bit translation
+          # unit dies on asm/errno.h. The x86 and x86_64 asm trees are the same
+          # arch/x86 uapi headers, so pointing it at either is correct - and
+          # 64-bit builds never reach it, they find their own multiarch copy
+          # first.
+          if [ ! -e /usr/include/asm ]; then
+            for d in i386-linux-gnu x86_64-linux-gnu; do
+              if [ -d "/usr/include/$d/asm" ]; then
+                sudo ln -sfn "$d/asm" /usr/include/asm
+                echo "linked /usr/include/asm -> $d/asm"
+                break
+              fi
+            done
+          fi
+
           # The real x86 rows are C++17 with <filesystem>. A plain C probe
           # passes with gcc-multilib alone and tells you nothing.
           cat > /tmp/m32.cpp <<'EOF'
