@@ -1,5 +1,7 @@
 #include "Solver.hpp"
 #include "AppPaths.hpp"
+#include "Progress.hpp"
+#include "Runtime.hpp"
 #include <cmath>
 #include <cstring>
 #include <iostream>
@@ -206,7 +208,7 @@ void Solver::computeDt(){
 
             int i = 0;
 #ifdef __AVX2__
-            for (; i + 8 <= nx; i += 8)
+            for (; runtime::avx2 && i + 8 <= nx; i += 8)
             {
                 const __m256 uL = _mm256_and_ps(signMask,
                     _mm256_loadu_ps(u.data() + rowU + i));
@@ -298,7 +300,7 @@ void Solver::predictor() {
         float* __restrict uStarRow = uStar + rowU;
         int i = 1;
 #ifdef __AVX2__
-        for (; i + 8 <= nx; i += 8) {
+        for (; runtime::avx2 && i + 8 <= nx; i += 8) {
             const __m256 uij =
                 _mm256_loadu_ps(uRow + i);
             const __m256 utop =
@@ -463,7 +465,7 @@ void Solver::predictor() {
         float* __restrict vStarRow = vStar + rowV;
         int i = 1;
 #ifdef __AVX2__
-        for (; i + 8 <= nx - 1; i += 8) {
+        for (; runtime::avx2 && i + 8 <= nx - 1; i += 8) {
             const __m256 vij =
                 _mm256_loadu_ps(vRow + i);
             const __m256 vtop =
@@ -639,7 +641,7 @@ void Solver::solvePoisson() {
         const int rowVTop = (j + 1) * nx;
         int i = 0;
 #ifdef __AVX2__
-        for (; i + 8 <= nx; i += 8){
+        for (; runtime::avx2 && i + 8 <= nx; i += 8){
             const __m256 uR =
                 _mm256_loadu_ps(uStar + rowU + i + 1);
             const __m256 uL =
@@ -699,7 +701,7 @@ void Solver::corrector() {
         const int rowU = j * (nx + 1);
         int i = 1;
 #ifdef __AVX2__
-        for (; i + 8 <= nx; i += 8){
+        for (; runtime::avx2 && i + 8 <= nx; i += 8){
             const __m256 pRight =
                 _mm256_loadu_ps(pPtr + rowP + i);
             const __m256 pLeft =
@@ -737,7 +739,7 @@ void Solver::corrector() {
         const int rowV = j * nx;
         int i = 0;
 #ifdef __AVX2__
-        for (; i + 8 <= nx; i += 8){
+        for (; runtime::avx2 && i + 8 <= nx; i += 8){
             const __m256 pTop =
                 _mm256_loadu_ps(pPtr + rowP + i);
             const __m256 pBot =
@@ -888,6 +890,14 @@ void Solver::run() {
     const int saveInterval = std::max(1, cfg.saveInterval);
     const int dtUpdateInterval = std::max(1, cfg.dtUpdateInterval);
 
+    // The tray icon and the taskbar bar, or - where there is no tray a console
+    // binary can reach - the terminal title. It reports simulated seconds
+    // rather than steps, because dt moves and steps do not mean anything to
+    // somebody waiting for the run to end.
+    progress::begin("Fluid Solver", currentTime, cfg.totalTime,
+                    pathToConsole(outputPath));
+    bool stopped = false;
+
     while (currentTime < cfg.totalTime) {
         if (step % dtUpdateInterval == 0)
             computeDt();
@@ -907,6 +917,20 @@ void Solver::run() {
         currentTime += dt;
         step++;
         dt = savedDt;
+
+        progress::update(currentTime);
+
+        // Asked for from the tray menu, or by a first Ctrl+C. The step that
+        // was running is finished and the frame below is written, so the run
+        // can be continued from it later - which is the whole point of
+        // stopping this way rather than killing the process.
+        if (progress::stopRequested()) {
+            std::cout << "\nStopping at t = " << currentTime
+                      << " s as asked. The frame being written now can be "
+                         "continued from.\n";
+            stopped = true;
+            break;
+        }
 
         if (step % 10 == 0) {
             const float maxVel = maxVelocity();
@@ -931,8 +955,13 @@ void Solver::run() {
 
     if (step % saveInterval != 0)
         saveVTK(step);
-    std::cout << "Simulation finished at t = " << currentTime << " s after "
-              << step << " steps.\n";
+    progress::finish(!stopped);
+    std::cout << (stopped ? "Simulation stopped at t = "
+                          : "Simulation finished at t = ")
+              << currentTime << " s after " << step << " steps.\n";
+    if (stopped)
+        std::cout << "Continue it with: restart=1 restartFile="
+                  << pathToConsole(outputPath) << "\n";
 }
 
 void Solver::saveVTK(int stepNum) const {

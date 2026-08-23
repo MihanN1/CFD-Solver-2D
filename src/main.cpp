@@ -1,8 +1,13 @@
 #include "Config.hpp"
 #include "Mesh.hpp"
+#include "Progress.hpp"
 #include "Restart.hpp"
+#include "Runtime.hpp"
 #include "Solver.hpp"
+#include "UpdateCheck.hpp"
+#include "Version.hpp"
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
@@ -16,11 +21,17 @@ static void printUsage(const char* exe) {
         "Usage:\n"
         "  " << exe << "                       interactive configuration\n"
         "  " << exe << " key=value [key=value] non-interactive run\n"
+        "  " << exe << " --settings             change AVX2/OpenMP/CUDA and exit\n"
+        "  " << exe << " --check-updates        ask GitHub for a newer release\n"
         "\n"
         "Keys: Lx Ly nx ny U0 nu CFL totalTime dtUpdateInterval dtSafety\n"
         "      omega smootherOmega mgIterations mgTolerance mgMinCoarseSize\n"
         "      saveInterval outputDir geometryFile sliceAngleX sliceAngleZ\n"
         "      sliceRotation invertSection ro useCuda restart restartFile addTime\n"
+        "\n"
+        "Acceleration, for this run only (the remembered defaults come from\n"
+        "settings.ini, which --settings writes):\n"
+        "      avx2=0|1 openmp=0|1 useCuda=0|1 threads=N tray=0|1\n"
         "\n"
         "Example:\n"
         "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "
@@ -32,10 +43,36 @@ static void printUsage(const char* exe) {
                        "saveInterval=5\n";
 }
 
+// The three accelerators can be steered per run without touching the file the
+// choice is remembered in. Handled before Config sees the argument, because
+// only "useCuda" is a simulation parameter - the other three are not.
+static bool applyRuntimeArg(const std::string& key, const std::string& value) {
+    const bool on = std::atoi(value.c_str()) != 0;
+    if (key == "avx2")          { runtime::mutableSettings().useAvx2 = on; return true; }
+    if (key == "openmp" || key == "omp")
+                                { runtime::mutableSettings().useOpenMp = on; return true; }
+    if (key == "tray")          { runtime::mutableSettings().tray = on; return true; }
+    if (key == "threads")       {
+        const int count = std::atoi(value.c_str());
+        runtime::mutableSettings().threads = (count > 0) ? count : 0;
+        return true;
+    }
+    return false;
+}
+
 int main(int argc, char** argv) {
-    std::cout << "=== CFD-Solver-2D ===\n\n";
+    std::cout << "=== CFD-Solver-2D " << CFD_RELEASE_VERSION << " ("
+              << CFD_BUILD_FEATURES << ") ===\n\n";
+
+    // Read before anything asks a question, so the answers the user gave last
+    // time are already in place - and so --settings has something to edit.
+    runtime::load();
 
     Config cfg;
+    // The remembered choice is the default; "useCuda=" on the command line and
+    // the interactive prompt both still override it, and a build with no CUDA
+    // in it cannot be talked into having some.
+    cfg.useCuda = runtime::cudaEnabled();
     std::vector<std::pair<std::string, std::string>> overrides;
 
     if (argc > 1) {
@@ -45,12 +82,31 @@ int main(int argc, char** argv) {
                 printUsage(argv[0]);
                 return 0;
             }
+            if (arg == "--settings" || arg == "--accel") {
+                runtime::configureInteractively();
+                return 0;
+            }
+            if (arg == "--check-updates") {
+                const update::Result result = update::check();
+                if (!result.checked) {
+                    std::cout << "Could not check: " << result.error << "\n";
+                    return 1;
+                }
+                std::cout << "This build: " << CFD_RELEASE_VERSION
+                          << "\nNewest published: " << result.latest << "\n"
+                          << (result.newer ? result.url
+                                           : std::string("Already up to date."))
+                          << "\n";
+                return 0;
+            }
             const size_t eq = arg.find('=');
             if (eq == std::string::npos || eq == 0) {
                 std::cerr << "Malformed argument: " << arg << "\n";
                 printUsage(argv[0]);
                 return 1;
             }
+            if (applyRuntimeArg(arg.substr(0, eq), arg.substr(eq + 1)))
+                continue;
             if (!cfg.setParam(arg.substr(0, eq), arg.substr(eq + 1))) {
                 std::cerr << "Unknown parameter: " << arg.substr(0, eq) << "\n";
                 printUsage(argv[0]);
@@ -58,8 +114,26 @@ int main(int argc, char** argv) {
             }
             overrides.emplace_back(arg.substr(0, eq), arg.substr(eq + 1));
         }
+        runtime::apply();
+        update::runStartupCheck(false);
+        std::cout << "Acceleration:\n" << runtime::summary();
         cfg.print();
     } else {
+        runtime::apply();
+        update::runStartupCheck(true);
+
+        std::cout << "Acceleration (remembered from last time):\n"
+                  << runtime::summary()
+                  << "Change it? [y/N] ";
+        std::cout.flush();
+        std::string answer;
+        if (std::getline(std::cin, answer) && !answer.empty() &&
+            (answer[0] == 'y' || answer[0] == 'Y')) {
+            runtime::configureInteractively();
+            cfg.useCuda = runtime::cudaEnabled();
+        }
+        std::cout << "\n";
+
         cfg.readFromConsole();
 
         if (!cfg.restart) {
@@ -75,6 +149,18 @@ int main(int argc, char** argv) {
             std::cout << "      Enter 'none' to use the circle verification geometry.\n";
 
             std::cout << "      Total simulation time: " << cfg.totalTime << " s.\n";
+        }
+
+        // The configuration asks about CUDA as well, and that answer is the
+        // later of the two, so it becomes the remembered default rather than
+        // being forgotten the moment this run ends. Only here: a "useCuda=" on
+        // the command line is an override for one run and has no business
+        // rewriting a file.
+        if (runtime::builtWithCuda() &&
+            cfg.useCuda != runtime::settings().useCuda) {
+            runtime::mutableSettings().useCuda = cfg.useCuda;
+            runtime::apply();
+            runtime::save();
         }
     }
 
@@ -193,6 +279,11 @@ int main(int argc, char** argv) {
     const double seconds =
         std::chrono::duration<double>(endTime - startTime).count();
     std::cout << "Wall clock: " << seconds << " s\n";
+
+    // Takes the tray icon down and clears the taskbar progress. Before the
+    // "press Enter" below, or the icon sits there for as long as the window
+    // stays open with nothing behind it.
+    progress::shutdown();
 
     if (argc <= 1) {
         std::cout << "\nSimulation complete. Press Enter to exit...";

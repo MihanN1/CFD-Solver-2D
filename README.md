@@ -222,7 +222,8 @@ CFD-Solver-2D/
 # Requirements
 
 - C++17 compatible compiler
-- CMake 3.10+
+- CMake 3.28+ (what `cmake_minimum_required` asks for; `scripts/make-release.sh`
+  installs a newer one into `.toolchain/` when the system copy is older)
 - SFML
 - ParaView (optional)
 
@@ -254,8 +255,12 @@ cmake --install build --config Release --prefix install
 # Run
 
 ```powershell
-.\install\bin\cfd_app.exe
+.\install\bin\"Fluid Solver.exe"
 ```
+
+The CMake target is still `cfd_app`, but the file it produces is named
+`Fluid Solver` — `CFD_APP_NAME` sets it, and there will be other solvers next
+to this one.
 
 Configure:
 
@@ -270,6 +275,86 @@ Configure:
 - Visualization options
 
 After confirmation the simulation starts immediately.
+
+## Acceleration, and where the choice is kept
+
+The banner says which build this is:
+
+```
+=== CFD-Solver-2D 0.2 (avx2-omp-cuda) ===
+```
+
+AVX2, OpenMP and CUDA can each be turned off without changing which download
+you are running. What that changes is speed, not what is being solved: the
+velocity field comes out the same to the last digit a float holds, and the
+pressure lands on a slightly different multigrid iterate — about a thousandth
+of its peak — the same way the separate AVX2 and non-AVX2 downloads always have
+between them.
+
+An interactive run offers the switches before it asks anything else, and
+
+```powershell
+"Fluid Solver.exe" --settings
+```
+
+opens the same menu on its own. The answers go into `settings.ini` — beside the
+executable when that folder can be written to, which is what a portable unpack
+gives, and in the per-user data directory when it cannot, which is what an
+install under Program Files gives — and are used by every later run.
+
+For one run only, without touching that file:
+
+```powershell
+"Fluid Solver.exe" avx2=0 openmp=1 threads=4 useCuda=0 tray=0 nx=256 ny=128 ...
+```
+
+and the environment overrides everything: `FLUID_SOLVER_NO_AVX2`,
+`FLUID_SOLVER_NO_OPENMP`, `FLUID_SOLVER_NO_CUDA`, `FLUID_SOLVER_NO_TRAY`,
+`FLUID_SOLVER_NO_UPDATE_CHECK`.
+
+A switch for something this build was not compiled with is shown as
+"not in this build" rather than hidden — the menu explains why one machine is
+slower than the one next to it instead of leaving it a mystery.
+
+## While it runs
+
+On Windows the solver puts an icon in the tray for the length of a run. Its
+tooltip is the progress in simulated seconds — `Fluid Solver - 12.5 / 30 s
+(41%)` — the same number fills the taskbar button, and the tray menu can send
+the console window away and bring it back, open the output folder, or ask the
+run to stop.
+
+"Stop" there, and a first Ctrl+C anywhere, mean the same thing: finish the step
+that is running, write the frame, and return. The run can then be continued
+from that frame exactly as described below — which is the point of stopping
+that way rather than killing the process halfway through a file. A second
+Ctrl+C is left to the default handler and kills it outright.
+
+Elsewhere there is no tray a static console binary can reach without dragging
+in a desktop toolkit, so the same progress goes into the terminal's title,
+which is what the taskbar entry or the Dock shows for that window.
+
+`tray=0`, or `tray` in `--settings`, turns all of it off. Ctrl+C keeps working
+either way.
+
+## New releases
+
+At startup the solver asks GitHub once whether anything newer than this build
+has been published, and offers to open the release page if so. Any version
+greater than this one counts, whether it moved the major or only the minor,
+and the comparison is numeric — 0.10 is newer than 0.9, not older.
+
+The request has a short timeout and no network at all is the normal case
+rather than an error: nothing is printed unless there is something newer. On
+Windows it goes through WinHTTP; elsewhere through whichever of `curl` and
+`wget` the machine has.
+
+```powershell
+"Fluid Solver.exe" --check-updates     # ask now, and say so either way
+```
+
+`checkForUpdates=0` in `settings.ini`, or `FLUID_SOLVER_NO_UPDATE_CHECK=1`,
+stops it asking.
 
 # Continuing a run
 
