@@ -33,12 +33,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The version lives in CMakeLists.txt and nowhere else. A literal here is a
-# literal that drifts: this file used to default to a version two releases old,
-# which nobody noticed because the caller always passed one - until the day it
-# did not.
 def project_version(default: str = "0.0") -> str:
-    """major.minor out of the project's CMakeLists.txt."""
+    """major.minor from CMakeLists.txt, so no version is typed twice."""
     cmake = ROOT / "CMakeLists.txt"
     try:
         text = cmake.read_text(encoding="utf-8", errors="replace")

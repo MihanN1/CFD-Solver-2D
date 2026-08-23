@@ -32,8 +32,7 @@ jobs:
     outputs:
       value: ${{ steps.pick.outputs.value }}
     steps:
-      # Only here to read CMakeLists.txt. A hardcoded default in this file is a
-      # second place the version lives, and a second place is a place to drift.
+      # Only here to read CMakeLists.txt.
       - uses: actions/checkout@v4
       - id: pick
         shell: bash
