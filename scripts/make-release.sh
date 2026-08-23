@@ -261,7 +261,14 @@ probe_m32() {
 #include <thread>
 int main() { return (int)std::filesystem::path("/").native().size(); }
 PROBE
-    if g++ -m32 -std=c++17 -static -static-libgcc -static-libstdc++ \
+    local extra=""
+    local d
+    if [ ! -e /usr/include/asm ]; then
+        for d in i386-linux-gnu x86_64-linux-gnu; do
+            [ -d "/usr/include/$d/asm" ] && { extra="-idirafter /usr/include/$d"; break; }
+        done
+    fi
+    if g++ -m32 -std=c++17 -static -static-libgcc -static-libstdc++ $extra \
            /tmp/.m32probe.cpp -o /tmp/.m32probe 2>/dev/null; then
         HAVE_M32=1
     else
@@ -526,7 +533,23 @@ build_row() {
     # would then be published under a name promising the feature it lacks.
     [ "$cuda" = ON ] && args+=(-DCFD_ENABLE_CUDA_EXPLICIT=ON -DCFD_CUDA_ARCHITECTURES="$archs")
     [ "$omp" = ON ] && args+=(-DCFD_ENABLE_OPENMP_EXPLICIT=ON)
-    [ "$arch" = "x86" ] && args+=(-DCMAKE_CXX_FLAGS=-m32 -DCMAKE_C_FLAGS=-m32)
+    if [ "$arch" = "x86" ]; then
+        local m32flags="-m32"
+        # gcc -m32 searches only /usr/include for asm/, which it reaches through
+        # the /usr/include/asm symlink. Where that is missing, -idirafter puts
+        # the multiarch tree last in the search order: it supplies asm/ and
+        # cannot shadow the 32-bit bits/ headers ahead of it.
+        local d
+        if [ ! -e /usr/include/asm ]; then
+            for d in i386-linux-gnu x86_64-linux-gnu; do
+                if [ -d "/usr/include/$d/asm" ]; then
+                    m32flags="$m32flags -idirafter /usr/include/$d"
+                    break
+                fi
+            done
+        fi
+        args+=("-DCMAKE_CXX_FLAGS=$m32flags" "-DCMAKE_C_FLAGS=$m32flags")
+    fi
     # A cross build has to be told, or CMake probes the host compiler and
     # produces an x86-64 binary under an arm64 name. On an ARM host ARM_CXX is
     # the native g++ and this is a no-op that costs one variable.
