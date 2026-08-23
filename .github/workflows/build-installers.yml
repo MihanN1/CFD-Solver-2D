@@ -20,6 +20,12 @@
 # the host architecture does not come into it. The Windows and Linux installers
 # do need their own runners - iscc is a Windows program and makeself wants a
 # Linux shell.
+#
+# Where they go: installer_tag. This project publishes two releases per
+# version - v<ver> for the 68 portable archives and v<ver>-installers for
+# these three - because the portable one changes whenever a single row is
+# rebuilt and these are cut from whatever it ended up holding. Set
+# installer_tag to v<ver> instead if you would rather have one release.
 
 name: Build the installers
 
@@ -36,8 +42,20 @@ on:
           Leave empty to use the release of tag v<version>.
         required: false
         default: ""
-      attach:
-        description: Upload the finished installers to the tag's release
+      installer_tag:
+        description: >
+          Tag to publish the finished installers to, created if it does not
+          exist. "v0.2-installers" keeps them as a release of their own;
+          "v0.2" puts them beside the portable archives. Leave empty to
+          publish nothing and just collect the artifact.
+        required: false
+        default: ""
+      refresh_ui_archives:
+        description: >
+          Re-upload the icon-stamped "-ui" archives to the PORTABLE release
+          (v<version>). Only needed when those were published without the
+          icon on Fluid Solver UI.exe - merge-ui-release.py already stamps
+          them, so normally leave this off.
         type: boolean
         default: false
 
@@ -154,8 +172,10 @@ jobs:
         shell: bash
         run: python scripts/stamp-ui-icon.py "${{ inputs.version }}" --release zips
 
-      - name: Push the fixed archives back to the release
-        if: inputs.attach
+      # Goes to the PORTABLE release, not the installer one: these are the
+      # portable "-ui" archives with the icon put on the UI executable.
+      - name: Push the fixed archives back to the portable release
+        if: inputs.refresh_ui_archives
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -401,10 +421,24 @@ jobs:
           path: installers/
           if-no-files-found: error
 
-      - name: Attach them to the tag's release
-        if: inputs.attach
+      # A release of their own by default: the portable release is 68 files
+      # that change whenever a row is rebuilt, and these are three files cut
+      # from it. Point installer_tag at v<version> instead to put them
+      # together. Either way the tag is created if it is not there, so this
+      # does not need the release to exist first.
+      - name: Publish the installers
+        if: inputs.installer_tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           V: ${{ inputs.version }}
-        run: gh release upload "v$V" installers/* --clobber
+          TAG: ${{ inputs.installer_tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Fluid Solver $V installers" \
+              --notes "Installers for Fluid Solver $V. One per platform, each carrying every architecture and every accelerator variant that was built; it reads the machine and installs the fastest build that machine can run. The portable archives are in the v$V release."
+          fi
+          gh release upload "$TAG" installers/* --clobber
+          echo "Installers published to $TAG" >> "$GITHUB_STEP_SUMMARY"

@@ -176,82 +176,115 @@ other platforms' `dist\` output in beside yours and rerun with
 `--only=package` / `-Only Package` to assemble one release folder out of all of
 them.
 
-### 2. Publish the portable release
+### 2. Build the UI rows
 
-At this point `release/0.2/` holds the 34 solver rows, the two source archives,
-the README and the checksums. That is a complete, publishable release on its
-own — it just has no UI in it yet.
+The UI is a separate repository with its own matrix, and it does not know this
+one exists. Build it at the same time as step 1 — neither waits for the other:
 
-```bash
-gh release create v0.2 --title "Fluid Solver 0.2" --notes-file release/RELEASE-NOTES-0.2.md
-gh release upload v0.2 release/0.2/*
-```
+> in the UI repository: **Actions → Build every UI binary → Run workflow**,
+> version `0.2`
+>
+> or push a tag `ui-v0.2`, which builds the same matrix and publishes the
+> archives to that tag's release.
 
-### 3. Add the UI
-
-The UI is a separate repository with its own build matrix. Build it there:
+By hand instead:
 
 ```bash
 python3 scripts/build-ui-release.py --version 0.2          # in the UI repo
 ```
 
-That produces `dist-ui/Fluid Solver 0.2 <platform>-<arch> <feature>-ui.zip` —
-the UI executable on its own, not a complete install.
+Either way the result is `dist-ui/Fluid Solver 0.2 <platform>-<arch>
+<feature>-ui.zip` — **the UI executable on its own, not a complete install.**
+34 of them, the same 34 names the solver produces.
 
-Bring those files over, put them in `release/0.2/` (or anywhere, and point
-`--ui-dir` at it), and:
+**The version is not decoration.** It is the key `merge-ui-release.py` pairs the
+two halves by: a UI archive that says `0.1` and a release that says `0.2` do not
+pair, and the merge stops with "no UI builds found" rather than quietly writing
+34 archives with no UI in them. So build the UI with the same version as the
+solver. `python3 scripts/build-ui-release.py --list | wc -l` should print `34`
+before you start; anything else means the two repositories have drifted.
+
+(The version also goes into the executable's own Windows version block, which is
+what Explorer's Properties dialog and the SmartScreen prompt read. An unsigned
+download with no product name and no version is one of the things that makes
+SmartScreen shout the loudest.)
+
+### 3. Merge the UI into the solver rows
+
+This is the step that used to be thirty manual unzip-drop-rezip cycles.
+Bring the UI archives over, put them in a folder of **their own**, and:
 
 ```bash
-python3 scripts/merge-ui-release.py 0.2
+# in the solver repository. release/0.2/ holds the 34 solver rows.
+python3 scripts/merge-ui-release.py 0.2 --ui-dir dist-ui --check   # always first
+python3 scripts/merge-ui-release.py 0.2 --ui-dir dist-ui
 ```
 
 For every solver row it finds a UI build and writes
 `Fluid Solver 0.2 <platform>-<arch> <feature>-ui.zip` — the solver archive with
 the UI laid into it, the UI's own `README.md` and `BUILD_INFO.md` renamed so
-they do not overwrite the solver's, `output/` present, Unix permissions
-correct. On Windows it also stamps the project icon onto `Fluid Solver UI.exe`,
-which the UI build does not carry one of. Then it rewrites `SHA256SUMS.txt`.
+they do not overwrite the solver's, `output/` present, Unix permissions written
+explicitly (a zip built on Windows carries no permission bits at all, so without
+this the Linux rows unpack into a UI that will not run). On Windows it also
+stamps the project icon onto `Fluid Solver UI.exe`, which the UI build does not
+carry one of. Then it rewrites `SHA256SUMS.txt`.
 
 It accepts three shapes of input, whichever is convenient:
 
 | what you have | where to put it |
 |---|---|
-| the UI repo's `-ui.zip` archives | `release/0.2/`, or `--ui-dir <folder>` |
+| the UI repo's `-ui.zip` archives | `--ui-dir <folder>` |
 | a folder per row | `<ui-dir>/<platform>-<arch>/<feature>/` |
 | one folder per architecture | `<ui-dir>/<platform>-<arch>/` |
 
 The third one is the usual case: AVX2 and OpenMP change the UI's machine code
-and CUDA does not, so 22 UI builds cover all 34 names. A row with no UI build
-of its own falls back to the one with the same AVX2 and OpenMP state, and rows
-with nothing at all are listed at the end rather than silently missing.
+and CUDA does not, so 22 UI builds cover all 34 names. A row with no UI build of
+its own falls back to the one with the same AVX2 and OpenMP state, and rows with
+nothing at all are listed at the end rather than silently missing.
 
-> The UI repository's own `FEATURES` table still lists only x64, x86 and the
-> two Macs — the arm64 rows were added to the solver in 0.2 and have no UI
-> counterpart yet. Until they do, `merge-ui-release.py` reports
-> `windows-arm64` and `linux-arm64` as having no UI build and writes the other
-> rows anyway, and the installers offer no UI on ARM. That is a hole to fill in
-> the UI repository, not here.
+**Use `--ui-dir`, not the release folder.** The UI archives are named exactly
+what the merged archives are named. Merging in place does work — the solver
+files are written last, so re-running picks up a rebuilt solver rather than
+keeping a stale one — but a merge that dies halfway has then overwritten the
+UI-only archives, and they have to be rebuilt.
 
-`--check` prints what it would do and writes nothing.
+`release/0.2/` now holds 68 archives: 34 solver, 34 solver-plus-UI.
 
-Then upload the new archives:
+### 4. Publish the portable release
 
 ```bash
-gh release upload v0.2 release/0.2/*-ui.zip release/0.2/SHA256SUMS.txt --clobber
+gh release create v0.2 --title "Fluid Solver 0.2" \
+   --notes-file release/RELEASE-NOTES-0.2.md
+gh release upload v0.2 release/0.2/*
 ```
 
-### 4. Build the installers
+> **The other order.** Steps 2-4 can be run as publish-then-add instead: put the
+> 34 solver rows up as soon as step 1 finishes, and upload the `-ui.zip`
+> archives with `--clobber` when the UI is ready. That gets something
+> downloadable out earlier, at the cost of a window where the release exists
+> with no UI in it and `SHA256SUMS.txt` covers half of what is there. Pick one;
+> do not half-do both.
 
-The installers are cut **from the published release**, not from a build. That
-is deliberate: they have to contain exactly what was published, UI archives
-included, and no build produces those.
+### 5. Build the installers
+
+The installers are cut **from the published release**, not from a build. That is
+deliberate: they have to contain exactly what was published, UI archives
+included, and no build produces those. So step 4 has to have happened, `-ui`
+archives and all — an installer built before them comes out with no UI
+component, and the workflow says so with a warning rather than an error, because
+building without the UI on purpose is a real thing to want.
 
 In CI:
 
 > **Actions → Build the installers → Run workflow**, version `0.2`
 >
-> Leave `run_id` empty to pull the assets of tag `v0.2`. Tick `attach` to
-> upload the finished installers back to that release.
+> Leave `run_id` empty to pull the assets of tag `v0.2`.
+>
+> `installer_tag` is where the finished installers go. Leave it empty to publish
+> nothing and just collect the artifact; set it to a tag of its own —
+> `v0.2-installers` — to keep the installers as a separate release; set it to
+> `v0.2` to put them alongside the portable files. The tag is created if it does
+> not exist.
 
 By hand:
 
@@ -271,20 +304,34 @@ pwsh -File scripts\make-release.ps1 -Version 0.2 -Only Installers
 pwsh -File scripts\make-release.ps1 -Version 0.2 -Only Installers -PerArch
 ```
 
-Upload them the same way:
+### 6. Publish the installers
+
+As their own release, which is what `installer_tag` does for you in CI. By hand,
+or from a downloaded artifact:
 
 ```bash
-gh release upload v0.2 "release/0.2/Fluid Solver 0.2 windows setup.exe" \
-                       "release/0.2/Fluid-Solver-0.2-linux.run" \
-                       "release/0.2/Fluid Solver 0.2 macos.pkg" --clobber
+gh release create v0.2-installers --title "Fluid Solver 0.2 installers" \
+   --notes "Installers for Fluid Solver 0.2. The portable archives are in the v0.2 release."
+gh release upload v0.2-installers \
+   "release/0.2/Fluid Solver 0.2 windows setup.exe" \
+   "release/0.2/Fluid-Solver-0.2-linux.run" \
+   "release/0.2/Fluid Solver 0.2 macos.pkg" --clobber
 ```
 
-### 5. Release notes
+Two releases per version is a deliberate split, not an accident: the portable
+one is 68 files and changes whenever a row is rebuilt, the installer one is
+three files cut from it. Say in each one's notes where the other is, because
+nothing on the GitHub releases page does that for you.
 
-`release/RELEASE-NOTES-0.2.md`, and it is what `gh release create --notes-file`
-publishes. The 0.1 notes were a guide to using the program; from 0.2 on they
-are a record of what changed and how the new things work. The README is the
-guide.
+### Where the release notes come from
+
+`release/RELEASE-NOTES-0.2.md`, written before step 4, because that is what
+`gh release create --notes-file` publishes. The 0.1 notes were a guide to using
+the program; from 0.2 on they are a record of what changed and how the new
+things work. The README is the guide.
+
+Both packaging scripts copy it, and `RELEASE-GUIDE.md`, into `release/<version>/`
+so the folder explains itself later.
 
 ---
 
