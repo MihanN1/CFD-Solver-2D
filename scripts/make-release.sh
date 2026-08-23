@@ -235,10 +235,22 @@ ensure_cmake() {
 }
 
 HAVE_M32=0
+# C++, <filesystem> and a static link, because that is what the rows actually
+# do. A plain C "int main(){}" passes with gcc-multilib alone and then every
+# row dies on asm/errno.h, which comes from libc6-dev-i386.
 probe_m32() {
-    echo 'int main(){return 0;}' > /tmp/.m32probe.c
-    if gcc -m32 /tmp/.m32probe.c -o /tmp/.m32probe 2>/dev/null; then HAVE_M32=1; else HAVE_M32=0; fi
-    rm -f /tmp/.m32probe /tmp/.m32probe.c
+    cat > /tmp/.m32probe.cpp <<'PROBE'
+#include <filesystem>
+#include <thread>
+int main() { return (int)std::filesystem::path("/").native().size(); }
+PROBE
+    if g++ -m32 -std=c++17 -static -static-libgcc -static-libstdc++ \
+           /tmp/.m32probe.cpp -o /tmp/.m32probe 2>/dev/null; then
+        HAVE_M32=1
+    else
+        HAVE_M32=0
+    fi
+    rm -f /tmp/.m32probe /tmp/.m32probe.cpp
 }
 
 # The aarch64 rows. On an ARM machine the native compiler is the one; anywhere
@@ -303,7 +315,14 @@ ensure_tools_linux() {
         local why=""
         probe_m32
         if [ "$HAVE_M32" = 0 ]; then
-            why="$(apt_install gcc-multilib g++-multilib)"
+            # gcc-multilib alone gives a 32-bit compiler with no 32-bit
+            # headers or C++ runtime. libc6-dev-i386 carries asm/ and bits/;
+            # lib32stdc++ carries the static libstdc++ the rows link.
+            gccmajor="$(g++ -dumpversion 2>/dev/null | cut -d. -f1)"
+            why="$(apt_install gcc-multilib g++-multilib libc6-dev-i386 \
+                               "lib32stdc++-${gccmajor}-dev")"
+            [ "$HAVE_M32" = 0 ] && probe_m32
+            [ "$HAVE_M32" = 0 ] && why="$(apt_install lib32stdc++6 lib32gcc-s1)"
             probe_m32
         fi
         if [ "$HAVE_M32" = 1 ]; then say "ok"
