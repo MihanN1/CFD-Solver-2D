@@ -1,34 +1,5 @@
 # Changelog
 
-## 2026-08-24 00:08 — Fix manual-build guidance and Linux prompts
-
-Status:
-- Written
-- Tested: static workflow assertions
-
-Changed:
-- `C:\Users\alans\3D Objects\.git\Solve this problem\CFD-Solver-2D-GUI-part_2\CFD-Solver-2D-GUI-part_2\.github\workflows\build-ui-all.yml`
-  - Documented that `workflow_dispatch` must exist on GitHub's default branch for the **Run workflow** button to appear.
-  - Added `TZ=Etc/UTC` to both noninteractive Linux package installations.
-  - Renamed the visible step from `aarch64` to `arm64`; valid GNU `aarch64-*` tool identifiers remain unchanged.
-
-Cause:
-- The workflow exists only in the UI-branch package, while GitHub requires manually dispatched workflows to exist on the repository's default branch.
-- The Linux dependency install could invoke `tzdata` without an explicit timezone.
-- The user-facing architecture label did not match the release's `arm64` naming.
-
-Effect:
-- Linux dependency installation has a deterministic noninteractive UTC timezone.
-- The workflow displays `arm64` while retaining correct compiler names.
-- Default-branch placement is explicit instead of being incorrectly described as UI-branch-only.
-
-Validation:
-- Exact workflow assertions: `workflow_dispatch=1`, UTC/noninteractive installs `=2`, `arm64` label `=1`, old label `=0`, tabs `=0`.
-- Result: passed.
-
-Remaining:
-- The extracted package has no `.git` metadata or remote. The workflow must still be committed to the actual GitHub default branch, with write access, before the **Run workflow** button can be verified.
-
 ## 2026-08-21 17:35 — Add full UI release matrix and ./output default
 
 Status:
