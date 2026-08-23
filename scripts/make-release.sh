@@ -238,7 +238,24 @@ HAVE_M32=0
 # C++, <filesystem> and a static link, because that is what the rows actually
 # do. A plain C "int main(){}" passes with gcc-multilib alone and then every
 # row dies on asm/errno.h, which comes from libc6-dev-i386.
+# gcc -m32 does not search /usr/include/i386-linux-gnu; the kernel headers
+# reach it only through the /usr/include/asm symlink, which is missing on some
+# images and is dropped by "dpkg --add-architecture i386". x86 and x86_64 share
+# the same arch/x86 uapi tree, so either target is correct, and 64-bit builds
+# find their own multiarch copy first and never reach this.
+ensure_asm_link() {
+    [ -e /usr/include/asm ] && return 0
+    local d
+    for d in i386-linux-gnu x86_64-linux-gnu; do
+        if [ -d "/usr/include/$d/asm" ]; then
+            $SUDO ln -sfn "$d/asm" /usr/include/asm 2>/dev/null && return 0
+        fi
+    done
+    return 1
+}
+
 probe_m32() {
+    ensure_asm_link
     cat > /tmp/.m32probe.cpp <<'PROBE'
 #include <filesystem>
 #include <thread>
@@ -320,7 +337,7 @@ ensure_tools_linux() {
             # lib32stdc++ carries the static libstdc++ the rows link.
             gccmajor="$(g++ -dumpversion 2>/dev/null | cut -d. -f1)"
             why="$(apt_install gcc-multilib g++-multilib libc6-dev-i386 \
-                               "lib32stdc++-${gccmajor}-dev")"
+                               linux-libc-dev "lib32stdc++-${gccmajor}-dev")"
             [ "$HAVE_M32" = 0 ] && probe_m32
             [ "$HAVE_M32" = 0 ] && why="$(apt_install lib32stdc++6 lib32gcc-s1)"
             probe_m32
