@@ -4,6 +4,15 @@ name: Build every UI binary
 # A push to GUI-part_2 starts the full 34-archive build automatically.
 # A tag ui-vX.Y builds the same matrix and publishes the archives to a GitHub Release.
 on:
+  # Run it by hand from the Actions tab. Without this the only way to rebuild
+  # the matrix is to push another commit, which is a silly thing to have to do
+  # when a runner died or a version needs changing.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: The version that goes into every archive name
+        default: "0.2"
+        required: true
   push:
     branches:
       - GUI-part_2
@@ -27,6 +36,8 @@ jobs:
 
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == ui-v* ]]; then
             version="${GITHUB_REF_NAME#ui-v}"
+          elif [[ -n "${{ inputs.version }}" ]]; then
+            version="${{ inputs.version }}"
           else
             version="0.2"
           fi
