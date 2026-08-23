@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(CFDMaskUIOptimized
-    VERSION 0.1.0
+    VERSION 0.2.0
     LANGUAGES C CXX
 )
 
@@ -108,6 +108,7 @@ add_library(mask_ui_core STATIC
     src/NumericInput.cpp
     src/SectionAdapter.cpp
     src/tiny_obj_loader_impl.cpp
+    src/TrayIcon.cpp
     src/VtkFrame.cpp
     src/VelocityOverlay.cpp
 )
@@ -240,6 +241,17 @@ target_link_libraries(cfd_mask_ui_optimized
         SFML::Graphics
 )
 
+if(WIN32)
+    # shell32 the tray icon, ole32 ITaskbarList3 (the progress on the taskbar
+    # button), user32 the hidden window the tray posts its clicks to.
+    target_link_libraries(cfd_mask_ui_optimized PRIVATE shell32 ole32 user32)
+    target_link_libraries(mask_ui_core PUBLIC shell32 ole32 user32)
+else()
+    # The tray thread, and fork/exec's waitpid.
+    find_package(Threads REQUIRED)
+    target_link_libraries(mask_ui_core PUBLIC Threads::Threads)
+endif()
+
 target_compile_definitions(cfd_mask_ui_optimized
     PRIVATE
         CFD_SOLVER_EXE="${CFD_SOLVER_EXE_PATH}"
@@ -310,6 +322,7 @@ if(BUILD_TESTING)
         VelocityOverlayTests
         SectionAdapterTests
         GeometryProcessorTests
+        ContinuationTests
     )
         add_mask_ui_test(${MASK_UI_TEST})
     endforeach()

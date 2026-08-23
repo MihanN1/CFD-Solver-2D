@@ -36,6 +36,29 @@ struct FluidSolverRunConfig {
     double sliceAngleZ = 0.0;
     double sliceRotation = 0.0;
     bool invertSection = false;
+
+    // ---- continuing an earlier run ----------------------------------------
+    // restartFile is a solution_*.vtk, or the folder holding them, in which
+    // case the solver takes the newest. The grid and the geometry come out of
+    // the frame, so neither is asked for again - and the model file does not
+    // even have to still exist.
+    bool restart = false;
+    std::filesystem::path restartFile;
+    // Seconds to add to the time the frame stopped at. Zero means "use
+    // totalTime as given", which is the older way of saying the same thing and
+    // easier to get wrong.
+    double addTime = 0.0;
+
+    // ---- the 0.2 runtime switches -----------------------------------------
+    // A 0.1 solver rejects any argument it does not know and exits, so these
+    // are only put on the command line when the solver is new enough to have
+    // them. supportsRuntimeSwitches is what the UI sets after reading the
+    // version marker out of the executable.
+    bool supportsRuntimeSwitches = false;
+    bool useAvx2 = true;
+    bool useOpenMp = true;
+    int threads = 0;          // 0 = every core
+    bool solverTray = true;   // the solver's own tray icon and progress
 };
 
 bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,

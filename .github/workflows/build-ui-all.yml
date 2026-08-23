@@ -1,7 +1,7 @@
 name: Build every UI binary
 
 # This workflow intentionally lives only in the UI branch.
-# A push to GUI-part_2 starts the full 30-archive build automatically.
+# A push to GUI-part_2 starts the full 34-archive build automatically.
 # A tag ui-vX.Y builds the same matrix and publishes the archives to a GitHub Release.
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == ui-v* ]]; then
             version="${GITHUB_REF_NAME#ui-v}"
           else
-            version="0.1"
+            version="0.2"
           fi
 
           if [[ -z "$version" ]]; then
@@ -40,7 +40,7 @@ jobs:
           echo "Building UI release version: $version"
 
   windows:
-    name: Windows x64 + x86
+    name: Windows x64 + x86 + arm64
     needs: version
     runs-on: windows-2022
     timeout-minutes: 90
@@ -63,6 +63,7 @@ jobs:
             --generator "Visual Studio 17 2022" `
             --arch x64 `
             --arch x86 `
+            --arch arm64 `
             --output dist-ui
 
       - name: Upload Windows archives
@@ -74,7 +75,7 @@ jobs:
           retention-days: 14
 
   linux:
-    name: Linux x64 + x86
+    name: Linux x64 + x86 + arm64
     needs: version
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -82,7 +83,7 @@ jobs:
       - name: Checkout UI branch/tag
         uses: actions/checkout@v4
 
-      - name: Install Linux x64/x86 build dependencies
+      - name: Install Linux x64/x86/arm64 build dependencies
         shell: bash
         run: |
           set -euo pipefail
@@ -105,6 +106,32 @@ jobs:
             libudev-dev:i386 \
             libgl1-mesa-dev:i386
 
+      # The arm64 rows are cross-built here rather than on an ARM runner, so
+      # every Linux row comes out of the same image and starts on the same
+      # range of distributions. SFML needs its X11 and GL headers for the
+      # target architecture too, which is what the :arm64 packages are.
+      - name: Install the aarch64 cross toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo dpkg --add-architecture arm64
+          # The default sources only serve amd64/i386; arm64 lives on ports.
+          sudo sed -i 's/^deb \(http\|mirror\)/deb [arch=amd64,i386] \1/' \
+            /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe" |
+            sudo tee /etc/apt/sources.list.d/arm64-ports.list
+          echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe" |
+            sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
+          sudo apt-get update
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
+            crossbuild-essential-arm64 \
+            libx11-dev:arm64 \
+            libxrandr-dev:arm64 \
+            libxcursor-dev:arm64 \
+            libxi-dev:arm64 \
+            libudev-dev:arm64 \
+            libgl1-mesa-dev:arm64
+
       - name: Show tool versions
         shell: bash
         run: |
@@ -121,6 +148,7 @@ jobs:
             --version "${{ needs.version.outputs.value }}" \
             --arch x64 \
             --arch x86 \
+            --arch arm64 \
             --output dist-ui
 
       - name: Upload Linux archives
@@ -220,7 +248,7 @@ jobs:
           retention-days: 14
 
   package:
-    name: Verify and collect all 30 archives
+    name: Verify and collect all 34 archives
     needs:
       - version
       - windows
@@ -241,7 +269,7 @@ jobs:
           merge-multiple: true
           path: release/${{ needs.version.outputs.value }}
 
-      - name: Verify exact 30-archive matrix and finalize release
+      - name: Verify the exact archive matrix and finalize release
         shell: bash
         run: |
           set -euo pipefail

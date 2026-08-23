@@ -9,8 +9,12 @@ trip would cost more than it saves.
 
 So a row's AVX2 and OpenMP state selects a build, and its CUDA state selects
 only the name. One binary therefore serves the "-cuda" row and the row without
-it, which is what keeps this to 22 builds for the exact 30 archive names the
+it, which is what keeps this to 26 builds for the exact 34 archive names the
 Fluid Solver release pairs against.
+
+ARM64 was added in 0.2, on Windows and Linux, and carries neither AVX2 - an x86
+instruction set - nor CUDA. On Windows it is a cross build (MSVC "-A ARM64");
+on Linux it is native on an ARM host and the aarch64 cross toolchain otherwise.
 """
 
 from __future__ import annotations
@@ -34,18 +38,22 @@ FEATURES = {
         "cuda", "omp-cuda", "omp", "plain",
     ],
     ("windows", "x86"): ["avx2", "avx2-omp", "omp", "plain"],
+    # No AVX2 on ARM - it is an x86 instruction set - and no CUDA toolkit for
+    # Windows on ARM either, so the two names are all there are.
+    ("windows", "arm64"): ["omp", "plain"],
     ("linux", "x64"): [
         "avx2", "avx2-cuda", "avx2-omp", "avx2-omp-cuda",
         "cuda", "omp-cuda", "omp", "plain",
     ],
     ("linux", "x86"): ["avx2", "avx2-omp", "omp", "plain"],
+    ("linux", "arm64"): ["omp", "plain"],
     ("macos", "arm64"): ["omp", "plain"],
     ("macos", "x64"): ["avx2", "avx2-omp", "omp", "plain"],
 }
 
 PLATFORM_ARCHES = {
-    "windows": ["x64", "x86"],
-    "linux": ["x64", "x86"],
+    "windows": ["x64", "x86", "arm64"],
+    "linux": ["x64", "x86", "arm64"],
     "macos": ["arm64", "x64"],
 }
 
@@ -119,6 +127,21 @@ def linux32_libgomp_present() -> bool:
     return Path(found).is_file()
 
 
+def aarch64_toolchain() -> tuple[str, str] | None:
+    """(cc, cxx) for aarch64: the native pair on an ARM host, the cross pair
+    otherwise. None when neither is installed."""
+    if platform.machine().lower() in {"aarch64", "arm64"}:
+        cc = shutil.which("gcc") or shutil.which("cc")
+        cxx = shutil.which("g++") or shutil.which("c++")
+        return (cc, cxx) if cc and cxx else None
+    for triple in ("aarch64-linux-gnu", "aarch64-none-linux-gnu"):
+        cc = shutil.which(f"{triple}-gcc")
+        cxx = shutil.which(f"{triple}-g++")
+        if cc and cxx:
+            return cc, cxx
+    return None
+
+
 class RowUnavailable(RuntimeError):
     """This row cannot be built here. Others still can."""
 
@@ -155,13 +178,31 @@ def cmake_args(system: str, arch: str, avx2: bool, openmp: bool,
                 "sudo apt-get install lib32gomp-14-dev")
 
     if system == "windows":
-        args += ["-G", generator, "-A", "x64" if arch == "x64" else "Win32"]
+        # CMake's spelling of the architecture is not the release's: the
+        # generator wants Win32 and ARM64, the file names want x86 and arm64.
+        generator_arch = {"x64": "x64", "arm64": "ARM64"}.get(arch, "Win32")
+        args += ["-G", generator, "-A", generator_arch]
     else:
         args += ["-DCMAKE_BUILD_TYPE=Release"]
         if system == "linux" and arch == "x86":
             # These must be present during compiler detection so CMake chooses
             # i386 multiarch libraries rather than absolute amd64 libraries.
             args += ["-DCMAKE_C_FLAGS=-m32", "-DCMAKE_CXX_FLAGS=-m32"]
+        elif system == "linux" and arch == "arm64":
+            compiler = aarch64_toolchain()
+            if compiler is None:
+                raise RowUnavailable(
+                    "no aarch64 compiler; install it, for example: "
+                    "sudo apt-get install crossbuild-essential-arm64")
+            # A cross build has to be told, or CMake probes the host compiler
+            # and produces an x86-64 binary under an arm64 name. On an ARM host
+            # this is the native compiler and the whole block is a no-op.
+            args += [
+                "-DCMAKE_SYSTEM_NAME=Linux",
+                "-DCMAKE_SYSTEM_PROCESSOR=aarch64",
+                f"-DCMAKE_C_COMPILER={compiler[0]}",
+                f"-DCMAKE_CXX_COMPILER={compiler[1]}",
+            ]
         elif system == "macos":
             args += [
                 "-DCMAKE_OSX_ARCHITECTURES=" +
@@ -207,6 +248,11 @@ def build_binary(system: str, arch: str, avx2: bool, openmp: bool, work: Path,
     # about an eighth off the file the user downloads.
     if system != "windows":
         strip = shutil.which("strip")
+        if (system == "linux" and arch == "arm64" and
+                platform.machine().lower() not in {"aarch64", "arm64"}):
+            # The host strip does not know this object format; its own does,
+            # and where there is none the binary simply keeps its symbols.
+            strip = shutil.which("aarch64-linux-gnu-strip")
         if strip is not None:
             before = binary.stat().st_size
             flags = ["-x"] if system == "macos" else []
@@ -379,7 +425,7 @@ def finalize_release(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", default="0.1")
+    parser.add_argument("--version", default="0.2")
     parser.add_argument("--arch", action="append", choices=["x64", "x86", "arm64"])
     parser.add_argument("--output", default=str(ROOT / "dist-ui"))
     parser.add_argument("--work", default=str(ROOT / ".release-build"))
@@ -387,8 +433,8 @@ def main() -> int:
     # runner in .github is windows-2022, which has no 2026 to find.
     parser.add_argument("--generator", default="Visual Studio 17 2022")
     parser.add_argument("--keep-builds", action="store_true")
-    parser.add_argument("--list", action="store_true", help="print the exact 30 archive names and exit")
-    parser.add_argument("--finalize", metavar="DIR", help="verify all 30 archives and add source/checksums")
+    parser.add_argument("--list", action="store_true", help="print every archive name and exit")
+    parser.add_argument("--finalize", metavar="DIR", help="verify every archive and add source/checksums")
     args = parser.parse_args()
 
     if args.list:

@@ -61,6 +61,11 @@ struct VtkFrame {
     DataRange velocityXRange;
     DataRange velocityYRange;
     DataRange velocityMagnitudeRange;
+    // The same two fields with the outermost half-percent at each end left
+    // out. A colour scale stretched by a handful of cells maps everything else
+    // onto three shades; these are what the view falls back on instead.
+    DataRange pressureTrimmedRange;
+    DataRange velocityMagnitudeTrimmedRange;
     VtkRestartMetadata restart;
     std::vector<std::string> warnings;
 
@@ -156,6 +161,8 @@ struct VtkSeriesCatalog {
     VtkFrame activeFrame;
     DataRange pressureRange;
     DataRange velocityMagnitudeRange;
+    DataRange pressureTrimmedRange;
+    DataRange velocityMagnitudeTrimmedRange;
     std::size_t warningCount = 0;
 };
 

@@ -5,6 +5,7 @@
 #include "NumericInput.hpp"
 #include "GeometryProcessor.hpp"
 #include "SectionAdapter.hpp"
+#include "TrayIcon.hpp"
 #include "VtkFrame.hpp"
 #include "VelocityOverlay.hpp"
 
@@ -16,15 +17,24 @@
 #include <commctrl.h>
 #include <shellapi.h>
 #include <shlobj.h>
+#include <objbase.h>
+#else
+#include <csignal>
+#include <fcntl.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #include <algorithm>
 #include <array>
+#include <cerrno>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstdlib>
+#include <cstring>
 #include <deque>
 #include <filesystem>
 #include <fstream>
@@ -422,6 +432,12 @@ struct ChildProcess {
 #ifdef _WIN32
     HANDLE process = nullptr;
     HANDLE thread = nullptr;
+    DWORD processId = 0;
+#else
+    // fork/exec rather than system(): the arguments carry spaces and the
+    // occasional non-ASCII path, and handing those to a shell is how a run
+    // directory called "Модели 2" turns into four arguments.
+    pid_t process = -1;
 #endif
     bool active = false;
 
@@ -443,7 +459,15 @@ struct ChildProcess {
                 return false;
             }
             if (exitCode == STILL_ACTIVE) {
-                if (!TerminateProcess(process, ERROR_CANCELLED)) {
+                // Ask before killing. The child is in its own process group
+                // (CREATE_NEW_PROCESS_GROUP below) so a Ctrl+Break reaches it
+                // and nothing else; 0.2 and newer take that as "finish the
+                // step, write the frame, exit", which leaves a frame the run
+                // can be continued from. Older builds ignore it and are killed
+                // a moment later, exactly as they were before.
+                GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, processId);
+                if (WaitForSingleObject(process, 4000) != WAIT_OBJECT_0 &&
+                    !TerminateProcess(process, ERROR_CANCELLED)) {
                     if (error != nullptr) {
                         *error = "Cannot stop Fluid Solver. Windows error " +
                             std::to_string(GetLastError()) + ".";
@@ -459,6 +483,28 @@ struct ChildProcess {
             }
         }
 #else
+        if (active && process > 0) {
+            // SIGINT first, not SIGKILL: 0.2 and newer treat it as "finish the
+            // step, write the frame, exit", which leaves a frame the run can be
+            // continued from. Older builds die on it, which is what SIGKILL
+            // would have done anyway. Five seconds, then the hammer.
+            ::kill(process, SIGINT);
+            bool stopped = false;
+            for (int attempt = 0; attempt < 500; ++attempt) {
+                int state = 0;
+                const pid_t result = ::waitpid(process, &state, WNOHANG);
+                if (result == process || result < 0) {
+                    stopped = true;
+                    break;
+                }
+                ::usleep(10000);
+            }
+            if (!stopped) {
+                ::kill(process, SIGKILL);
+                int state = 0;
+                ::waitpid(process, &state, 0);
+            }
+        }
         (void)error;
 #endif
         closeHandles();
@@ -475,6 +521,9 @@ struct ChildProcess {
             CloseHandle(process);
             process = nullptr;
         }
+        processId = 0;
+#else
+        process = -1;
 #endif
         active = false;
     }
@@ -569,7 +618,9 @@ struct ChildProcess {
             nullptr,
             nullptr,
             TRUE,
-            CREATE_NO_WINDOW,
+            // The new process group is what makes a Ctrl+Break in terminate()
+            // reach the solver and nothing else - including this UI.
+            CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
             nullptr,
             runDirectory.c_str(),
             &startup,
@@ -585,14 +636,68 @@ struct ChildProcess {
         }
         process = information.hProcess;
         thread = information.hThread;
+        processId = information.dwProcessId;
         active = true;
         return true;
 #else
-        (void)solverExecutable;
-        (void)arguments;
-        (void)runDirectory;
-        error = "External Fluid Solver launch is implemented for Windows only.";
-        return false;
+        // This used to say "implemented for Windows only", which meant the
+        // Linux and macOS UI builds the release publishes could load frames
+        // and draw them but never actually start a solver. fork/exec is the
+        // same three things CreateProcess does above: redirect the two output
+        // streams into the run directory, change into it, and run.
+        const std::string executablePath = solverExecutable.string();
+        std::vector<std::string> owned;
+        owned.reserve(arguments.size() + 1u);
+        owned.push_back(executablePath);
+        for (const std::string& argument : arguments) {
+            owned.push_back(argument);
+        }
+        std::vector<char*> argv;
+        argv.reserve(owned.size() + 1u);
+        for (std::string& text : owned) {
+            argv.push_back(text.data());
+        }
+        argv.push_back(nullptr);
+
+        const std::string outputFile =
+            (runDirectory / "solver-output.txt").string();
+        const std::string errorFile =
+            (runDirectory / "solver-error.txt").string();
+
+        const pid_t child = ::fork();
+        if (child < 0) {
+            error = "Cannot start Fluid Solver: fork failed (" +
+                std::string(std::strerror(errno)) + ").";
+            return false;
+        }
+        if (child == 0) {
+            // Child. Nothing here may throw or allocate in a way that matters:
+            // every failure ends in _exit, which the parent sees as a non-zero
+            // exit code and reports through solver-error.txt being empty.
+            if (::chdir(runDirectory.c_str()) != 0) {
+                ::_exit(127);
+            }
+            const int nullInput = ::open("/dev/null", O_RDONLY);
+            const int output = ::open(
+                outputFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            const int errors = ::open(
+                errorFile.c_str(), O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (nullInput < 0 || output < 0 || errors < 0) {
+                ::_exit(127);
+            }
+            ::dup2(nullInput, STDIN_FILENO);
+            ::dup2(output, STDOUT_FILENO);
+            ::dup2(errors, STDERR_FILENO);
+            ::close(nullInput);
+            ::close(output);
+            ::close(errors);
+            ::execv(executablePath.c_str(), argv.data());
+            ::_exit(127);
+        }
+
+        process = child;
+        active = true;
+        return true;
 #endif
     }
 
@@ -613,7 +718,26 @@ struct ChildProcess {
         closeHandles();
         return completedCode;
 #else
-        return std::nullopt;
+        int state = 0;
+        const pid_t result = ::waitpid(process, &state, WNOHANG);
+        if (result == 0) {
+            return std::nullopt;   // still running
+        }
+        if (result < 0) {
+            closeHandles();
+            return static_cast<unsigned long>(-1);
+        }
+        unsigned long completedCode = 0;
+        if (WIFEXITED(state)) {
+            completedCode = static_cast<unsigned long>(WEXITSTATUS(state));
+        } else if (WIFSIGNALED(state)) {
+            // A killed solver is a failed one as far as the caller is
+            // concerned, and 128+signal is what a shell would have reported.
+            completedCode =
+                static_cast<unsigned long>(128 + WTERMSIG(state));
+        }
+        closeHandles();
+        return completedCode;
 #endif
     }
 };
@@ -648,6 +772,7 @@ enum ParameterIndex : std::size_t {
     CellsY,
     Cfl,
     TotalTime,
+    AddTime,
     DtUpdateInterval,
     DtSafety,
     CoarseSorOmega,
@@ -657,6 +782,9 @@ enum ParameterIndex : std::size_t {
     MgMinCoarseSize,
     SaveInterval,
     UseCuda,
+    UseAvx2,
+    UseOpenMp,
+    SolverThreads,
     CacheMegabytes,
     ParameterCount
 };
@@ -666,13 +794,15 @@ struct ParameterGroupInfo {
     const char* label;
 };
 
-constexpr std::array<ParameterGroupInfo, 6> PARAMETER_GROUPS{{
+constexpr std::array<ParameterGroupInfo, 8> PARAMETER_GROUPS{{
     {WindSpeed, "FLOW"},
     {SliceX, "GEOMETRY"},
     {DomainX, "DOMAIN / GRID"},
     {Cfl, "TIME"},
     {CoarseSorOmega, "PRESSURE / MULTIGRID"},
-    {SaveInterval, "OUTPUT / VIEW"}
+    {SaveInterval, "OUTPUT"},
+    {UseCuda, "ACCELERATION"},
+    {CacheMegabytes, "UI"}
 }};
 
 const char* parameterKey(std::size_t index) {
@@ -680,9 +810,10 @@ const char* parameterKey(std::size_t index) {
         "U0", "nu", "ro",
         "sliceAngleX", "sliceAngleZ", "sliceRotation",
         "Lx", "Ly", "nx", "ny",
-        "CFL", "totalTime", "dtUpdateInterval", "dtSafety",
+        "CFL", "totalTime", "addTime", "dtUpdateInterval", "dtSafety",
         "omega", "smootherOmega", "mgIterations", "mgTolerance",
-        "mgMinCoarseSize", "saveInterval", "useCuda", "uiCacheMB"
+        "mgMinCoarseSize", "saveInterval", "useCuda", "useAvx2", "useOpenMP",
+        "threads", "uiCacheMB"
     }};
     return index < keys.size() ? keys[index] : "unknown";
 }
@@ -709,6 +840,8 @@ std::string parameterHelp(std::size_t index) {
         return "CFL controls the advective timestep restriction; valid range is (0, 1].";
     case TotalTime:
         return "Simulation duration in seconds for a new run.";
+    case AddTime:
+        return "Continuation only: seconds to add to the time the chosen frame stopped at. Zero uses Total time as the target instead.";
     case DtUpdateInterval:
         return "How many solver steps elapse between adaptive dt recalculations.";
     case DtSafety:
@@ -727,6 +860,12 @@ std::string parameterHelp(std::size_t index) {
         return "Write one VTK result every N solver steps.";
     case UseCuda:
         return "Requests CUDA in a CUDA-capable build; CPU-only builds force this off.";
+    case UseAvx2:
+        return "Lets the solver use its AVX2 kernels. Off falls back to the scalar path, which is slower and agrees to solver tolerance. Needs Fluid Solver 0.2 or newer.";
+    case UseOpenMp:
+        return "Lets the solver spread its loops over every core. Needs Fluid Solver 0.2 or newer.";
+    case SolverThreads:
+        return "How many threads the solver may use. 0 means every core. Needs Fluid Solver 0.2 or newer.";
     case CacheMegabytes:
         return "Maximum decoded VTK frame cache owned by the UI, in MiB.";
     default:
@@ -1353,7 +1492,16 @@ struct SolverExecutableInfo {
     bool valid = false;
     bool recognized = false;
     bool cudaCapable = false;
+    bool avx2Capable = false;
+    bool openMpCapable = false;
+    // What this solver understands, worked out from its version. A 0.1 build
+    // exits on the first argument it does not know, so every one of these has
+    // to be checked before the argument is put on the command line.
+    bool supportsRuntimeSwitches = false;   // avx2= openmp= threads= tray=
+    bool supportsContinuation = false;      // restart= restartFile= addTime=
+    bool supportsMultipleContours = false;  // more than one closed loop
     std::string version = "unknown";
+    std::string features;
     std::string build = "Unknown build";
     std::string detail;
 };
@@ -1385,6 +1533,83 @@ bool binaryContainsUtf16Ascii(const std::filesystem::path& path,
     return binaryContains(path, encoded);
 }
 
+// The printable run of characters that follows a marker inside the executable.
+// Fluid Solver 0.2 and newer carry "FluidSolverVersion=0.2" and
+// "FluidSolverFeatures=avx2-omp-cuda" as single literals precisely so this
+// works, and prints the same two lines for "--version" so the two can never
+// disagree. Older builds have neither, and the empty string is how that is
+// reported.
+std::string binaryValueAfter(const std::filesystem::path& path,
+                             const std::string& marker) {
+    std::ifstream input(path, std::ios::binary);
+    if (!input.is_open()) {
+        return {};
+    }
+    const std::string bytes{
+        std::istreambuf_iterator<char>(input),
+        std::istreambuf_iterator<char>()
+    };
+    const std::size_t at = bytes.find(marker);
+    if (at == std::string::npos) {
+        return {};
+    }
+    std::string value;
+    for (std::size_t index = at + marker.size();
+         index < bytes.size() && value.size() < 32u;
+         ++index) {
+        const unsigned char character =
+            static_cast<unsigned char>(bytes[index]);
+        // Versions and feature tags are digits, dots and dashes. Anything else
+        // ends the value - including the terminating zero.
+        if (std::isalnum(character) || character == '.' || character == '-') {
+            value.push_back(static_cast<char>(character));
+        } else {
+            break;
+        }
+    }
+    return value;
+}
+
+// -1 when a < b, 0 when equal, 1 when a > b, compared number by number so
+// "0.10" is newer than "0.9" rather than alphabetically older.
+int compareSolverVersions(const std::string& first, const std::string& second) {
+    const auto numbers = [](const std::string& text) {
+        std::vector<long> parts;
+        long current = 0;
+        bool inNumber = false;
+        for (const char character : text) {
+            if (character >= '0' && character <= '9') {
+                current = current * 10 + (character - '0');
+                inNumber = true;
+            } else if (character == '.') {
+                parts.push_back(inNumber ? current : 0);
+                current = 0;
+                inNumber = false;
+            } else {
+                break;
+            }
+        }
+        if (inNumber) {
+            parts.push_back(current);
+        }
+        return parts;
+    };
+    const std::vector<long> left = numbers(first);
+    const std::vector<long> right = numbers(second);
+    const std::size_t count = std::max(left.size(), right.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        const long a = index < left.size() ? left[index] : 0;
+        const long b = index < right.size() ? right[index] : 0;
+        if (a < b) {
+            return -1;
+        }
+        if (a > b) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 SolverExecutableInfo inspectSolverExecutable(
     const std::filesystem::path& executable) {
     SolverExecutableInfo info;
@@ -1401,20 +1626,60 @@ SolverExecutableInfo inspectSolverExecutable(
         [](unsigned char value) {
             return static_cast<char>(std::tolower(value));
         });
-    const bool correctName = filename == "fluid solver.exe";
+    // "Fluid Solver.exe" on Windows, "Fluid Solver" everywhere else. Insisting
+    // on the .exe meant the UI refused to run a perfectly good Linux or macOS
+    // build - it is the same program, and the release ships it under both
+    // names on purpose.
+    const bool correctName =
+        filename == "fluid solver.exe" || filename == "fluid solver";
     const bool productMarker =
         binaryContainsUtf16Ascii(executable, "Fluid Solver") ||
         binaryContains(executable, "Fluid Solver");
     info.recognized = correctName && productMarker;
-    info.cudaCapable =
-        binaryContains(executable, "MultigridCuda.cu") ||
-        binaryContains(executable, "CUDA error at");
-    if (binaryContainsUtf16Ascii(executable, "0.1.0")) {
-        info.version = "0.1.0";
+
+    // 0.2 and newer say what they are. Everything below is the guesswork that
+    // had to stand in before they did.
+    info.version = binaryValueAfter(executable, "FluidSolverVersion=");
+    info.features = binaryValueAfter(executable, "FluidSolverFeatures=");
+    if (info.version.empty()) {
+        info.version =
+            binaryContainsUtf16Ascii(executable, "0.1.0") ? "0.1.0" : "unknown";
     }
-    info.build = info.cudaCapable
-        ? "AVX2 + OpenMP + CUDA"
-        : "AVX2 + OpenMP";
+
+    if (!info.features.empty()) {
+        const auto hasTag = [&info](const char* tag) {
+            return info.features.find(tag) != std::string::npos;
+        };
+        info.cudaCapable = hasTag("cuda");
+        info.avx2Capable = hasTag("avx2");
+        info.openMpCapable = hasTag("omp");
+        info.build = info.features;
+    } else {
+        info.cudaCapable =
+            binaryContains(executable, "MultigridCuda.cu") ||
+            binaryContains(executable, "CUDA error at");
+        // Nothing in a 0.1 binary says whether AVX2 or OpenMP went in, and
+        // every published 0.1 row that the UI could plausibly be pointed at
+        // had both, so this is what it assumed then and what it keeps
+        // assuming for those.
+        info.avx2Capable = true;
+        info.openMpCapable = true;
+        info.build = info.cudaCapable
+            ? "AVX2 + OpenMP + CUDA"
+            : "AVX2 + OpenMP";
+    }
+
+    // What the solver can be asked to do, rather than what it is made of.
+    // A 0.1 solver stops on the first argument it does not know, so anything
+    // added since has to be held back from it.
+    info.supportsRuntimeSwitches =
+        info.version != "unknown" &&
+        compareSolverVersions(info.version, "0.2") >= 0;
+    info.supportsMultipleContours = info.supportsRuntimeSwitches;
+    info.supportsContinuation =
+        info.version != "unknown" &&
+        compareSolverVersions(info.version, "0.1.1") >= 0;
+
     if (!info.recognized) {
         info.detail =
             "Executable is not recognized as the expected Fluid Solver build.";
@@ -1487,6 +1752,7 @@ public:
               Slider{"Cells ny", "", 8.0, 5000.0, 50.0, true, true},
               Slider{"CFL", "", 0.01, 1.0, 0.5, false, false},
               Slider{"Total time", "s", 0.001, 10000.0, 10.0, false, true},
+              Slider{"Continue: add time", "s", 0.0, 10000.0, 0.0, false, true},
               Slider{"dt update interval", "steps", 1.0, 1000.0, 5.0, true, false},
               Slider{"dt safety", "", 0.01, 1.0, 0.9, false, false},
               Slider{"Coarse SOR omega", "", 0.1, 1.99, 1.85, false, false},
@@ -1496,6 +1762,9 @@ public:
               Slider{"MG minimum coarse size", "cells", 1.0, 512.0, 8.0, true, false},
               Slider{"VTK save interval", "steps", 1.0, 100000.0, 20.0, true, true},
               Slider{"Request CUDA", "", 0.0, 1.0, 1.0, true, false, true},
+              Slider{"Use AVX2", "", 0.0, 1.0, 1.0, true, false, true},
+              Slider{"Use OpenMP", "", 0.0, 1.0, 1.0, true, false, true},
+              Slider{"Solver threads", "", 0.0, 256.0, 0.0, true, false},
               Slider{"VTK cache", "MB", 128.0, 4096.0, 1024.0, true, true}
           } {
         for (Slider& slider : sliders_) {
@@ -1543,6 +1812,14 @@ public:
         window.setMinimumSize(sf::Vector2u{1000u, 800u});
         window.setFramerateLimit(60);
         window_ = &window;
+        windowTitle_ = std::string("CFD Mask UI ") + CFD_MASK_UI_VERSION;
+        // The icon belongs to the window as well as to the tray: without this
+        // the taskbar button and the Alt+Tab list show SFML's default while
+        // Explorer shows the one compiled into the executable.
+        applyWindowIcon();
+        tray_.attach(
+            reinterpret_cast<void*>(window.getNativeHandle()),
+            windowTitle_);
 #ifdef _WIN32
         ScopedFileDropTarget fileDropTarget(window.getNativeHandle());
         if (!fileDropTarget.available()) {
@@ -1661,6 +1938,7 @@ public:
             window.display();
             redrawRequested = false;
         }
+        tray_.detach();
         window_ = nullptr;
         return 0;
     }
@@ -1765,6 +2043,7 @@ private:
         rangeButton_.bounds = {{440.0f, 72.0f}, {144.0f, 36.0f}};
         playbackButton_.bounds = {{592.0f, 72.0f}, {110.0f, 36.0f}};
         runDetailsButton_.bounds = {{710.0f, 72.0f}, {130.0f, 36.0f}};
+        continueRunButton_.bounds = {{848.0f, 72.0f}, {166.0f, 36.0f}};
         resultViewport_ = {
             {20.0f, 122.0f},
             {
@@ -1821,12 +2100,24 @@ private:
         loadConfigButton_.enabled = !solverProcess_.active && !loadingResults;
         revealVtkButton_.enabled = currentExplorerTarget().has_value();
         rangeButton_.enabled = !frames_.empty();
-        rangeButton_.label = useSeriesRange_ ? "Range: Series" : "Range: Frame";
+        rangeButton_.label =
+            std::string("Range: ") + (useSeriesRange_ ? "series" : "frame") +
+            (trimmedRange_ ? " 99%" : " full");
         playbackButton_.enabled = frames_.size() > 1;
         playbackButton_.label = playingFrames_ ? "Pause" : "Play";
         runDetailsButton_.enabled =
             !currentRunDirectory_.empty() || !frames_.empty();
         runDetailsButton_.selected = showRunDetails_;
+        // A frame can be continued from when it carries the state to do it -
+        // 0.1.1 and newer write that into every frame - and when the solver on
+        // hand knows the arguments. Everything else about it is checked when
+        // the button is pressed, where there is somewhere to put the reason.
+        continueRunButton_.enabled =
+            activeFrame_ != nullptr &&
+            activeFrame_->restart.restartCapable &&
+            solverInfo_.valid && solverInfo_.recognized &&
+            solverInfo_.supportsContinuation &&
+            !solverProcess_.active && !loadingResults;
     }
 
     void handleEvent(const sf::Event& event) {
@@ -2105,11 +2396,25 @@ private:
             return;
         }
         if (rangeButton_.hit(position)) {
-            useSeriesRange_ = !useSeriesRange_;
+            // Four states, cycled by one button: series trimmed, series full,
+            // frame trimmed, frame full.
+            if (trimmedRange_) {
+                trimmedRange_ = false;
+            } else {
+                trimmedRange_ = true;
+                useSeriesRange_ = !useSeriesRange_;
+            }
             resultTextureCacheValid_ = false;
-            status_ = useSeriesRange_
-                ? "Result colors use the full VTK series range."
-                : "Result colors use the active frame range.";
+            status_ = std::string("Colours span ") +
+                (useSeriesRange_ ? "the whole series" : "this frame") +
+                (trimmedRange_
+                     ? ", with the outermost 0.5% at each end left out so a "
+                       "few extreme cells cannot flatten the rest."
+                     : ", every value included.");
+            return;
+        }
+        if (continueRunButton_.hit(position)) {
+            continueFromSelectedFrame();
             return;
         }
         if (playbackButton_.hit(position)) {
@@ -2378,6 +2683,7 @@ private:
     }
 
     void update(float elapsed) {
+        pollTrayCommands();
         pollResultCatalog();
         pollSelectedFrame();
         // Playback no longer waits for the loaders to fall idle. They are
@@ -2459,6 +2765,7 @@ private:
             const std::optional<unsigned long> result =
                 solverProcess_.poll();
             if (result.has_value()) {
+                endRunProgress(*result == 0);
                 if (*result == 0) {
                     loadResultFrames();
                 } else {
@@ -2485,19 +2792,215 @@ private:
         syncControlState();
     }
 
-    void refreshSolverProgress() {
-        try {
-            const std::vector<std::filesystem::path> paths =
-                VtkFrameParser::discoverFrames(currentRunDirectory_);
-            status_ =
-                "Fluid Solver is running. Saved " +
-                std::to_string(paths.size()) +
-                " VTK frame(s). Closing the GUI cancels this run.";
-        } catch (const std::exception& exception) {
-            status_ =
-                "Fluid Solver is running. Progress scan failed: " +
-                std::string(exception.what());
+    // The tail of the solver's own stdout, which the UI already redirects into
+    // the run directory. Reading the end of it is cheaper than opening a VTK
+    // frame, works with a 0.1 solver, and gives the one number a progress bar
+    // needs - the simulated time the run has reached.
+    std::optional<double> readSolverSimulatedTime() const {
+        std::ifstream input(
+            currentRunDirectory_ / "solver-output.txt",
+            std::ios::binary);
+        if (!input.is_open()) {
+            return std::nullopt;
         }
+        input.seekg(0, std::ios::end);
+        const std::streamoff size = input.tellg();
+        const std::streamoff window = 8192;
+        input.seekg(size > window ? size - window : 0, std::ios::beg);
+        const std::string tail{
+            std::istreambuf_iterator<char>(input),
+            std::istreambuf_iterator<char>()
+        };
+
+        // "Step 1230, t = 3.71591 s, dt = ..." - the last one wins.
+        std::optional<double> latest;
+        const std::string needle = ", t = ";
+        std::size_t at = tail.find(needle);
+        while (at != std::string::npos) {
+            try {
+                std::size_t consumed = 0;
+                const double value =
+                    std::stod(tail.substr(at + needle.size(), 32), &consumed);
+                if (consumed > 0 && std::isfinite(value)) {
+                    latest = value;
+                }
+            } catch (const std::exception&) {
+            }
+            at = tail.find(needle, at + needle.size());
+        }
+        return latest;
+    }
+
+    void refreshSolverProgress() {
+        std::size_t frameCount = 0;
+        std::string scanProblem;
+        try {
+            frameCount =
+                VtkFrameParser::discoverFrames(currentRunDirectory_).size();
+        } catch (const std::exception& exception) {
+            scanProblem = exception.what();
+        }
+
+        const std::optional<double> reached = readSolverSimulatedTime();
+        runElapsedSeconds_ = reached.value_or(runStartSeconds_);
+        runProgress_ = -1.0;
+        if (reached && runTargetSeconds_ > runStartSeconds_) {
+            runProgress_ = std::clamp(
+                (*reached - runStartSeconds_) /
+                    (runTargetSeconds_ - runStartSeconds_),
+                0.0,
+                1.0);
+        }
+
+        std::string progressText = "Fluid Solver is running";
+        if (runProgress_ >= 0.0) {
+            progressText += " - " +
+                formatValue(runElapsedSeconds_, false, "") + " / " +
+                formatValue(runTargetSeconds_, false, "s") + " (" +
+                std::to_string(static_cast<int>(runProgress_ * 100.0 + 0.5)) +
+                "%)";
+        } else if (reached) {
+            progressText += " - t = " +
+                formatValue(runElapsedSeconds_, false, "s");
+        }
+        progressText += ". " + std::to_string(frameCount) + " frame(s) saved.";
+        if (!scanProblem.empty()) {
+            progressText += " Progress scan failed: " + scanProblem;
+        }
+        runProgressText_ = progressText;
+        status_ = progressText + " Closing the GUI cancels this run.";
+        publishRunProgress();
+    }
+
+    // The same numbers, wherever this platform can show them: the tray tooltip
+    // and the taskbar button on Windows, the window title everywhere else -
+    // which is what the taskbar entry or the Dock label reads there.
+    void publishRunProgress() {
+        const bool running = solverProcess_.active;
+        std::string tooltip = windowTitle_;
+        if (running && !runProgressText_.empty()) {
+            tooltip = runProgressText_;
+        }
+        tray_.setProgress(running, running ? runProgress_ : 0.0, tooltip);
+        if (!tray_.available() && window_ != nullptr) {
+            std::string title = windowTitle_;
+            if (running && runProgress_ >= 0.0) {
+                title += " - " +
+                    std::to_string(
+                        static_cast<int>(runProgress_ * 100.0 + 0.5)) +
+                    "% (" + formatValue(runElapsedSeconds_, false, "") + " / " +
+                    formatValue(runTargetSeconds_, false, "s") + ")";
+            } else if (running) {
+                title += " - running";
+            }
+            if (title != publishedTitle_) {
+                window_->setTitle(title);
+                publishedTitle_ = title;
+            }
+        }
+    }
+
+    void beginRunProgress(double startSeconds, double targetSeconds) {
+        runStartSeconds_ = startSeconds;
+        runTargetSeconds_ = targetSeconds;
+        runElapsedSeconds_ = startSeconds;
+        runProgress_ = targetSeconds > startSeconds ? 0.0 : -1.0;
+        runProgressText_ = "Fluid Solver is starting.";
+        tray_.setSimulationRunning(true);
+        publishRunProgress();
+    }
+
+    void endRunProgress(bool finished) {
+        runProgress_ = -1.0;
+        runProgressText_.clear();
+        tray_.setSimulationRunning(false);
+        publishRunProgress();
+        if (windowHidden_) {
+            // A run that ends while the window is in the tray is the one time
+            // it is worth bringing back unasked: the frames are what the run
+            // was for.
+            setWindowHidden(false);
+        }
+        tray_.notify(
+            "Fluid Solver",
+            finished ? "The simulation finished. The frames are loaded."
+                     : "The simulation stopped early.",
+            !finished);
+    }
+
+    void pollTrayCommands() {
+        for (;;) {
+            const TrayIcon::Command command = tray_.takeCommand();
+            if (command == TrayIcon::Command::None) {
+                return;
+            }
+            switch (command) {
+                case TrayIcon::Command::ShowWindow:
+                    setWindowHidden(false);
+                    break;
+                case TrayIcon::Command::HideWindow:
+                    setWindowHidden(true);
+                    break;
+                case TrayIcon::Command::OpenOutput:
+                    revealVtkLocation();
+                    break;
+                case TrayIcon::Command::StopSimulation:
+                    stopSimulationAndLoadFrames();
+                    break;
+                case TrayIcon::Command::Quit:
+                    if (window_ != nullptr) {
+                        window_->close();
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+    }
+
+    void setWindowHidden(bool hidden) {
+        if (window_ == nullptr) {
+            return;
+        }
+        window_->setVisible(!hidden);
+        if (!hidden) {
+            window_->requestFocus();
+        }
+        windowHidden_ = hidden;
+        tray_.setWindowVisible(!hidden);
+    }
+
+    // SFML draws its own default icon on the taskbar button unless it is told
+    // otherwise, so the one compiled into the executable is loaded and handed
+    // over. Windows only: elsewhere the icon belongs to the .desktop entry or
+    // the .app bundle, which the installers write.
+    void applyWindowIcon() {
+#ifdef _WIN32
+        if (window_ == nullptr) {
+            return;
+        }
+        const HINSTANCE instance = GetModuleHandleW(nullptr);
+        const HICON large = static_cast<HICON>(LoadImageW(
+            instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+            GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
+            LR_DEFAULTCOLOR));
+        const HICON small = static_cast<HICON>(LoadImageW(
+            instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
+            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
+            LR_DEFAULTCOLOR));
+        const HWND handle = window_->getNativeHandle();
+        if (handle == nullptr) {
+            return;
+        }
+        if (large != nullptr) {
+            SendMessageW(handle, WM_SETICON, ICON_BIG,
+                         reinterpret_cast<LPARAM>(large));
+        }
+        if (small != nullptr) {
+            SendMessageW(handle, WM_SETICON, ICON_SMALL,
+                         reinterpret_cast<LPARAM>(small));
+        }
+#endif
     }
 
     void stopSimulationAndLoadFrames() {
@@ -2591,6 +3094,19 @@ private:
         config.sliceAngleZ = parameters.sliceAngleZ;
         config.sliceRotation = parameters.sliceRotation;
         config.invertSection = parameters.invertSection;
+        config.addTime = sliders_[AddTime].value;
+
+        // Only put the 0.2 switches on the command line when the solver has
+        // them: a 0.1 build stops on the first argument it does not know.
+        config.supportsRuntimeSwitches = solverInfo_.supportsRuntimeSwitches;
+        config.useAvx2 = sliders_[UseAvx2].value >= 0.5;
+        config.useOpenMp = sliders_[UseOpenMp].value >= 0.5;
+        config.threads =
+            static_cast<int>(std::lround(sliders_[SolverThreads].value));
+        // The solver's own tray icon would sit next to this one saying the
+        // same thing, so it is turned off for a run the UI started. The
+        // progress is here instead.
+        config.solverTray = false;
         return config;
     }
 
@@ -2634,6 +3150,15 @@ private:
                 } catch (const std::exception&) {
                 }
             };
+        // The grid and the domain come first and are not optional: a
+        // continuation has to run on the frame's grid, and the solver refuses
+        // outright when nx, ny, Lx or Ly differ from what the frame holds.
+        // Leaving them at whatever the setup panel happened to show was why
+        // "continue this run" could only ever work by accident.
+        assignDouble("Lx", DomainX);
+        assignDouble("Ly", DomainY);
+        assignDouble("nx", CellsX);
+        assignDouble("ny", CellsY);
         assignDouble("U0", WindSpeed);
         assignDouble("nu", Viscosity);
         assignDouble("ro", Density);
@@ -3060,13 +3585,19 @@ private:
 
         bool reducedToLargestContour = false;
         const std::size_t originalContourCount = mask.contours.size();
-        if (mask.contours.size() > 1) {
+        // Fluid Solver 0.2 keeps every closed loop the section cut - two
+        // aerofoils side by side stay two aerofoils, and a loop inside another
+        // loop comes out as a hole. Before that it kept the largest and threw
+        // the rest away, so the UI had to ask first and throw them away itself
+        // to keep the preview honest about what would be solved.
+        if (mask.contours.size() > 1 && !solverInfo_.supportsMultipleContours) {
             if (!confirmUseLargestContour(
                     window_->getNativeHandle(), mask.contours.size())) {
                 status_ =
-                    "Run cancelled: current Fluid Solver accepts one closed "
-                    "contour, while the UI detected " +
-                    std::to_string(mask.contours.size()) + ".";
+                    "Run cancelled: Fluid Solver " + solverInfo_.version +
+                    " accepts one closed contour, while the UI detected " +
+                    std::to_string(mask.contours.size()) +
+                    ". Fluid Solver 0.2 takes all of them.";
                 return;
             }
             const auto largest = std::max_element(
@@ -3191,6 +3722,7 @@ private:
         continuationSourceStep_ = -1;
         currentRunRequiresComputedFrame_ =
             requestedConfig.totalTime > 0.0;
+        beginRunProgress(0.0, requestedConfig.totalTime);
         nextSolverProgressUpdate_ =
             std::chrono::steady_clock::now() +
             std::chrono::milliseconds(500);
@@ -3212,7 +3744,10 @@ private:
             (reducedToLargestContour
                  ? "Reduced " + std::to_string(originalContourCount) +
                        " disconnected contours to the largest one. "
-                 : std::string{}) +
+                 : (originalContourCount > 1
+                        ? "All " + std::to_string(originalContourCount) +
+                              " contours go to the solver. "
+                        : std::string{})) +
             "Preview contains " + std::to_string(mask.contours.size()) +
             " solver contour(s) and " +
             std::to_string(mask.solidCellCount) +
@@ -3221,6 +3756,145 @@ private:
                  ? " Projection validation stops the run before saving any "
                    "timestep that exceeds the divergence limit."
                  : "");
+    }
+
+    // Pick up an earlier run where a frame left off.
+    //
+    // Everything that decides the physics comes out of the frame: the grid,
+    // the domain, the solid mask, the velocity and pressure fields. The model
+    // file is not needed and is not asked for - it may not even still exist.
+    // What the person supplies is how much further to go, and that is either
+    // "Continue: add time" seconds past where the frame stopped, or a "Total
+    // time" that is further along than the frame already is.
+    void continueFromSelectedFrame() {
+        if (!activeFrame_) {
+            status_ = "Select a frame to continue from first.";
+            return;
+        }
+        const VtkFrame& frame = *activeFrame_;
+        if (!frame.restart.restartCapable) {
+            status_ =
+                "This frame carries no restart state, so there is nothing to "
+                "continue from. Frames written by Fluid Solver 0.1.1 and newer "
+                "do.";
+            return;
+        }
+        refreshSolverInfo();
+        if (!solverInfo_.valid || !solverInfo_.recognized) {
+            status_ =
+                "Cannot continue: the selected executable is not a recognized "
+                "Fluid Solver build.";
+            return;
+        }
+        if (!solverInfo_.supportsContinuation) {
+            status_ =
+                "Cannot continue: Fluid Solver " + solverInfo_.version +
+                " has no restart arguments. 0.1.1 or newer is needed.";
+            return;
+        }
+
+        const double frameTime = frame.restart.currentTime.value_or(0.0);
+        const double addTime = sliders_[AddTime].value;
+        double target = sliders_[TotalTime].value;
+        if (addTime > 0.0) {
+            target = frameTime + addTime;
+        } else if (target <= frameTime) {
+            status_ =
+                "Nothing to compute: this frame is already at " +
+                formatValue(frameTime, false, "s") +
+                " and Total time is " +
+                formatValue(target, false, "s") +
+                ". Raise Total time, or set \"Continue: add time\".";
+            invalidSlider_ = TotalTime;
+            return;
+        }
+        invalidSlider_.reset();
+        applyCacheBudget();
+
+        FluidSolverRunConfig config = fluidSolverRunConfig();
+        config.restart = true;
+        config.restartFile = frame.sourcePath;
+        config.totalTime = target;
+        config.addTime = addTime;
+
+        std::string error;
+        if (!validateFluidSolverRunConfig(config, error)) {
+            invalidSlider_ = sliderForValidationError(error);
+            status_ = "Cannot continue: " + error;
+            return;
+        }
+
+        const std::filesystem::path runDirectory =
+            createRunDirectory(outputRoot_, error);
+        if (runDirectory.empty()) {
+            status_ = error;
+            return;
+        }
+        std::vector<std::string> arguments;
+        if (!buildFluidSolverArguments(
+                config, runDirectory, arguments, error)) {
+            status_ = "Cannot build continuation arguments: " + error;
+            return;
+        }
+        if (!writeFluidSolverArguments(
+                runDirectory / "solver-arguments.txt", arguments, error)) {
+            status_ = "Cannot write continuation arguments: " + error;
+            return;
+        }
+
+        // The same record a fresh run writes, so a continuation directory can
+        // be read back the same way - and says where it came from.
+        std::ofstream uiRequest(
+            runDirectory / "ui-request.txt",
+            std::ios::out | std::ios::trunc);
+        if (uiRequest.is_open()) {
+            uiRequest << std::setprecision(
+                std::numeric_limits<double>::max_digits10);
+            uiRequest << "continuedFrom=" << frame.sourcePath.u8string() << '\n';
+            uiRequest << "continuedFromStep="
+                      << frame.restart.restartStep.value_or(frame.frameNumber)
+                      << '\n';
+            uiRequest << "continuedFromTime=" << frameTime << '\n';
+            uiRequest << "targetTime=" << target << '\n';
+            uiRequest << "uiVersion=" << CFD_MASK_UI_VERSION << '\n';
+            uiRequest << "solverPath=" << fluidSolverExecutable_.u8string()
+                      << '\n';
+            uiRequest << "solverVersion=" << solverInfo_.version << '\n';
+            uiRequest << "solverBuild=" << solverInfo_.build << '\n';
+        }
+
+        if (!solverProcess_.start(
+                fluidSolverExecutable_, arguments, runDirectory, error)) {
+            status_ = error;
+            return;
+        }
+
+        currentRunDirectory_ = runDirectory;
+        currentRunIsContinuation_ = true;
+        continuationSourceStep_ =
+            frame.restart.restartStep.value_or(frame.frameNumber);
+        currentRunRequiresComputedFrame_ = true;
+        beginRunProgress(frameTime, target);
+        nextSolverProgressUpdate_ =
+            std::chrono::steady_clock::now() +
+            std::chrono::milliseconds(500);
+        frames_.clear();
+        playingFrames_ = false;
+        showRunDetails_ = false;
+        runDetailsText_.clear();
+        activeFrame_.reset();
+        decodedFrameCache_.clear();
+        desiredFrame_.reset();
+        inFlightFrames_.clear();
+        resultTextureCacheValid_ = false;
+        resultsWarning_.clear();
+        selectedFrame_ = 0;
+        status_ =
+            "Continuing from solver step " +
+            std::to_string(continuationSourceStep_) + " at " +
+            formatValue(frameTime, false, "s") + " up to " +
+            formatValue(target, false, "s") +
+            ". The grid and the geometry come from the frame.";
     }
 
     void loadExternalResultInputs(
@@ -3405,6 +4079,8 @@ private:
         startNextPrefetch();
         pressureRange_ = catalog.pressureRange;
         velocityRange_ = catalog.velocityMagnitudeRange;
+        pressureTrimmedRange_ = catalog.pressureTrimmedRange;
+        velocityTrimmedRange_ = catalog.velocityMagnitudeTrimmedRange;
         resultZoom_ = 1.0f;
         resultPan_ = {};
         resultTextureCacheValid_ = false;
@@ -3528,6 +4204,11 @@ private:
         includeDataRange(
             velocityRange_,
             activeFrame_->velocityMagnitudeRange);
+        includeDataRange(
+            pressureTrimmedRange_, activeFrame_->pressureTrimmedRange);
+        includeDataRange(
+            velocityTrimmedRange_,
+            activeFrame_->velocityMagnitudeTrimmedRange);
         resultTextureCacheValid_ = false;
         planAdaptivePrefetch(index);
         status_ = source + " solver step " +
@@ -4248,6 +4929,37 @@ private:
             [](const PreviewTriangle& first, const PreviewTriangle& second) {
                 return first.depth < second.depth;
             });
+
+        // Everything below is drawn through a view whose viewport is the
+        // preview panel, so it is clipped to it. The section plane is a quad
+        // projected from three dimensions and is routinely larger than the
+        // panel when the model is turned edge-on - it used to be drawn over
+        // the parameter list and the buttons beside it. The coordinates are
+        // unchanged: the view covers the same rectangle in window space that
+        // projectPoint already maps into, so this only removes what falls
+        // outside.
+        // A scissor rectangle rather than a second view: it leaves every
+        // coordinate exactly where projectPoint put it and only discards what
+        // falls outside the panel. The results view already clips its frame
+        // the same way.
+        const sf::View savedView = window_->getView();
+        sf::View clippedView = savedView;
+        const sf::Vector2f windowSize{
+            static_cast<float>(std::max(1u, window_->getSize().x)),
+            static_cast<float>(std::max(1u, window_->getSize().y))
+        };
+        clippedView.setScissor({
+            {
+                setupViewport_.position.x / windowSize.x,
+                setupViewport_.position.y / windowSize.y
+            },
+            {
+                setupViewport_.size.x / windowSize.x,
+                setupViewport_.size.y / windowSize.y
+            }
+        });
+        window_->setView(clippedView);
+
         for (const PreviewTriangle& triangle : projected) {
             sf::ConvexShape shape(3);
             for (std::size_t corner = 0; corner < 3; ++corner) {
@@ -4305,6 +5017,10 @@ private:
                 3.5f,
                 CUT_COLOR);
         }
+
+        // Back to the whole window: the legend is positioned inside the panel
+        // already and reads better without the clip's rounding on its edges.
+        window_->setView(savedView);
 
         const sf::Vector2f legendPosition =
             setupViewport_.position + sf::Vector2f{18.0f, 18.0f};
@@ -4481,6 +5197,7 @@ private:
         rangeButton_.draw(*window_, font_);
         playbackButton_.draw(*window_, font_);
         runDetailsButton_.draw(*window_, font_);
+        continueRunButton_.draw(*window_, font_);
 
         sf::RectangleShape background(resultViewport_.size);
         background.setPosition(resultViewport_.position);
@@ -4501,18 +5218,65 @@ private:
         }
     }
 
+    // Which numbers the colour scale is stretched between.
+    //
+    // "Series" is what every frame of the run holds together, so the colours
+    // mean the same thing from one frame to the next; "Frame" rescales to the
+    // frame on screen, which shows more detail and less of the story. The
+    // trimmed pair leave out the outermost half-percent at each end, which is
+    // what keeps one stagnation cell - or one frame caught mid-transient -
+    // from mapping everything else onto three shades. Trimmed series is the
+    // default because that is the view that is readable without being asked
+    // for.
     DataRange resultDisplayRange() const {
         if (!activeFrame_) {
             return {};
         }
-        if (!useSeriesRange_) {
-            return resultQuantity_ == ResultQuantity::Pressure
-                ? activeFrame_->pressureRange
-                : activeFrame_->velocityMagnitudeRange;
+        const bool pressure = resultQuantity_ == ResultQuantity::Pressure;
+        DataRange range;
+        if (useSeriesRange_) {
+            range = trimmedRange_
+                ? (pressure ? pressureTrimmedRange_ : velocityTrimmedRange_)
+                : (pressure ? pressureRange_ : velocityRange_);
+            if (!range.available) {
+                range = pressure ? pressureRange_ : velocityRange_;
+            }
+        } else {
+            range = trimmedRange_
+                ? (pressure ? activeFrame_->pressureTrimmedRange
+                            : activeFrame_->velocityMagnitudeTrimmedRange)
+                : (pressure ? activeFrame_->pressureRange
+                            : activeFrame_->velocityMagnitudeRange);
+            if (!range.available) {
+                range = pressure ? activeFrame_->pressureRange
+                                 : activeFrame_->velocityMagnitudeRange;
+            }
         }
-        return resultQuantity_ == ResultQuantity::Pressure
-            ? pressureRange_
-            : velocityRange_;
+        return range;
+    }
+
+    // The velocity half of resultDisplayRange(), for the arrows - they are
+    // drawn over the pressure view as well, where the display range is a
+    // pressure and means nothing to them.
+    DataRange velocityDisplayRange() const {
+        if (!activeFrame_) {
+            return {};
+        }
+        DataRange range;
+        if (useSeriesRange_) {
+            range = trimmedRange_ ? velocityTrimmedRange_ : velocityRange_;
+            if (!range.available) {
+                range = velocityRange_;
+            }
+        } else {
+            range = trimmedRange_
+                ? activeFrame_->velocityMagnitudeTrimmedRange
+                : activeFrame_->velocityMagnitudeRange;
+            if (!range.available) {
+                range = activeFrame_->velocityMagnitudeRange;
+            }
+        }
+        return range;
     }
 
     void drawResultCells() {
@@ -4719,15 +5483,13 @@ private:
         sf::Vector2f origin,
         float cellWidth,
         float cellHeight) {
+        // Always the velocity range, whatever the colours happen to be
+        // showing, and trimmed when the colours are: that shortens the handful
+        // of arrows which would otherwise reach across the picture and leave
+        // every other one too small to see.
+        const DataRange reference = velocityDisplayRange();
         const double referenceMagnitude =
-            (useSeriesRange_ ? velocityRange_ : frame.velocityMagnitudeRange)
-                    .available
-                ? std::max(
-                      0.0,
-                      (useSeriesRange_
-                           ? velocityRange_
-                           : frame.velocityMagnitudeRange).maximum)
-                : 0.0;
+            reference.available ? std::max(0.0, reference.maximum) : 0.0;
         const std::vector<VelocityArrow> arrows =
             velocityOverlayPlanner_.plan(
                 frame,
@@ -4995,12 +5757,59 @@ private:
             TEXT));
     }
 
+    // A bar across the bottom of the status strip while a run is going. It is
+    // drawn from the simulated time the solver has printed, not from the frame
+    // count: frames arrive every saveInterval steps and dt moves, so counting
+    // them tells you almost nothing about how much is left.
+    void drawRunProgressBar(float stripTop) {
+        if (!solverProcess_.active) {
+            return;
+        }
+        const float width = static_cast<float>(layoutSize_.x);
+        const float height = 4.0f;
+        const float y = stripTop - height;
+
+        sf::RectangleShape rail({width, height});
+        rail.setPosition({0.0f, y});
+        rail.setFillColor(CONTROL_RAIL);
+        window_->draw(rail);
+
+        if (runProgress_ >= 0.0) {
+            sf::RectangleShape fill({
+                width * static_cast<float>(std::clamp(runProgress_, 0.0, 1.0)),
+                height
+            });
+            fill.setPosition({0.0f, y});
+            fill.setFillColor(ACCENT);
+            window_->draw(fill);
+            return;
+        }
+
+        // The solver has not said how far along it is - an older build, or the
+        // first half-second of a new one. A sliver sliding along says "running"
+        // without claiming to know more than that.
+        const float sliver = std::max(60.0f, width * 0.08f);
+        const float travel = width + sliver;
+        const float phase = std::fmod(
+            static_cast<float>(
+                std::chrono::duration<double>(
+                    std::chrono::steady_clock::now().time_since_epoch())
+                    .count()) *
+                0.45f,
+            1.0f);
+        sf::RectangleShape marquee({sliver, height});
+        marquee.setPosition({phase * travel - sliver, y});
+        marquee.setFillColor(ACCENT_DARK);
+        window_->draw(marquee);
+    }
+
     void drawStatus() {
+        const float y =
+            static_cast<float>(layoutSize_.y) - 24.0f;
+        drawRunProgressBar(y);
         if (status_.empty()) {
             return;
         }
-        const float y =
-            static_cast<float>(layoutSize_.y) - 24.0f;
         sf::RectangleShape background({
             static_cast<float>(layoutSize_.x),
             24.0f
@@ -5056,6 +5865,7 @@ private:
     Button generateButton_{"Run simulation"};
     Button pressureButton_{"Pressure"};
     Button velocityButton_{"Velocity"};
+    Button continueRunButton_{"Continue run"};
     Button vectorButton_{"Vectors: Off"};
     Button rangeButton_{"Range: Series"};
     Button playbackButton_{"Play"};
@@ -5096,6 +5906,20 @@ private:
     bool currentRunRequiresComputedFrame_ = false;
     bool currentRunIsContinuation_ = false;
     int continuationSourceStep_ = -1;
+
+    // ---- the tray, and the progress that goes in it ------------------------
+    TrayIcon tray_;
+    std::string windowTitle_;
+    std::string publishedTitle_;
+    std::string runProgressText_;
+    // Negative means "running, but how far along is not known" - which is what
+    // a solver too old to print its simulated time leaves us with.
+    double runProgress_ = -1.0;
+    double runStartSeconds_ = 0.0;    // where this run began; not 0 on a
+                                      // continuation
+    double runTargetSeconds_ = 0.0;   // where it is heading
+    double runElapsedSeconds_ = 0.0;
+    bool windowHidden_ = false;
     std::vector<std::uint8_t> previewSolid_;
     std::size_t previewNx_ = 0;
     std::size_t previewNy_ = 0;
@@ -5121,9 +5945,13 @@ private:
     DecodedFrameCache decodedFrameCache_{DECODED_FRAME_CACHE_BYTES};
     DataRange pressureRange_;
     DataRange velocityRange_;
+    // The same two, with the outermost half-percent of each frame left out.
+    DataRange pressureTrimmedRange_;
+    DataRange velocityTrimmedRange_;
     VelocityOverlayPlanner velocityOverlayPlanner_;
     bool showVelocityVectors_ = false;
     bool useSeriesRange_ = true;
+    bool trimmedRange_ = true;
     bool playingFrames_ = false;
     float playbackAccumulator_ = 0.0f;
     bool showRunDetails_ = false;

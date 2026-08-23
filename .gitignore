@@ -45,3 +45,7 @@ Desktop.ini
 /release-ui/
 /output/
 /ui-preferences.txt
+
+# Where this repository parks files it cannot unlink. /dist-ui/ is already
+# covered above. Nothing in here is part of the project.
+_to_delete/

@@ -183,6 +183,30 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
     if (config.smootherOmega >= 2.0) {
         return fail(error, "smootherOmega must be in (0, 2)");
     }
+    if (!requireNonNegative("addTime", config.addTime, error)) {
+        return false;
+    }
+    if (config.threads < 0) {
+        return fail(error, "threads must be zero (all cores) or positive");
+    }
+
+    if (config.restart) {
+        // The mask, the grid and the geometry all come out of the frame, so
+        // the model file is not needed and is not asked for. What has to be
+        // there is the frame.
+        if (config.restartFile.empty()) {
+            return fail(error, "restartFile must name a frame or its folder");
+        }
+        std::error_code filesystemError;
+        if (!std::filesystem::exists(config.restartFile, filesystemError) ||
+            filesystemError) {
+            return fail(
+                error,
+                "restartFile does not exist: " + config.restartFile.string());
+        }
+        return validateArgumentPath("restartFile", config.restartFile, error);
+    }
+
     return validateGeometry(config.geometryFile, error);
 }
 
@@ -223,13 +247,41 @@ bool buildFluidSolverArguments(
         "mgMinCoarseSize=" + std::to_string(config.mgMinCoarseSize),
         "saveInterval=" + std::to_string(config.saveInterval),
         "useCuda=" + std::string(config.useCuda ? "1" : "0"),
-        "outputDir=" + outputDirectory.u8string(),
-        "geometryFile=" + config.geometryFile.u8string(),
-        "sliceAngleX=" + serializeDouble(config.sliceAngleX),
-        "sliceAngleZ=" + serializeDouble(config.sliceAngleZ),
-        "sliceRotation=" + serializeDouble(config.sliceRotation),
-        "invertSection=" + std::string(config.invertSection ? "1" : "0")
+        "outputDir=" + outputDirectory.u8string()
     };
+
+    if (config.restart) {
+        // The solver reads the frame first and then applies whatever follows,
+        // so restart= and restartFile= go in before the overrides. The
+        // geometry keys are left out entirely: the mask comes out of the frame
+        // and the model file may not even exist any more.
+        arguments.insert(
+            arguments.begin(),
+            {"restart=1", "restartFile=" + config.restartFile.u8string()});
+        if (config.addTime > 0.0) {
+            arguments.push_back("addTime=" + serializeDouble(config.addTime));
+        }
+    } else {
+        arguments.push_back("geometryFile=" + config.geometryFile.u8string());
+        arguments.push_back("sliceAngleX=" + serializeDouble(config.sliceAngleX));
+        arguments.push_back("sliceAngleZ=" + serializeDouble(config.sliceAngleZ));
+        arguments.push_back(
+            "sliceRotation=" + serializeDouble(config.sliceRotation));
+        arguments.push_back(
+            "invertSection=" + std::string(config.invertSection ? "1" : "0"));
+    }
+
+    if (config.supportsRuntimeSwitches) {
+        // A 0.1 solver stops on the first argument it does not recognise, so
+        // these only exist once the executable has been read and found to be
+        // 0.2 or newer.
+        arguments.push_back("avx2=" + std::string(config.useAvx2 ? "1" : "0"));
+        arguments.push_back(
+            "openmp=" + std::string(config.useOpenMp ? "1" : "0"));
+        arguments.push_back("threads=" + std::to_string(config.threads));
+        arguments.push_back(
+            "tray=" + std::string(config.solverTray ? "1" : "0"));
+    }
     return true;
 }
 

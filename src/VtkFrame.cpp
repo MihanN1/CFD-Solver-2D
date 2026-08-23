@@ -1196,6 +1196,61 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
         }
     }
 
+    // The trimmed ranges: the same fields with the outermost half-percent at
+    // each end left out.
+    //
+    // A colour scale stretched by a handful of cells - a stagnation point, the
+    // first step of an impulsive start, one frame that caught the solver
+    // mid-transient - maps everything else onto two or three shades and the
+    // picture goes flat. These give the view something to fall back on that
+    // still covers 99% of what is actually in the frame, and they are computed
+    // here, once, because doing it per redraw over a million cells is not free.
+    {
+        std::vector<float> pressureSamples;
+        std::vector<float> magnitudeSamples;
+        pressureSamples.reserve(sampleCount);
+        magnitudeSamples.reserve(sampleCount);
+        for (std::size_t index = 0; index < sampleCount; ++index) {
+            if (solidData[index] != 0) {
+                continue;
+            }
+            if (pressureFiniteData[index] != 0) {
+                pressureSamples.push_back(pressureData[index]);
+            }
+            if (velocityFiniteData[index] != 0) {
+                magnitudeSamples.push_back(magnitudeData[index]);
+            }
+        }
+
+        const auto trimmed = [](std::vector<float>& values) {
+            DataRange range;
+            if (values.empty()) {
+                return range;
+            }
+            const std::size_t last = values.size() - 1u;
+            // Half a percent at each end, and never the whole thing: a frame
+            // of forty cells still has a low and a high.
+            const std::size_t low =
+                static_cast<std::size_t>(static_cast<double>(last) * 0.005);
+            const std::size_t high =
+                static_cast<std::size_t>(static_cast<double>(last) * 0.995);
+            std::nth_element(
+                values.begin(), values.begin() + low, values.end());
+            range.minimum = static_cast<double>(values[low]);
+            std::nth_element(
+                values.begin() + low, values.begin() + high, values.end());
+            range.maximum = static_cast<double>(values[high]);
+            range.available = true;
+            if (range.maximum < range.minimum) {
+                std::swap(range.minimum, range.maximum);
+            }
+            return range;
+        };
+
+        frame.pressureTrimmedRange = trimmed(pressureSamples);
+        frame.velocityMagnitudeTrimmedRange = trimmed(magnitudeSamples);
+    }
+
     if (nonFinitePressureCount != 0) {
         frame.warnings.push_back(
             std::to_string(nonFinitePressureCount) +
@@ -1517,6 +1572,11 @@ VtkSeriesCatalog VtkFrameParser::catalogSeries(
             }
             includeRange(catalog.pressureRange, frame.pressureRange);
             includeRange(
+                catalog.pressureTrimmedRange, frame.pressureTrimmedRange);
+            includeRange(
+                catalog.velocityMagnitudeTrimmedRange,
+                frame.velocityMagnitudeTrimmedRange);
+            includeRange(
                 catalog.velocityMagnitudeRange,
                 frame.velocityMagnitudeRange);
             catalog.warningCount += frame.warnings.size();
@@ -1632,6 +1692,10 @@ VtkSeriesCatalog VtkFrameParser::indexSeries(
             catalog.pressureRange = catalog.activeFrame.pressureRange;
             catalog.velocityMagnitudeRange =
                 catalog.activeFrame.velocityMagnitudeRange;
+            catalog.pressureTrimmedRange =
+                catalog.activeFrame.pressureTrimmedRange;
+            catalog.velocityMagnitudeTrimmedRange =
+                catalog.activeFrame.velocityMagnitudeTrimmedRange;
             break;
         } catch (const std::exception& exception) {
             if (!recoverable) {
