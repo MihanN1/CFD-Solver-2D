@@ -133,14 +133,38 @@ jobs:
         run: |
           set -euo pipefail
           sudo dpkg --add-architecture arm64
-          # The default sources only serve amd64/i386; arm64 lives on ports.
+
+          # arm64 lives on ports.ubuntu.com, not on the main archives, so every
+          # other source has to be told it is amd64/i386 only - otherwise apt
+          # asks archive/security.ubuntu.com for arm64 indexes and takes a hard
+          # 404, which fails the whole step.
+          #
+          # 24.04 writes its sources in deb822 (.sources), not the one-line
+          # .list format, so both are handled. The .list sed alone silently did
+          # nothing here.
+          for f in /etc/apt/sources.list.d/*.sources; do
+            [ -e "$f" ] || continue
+            grep -q '^Architectures:' "$f" ||
+              sudo sed -i '/^Types:/a Architectures: amd64 i386' "$f"
+          done
           sudo sed -i 's/^deb \(http\|mirror\)/deb [arch=amd64,i386] \1/' \
             /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null || true
+
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble main universe" |
             sudo tee /etc/apt/sources.list.d/arm64-ports.list
           echo "deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports noble-updates main universe" |
             sudo tee -a /etc/apt/sources.list.d/arm64-ports.list
+
           sudo apt-get update
+
+          # Nothing but ports may serve arm64. If anything else still does, the
+          # 404 is back and it is better to say so here than 200 lines later.
+          if apt-get indextargets --no-release-info 2>/dev/null |
+               grep -i '^Architecture: arm64' -A3 |
+               grep -i '^URI:' | grep -qv 'ports\.ubuntu\.com'; then
+            echo "::error::something other than ports.ubuntu.com is being asked for arm64"
+            exit 1
+          fi
           sudo DEBIAN_FRONTEND=noninteractive apt-get install -y \
             crossbuild-essential-arm64 \
             libx11-dev:arm64 \

@@ -2980,11 +2980,14 @@ private:
             return;
         }
         const HINSTANCE instance = GetModuleHandleW(nullptr);
-        const HICON large = static_cast<HICON>(LoadImageW(
+        // Not "small" and "large": rpcndr.h, which windows.h drags in, does
+        // #define small char. MSVC then reads "HICON char = ..." and MinGW,
+        // which does not define it, compiles the same line happily.
+        const HICON largeIcon = static_cast<HICON>(LoadImageW(
             instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
             GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON),
             LR_DEFAULTCOLOR));
-        const HICON small = static_cast<HICON>(LoadImageW(
+        const HICON smallIcon = static_cast<HICON>(LoadImageW(
             instance, MAKEINTRESOURCEW(1), IMAGE_ICON,
             GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON),
             LR_DEFAULTCOLOR));
@@ -2992,13 +2995,13 @@ private:
         if (handle == nullptr) {
             return;
         }
-        if (large != nullptr) {
+        if (largeIcon != nullptr) {
             SendMessageW(handle, WM_SETICON, ICON_BIG,
-                         reinterpret_cast<LPARAM>(large));
+                         reinterpret_cast<LPARAM>(largeIcon));
         }
-        if (small != nullptr) {
+        if (smallIcon != nullptr) {
             SendMessageW(handle, WM_SETICON, ICON_SMALL,
-                         reinterpret_cast<LPARAM>(small));
+                         reinterpret_cast<LPARAM>(smallIcon));
         }
 #endif
     }
