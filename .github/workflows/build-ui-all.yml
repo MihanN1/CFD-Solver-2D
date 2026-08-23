@@ -10,9 +10,12 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: The version that goes into every archive name
-        default: "0.2"
-        required: true
+        description: >
+          Leave empty to use the version in CMakeLists.txt, which is where it
+          actually lives. It has to match the solver release these archives are
+          merged into - that is the key merge-ui-release.py pairs them by.
+        default: ""
+        required: false
   push:
     branches:
       - GUI-part_2
@@ -29,6 +32,9 @@ jobs:
     outputs:
       value: ${{ steps.pick.outputs.value }}
     steps:
+      # Only here to read CMakeLists.txt. A hardcoded default in this file is a
+      # second place the version lives, and a second place is a place to drift.
+      - uses: actions/checkout@v4
       - id: pick
         shell: bash
         run: |
@@ -39,11 +45,13 @@ jobs:
           elif [[ -n "${{ inputs.version }}" ]]; then
             version="${{ inputs.version }}"
           else
-            version="0.2"
+            version=$(sed -n \
+              's/^[[:space:]]*VERSION[[:space:]]\+\([0-9]\+\.[0-9]\+\).*/\1/p' \
+              CMakeLists.txt | head -1)
           fi
 
           if [[ -z "$version" ]]; then
-            echo "Could not resolve release version" >&2
+            echo "No version given and none found in CMakeLists.txt" >&2
             exit 1
           fi
 

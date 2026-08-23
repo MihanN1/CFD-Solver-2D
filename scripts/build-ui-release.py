@@ -23,6 +23,7 @@ import argparse
 import hashlib
 import os
 import platform
+import re
 import shutil
 import stat
 import subprocess
@@ -31,6 +32,21 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+
+# The version lives in CMakeLists.txt and nowhere else. A literal here is a
+# literal that drifts: this file used to default to a version two releases old,
+# which nobody noticed because the caller always passed one - until the day it
+# did not.
+def project_version(default: str = "0.0") -> str:
+    """major.minor out of the project's CMakeLists.txt."""
+    cmake = ROOT / "CMakeLists.txt"
+    try:
+        text = cmake.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return default
+    match = re.search(r"project\s*\([^)]*?VERSION\s+([0-9]+)\.([0-9]+)", text)
+    return f"{match.group(1)}.{match.group(2)}" if match else default
+
 
 FEATURES = {
     ("windows", "x64"): [
@@ -425,7 +441,7 @@ def finalize_release(args: argparse.Namespace) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", default="0.2")
+    parser.add_argument("--version", default=project_version())
     parser.add_argument("--arch", action="append", choices=["x64", "x86", "arm64"])
     parser.add_argument("--output", default=str(ROOT / "dist-ui"))
     parser.add_argument("--work", default=str(ROOT / ".release-build"))
