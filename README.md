@@ -9,7 +9,7 @@ CFD‑Solver‑2D is an educational/research project that implements a finite‑
 - Full numerical solver with VTK output for post-processing in ParaView.
 - STL/OBJ loading, central plane section extraction, geometry masking, profile rotation, mirroring, and robust contour reconstruction.
 - Optional gravity as a uniform body force, pointing in any direction.
-- Optional wall behaviour: every body in the mask is found and numbered on its own, and each one can spin, drag its surface, or be made frictionless, independently of the rest.
+- Optional wall behaviour: every body in the mask is found and numbered on its own, and each one can spin, drag its surface, or be made frictionless, independently of the rest.- A separate SFML desktop application that configures runs, launches the solver and renders the frames it writes.
 
 The project is designed to simulate external incompressible flow around arbitrary 2D profiles such as cylinders, airfoils, valves, turbine blades, and similar engineering geometries.
 
@@ -59,13 +59,30 @@ Possible future extensions include:
 - ✅ OBJ import
 - ✅ Arbitrary slicing plane
 - ✅ Automatic contour reconstruction
-- ✅ Hole detection
-- ✅ Multiple contour support
 - ✅ Non-manifold diagnostics
 - ✅ Automatic scaling and centering
 - ✅ Rotation and mirroring
 - ✅ Polygon rasterization using even-odd filling
-- ✅ Automatic detection and numbering of separate bodies
+- ✅ Automatic detection and numbering of separate bodies- ✅ Every closed loop the plane cuts, not only the largest: two profiles side
+  by side stay two profiles, and a loop inside a loop comes out as a hole
+- ✅ Slivers under a ten-thousandth of the largest loop are dropped as cutting
+  noise rather than rasterized into the flow
+
+---
+
+## Visualization
+
+Not part of the solver. `cfd_app` writes VTK frames and nothing else; SFML is
+not linked into it. Everything below belongs to the separate desktop UI, which
+is its own executable and drives the solver as a child process.
+
+- ✅ Pressure rendering
+- ✅ Velocity rendering
+- ✅ Solid mask rendering
+- ✅ Pause / Resume
+- ✅ Time scrubbing
+- ✅ Zoom and camera movement
+- ✅ Rendering mode switching
 
 ---
 
@@ -141,7 +158,7 @@ crosses the plane at
 
 ![](https://latex.codecogs.com/svg.image?\mathbf{x}_{section}=\mathbf{a}+\frac{d_{a}}{d_{a}-d_{b}}(\mathbf{b}-\mathbf{a}))
 
-The resulting segments are connected into closed contours. Multiple contours and holes are detected automatically. Geometry consistency is validated before rasterization. The resulting contours can optionally be mirrored, rotated by `sliceRotation`, scaled to
+The resulting segments are connected into closed contours and the largest of them by area is kept; the rest are discarded, which is the limitation noted under *Geometry* above. Geometry consistency is validated before rasterization. The resulting contour can optionally be mirrored, rotated by `sliceRotation`, scaled to
 
 ![](https://latex.codecogs.com/svg.image?0.2\,\min(L_x,L_y))
 
@@ -189,22 +206,23 @@ CFD-Solver-2D/
 │   │   │   │   │   ├── output/ <-vtk here
 │   │   │   │   │   └── cfd_app.exe <-will be renamed to fluid_solver.exe, as there will be other solvers. other files arent really necessary to explain
 ├── logo/
-│   ├── toxic-mark-32.png
-│   ├── toxic-mark-64.png
-│   ├── toxic-mark-128.png
-│   ├── toxic-mark-256.png
-│   ├── toxic-mark-512.png
-│   └── toxic-mark-1024.png
+│   ├── fluid-solver.ico            <- embedded in the Windows executable
+│   ├── fluid-solver-{16..1024}.png <- Linux hicolor icons
+│   ├── wizard-*.bmp                <- Inno Setup wizard images
+│   └── toxic-mark-{32..1024}.png   <- the original mark
 ├── src/
 │   ├── main.cpp
+│   ├── AppPaths.cpp                <- resolves paths against the executable
 │   ├── Config.cpp
 │   ├── Mesh.cpp
 │   ├── Restart.cpp
 │   ├── Solver.cpp
 │   ├── Multigrid.cpp
 │   ├── MultigridCuda.cu
+│   ├── app.rc.in                   <- icon and version block, Windows only
 │   └── tiny_obj_loader_impl.cpp
 ├── include/
+│   ├── AppPaths.hpp
 │   ├── Config.hpp
 │   ├── Mesh.hpp
 │   ├── Restart.hpp
@@ -212,6 +230,8 @@ CFD-Solver-2D/
 │   ├── Multigrid.hpp
 │   ├── MultigridCuda.cuh
 │   └── tiny_obj_loader.h
+├── scripts/                        <- build every variant, package a release
+├── installer/                      <- Inno Setup, makeself, productbuild
 ├── models/ <- actially not really needed, but the models could be stored here. we store them here for tests.
 ├── lib/
 │   └── stl_reader/
@@ -225,7 +245,8 @@ CFD-Solver-2D/
 # Requirements
 
 - C++17 compatible compiler
-- CMake 3.28+
+- CMake 3.28+ (what `cmake_minimum_required` asks for; `scripts/make-release.sh`
+  installs a newer one into `.toolchain/` when the system copy is older)
 - CUDA Toolkit (optional, for the GPU pressure solver)
 - OpenMP (optional, picked up automatically when present)
 - A CPU with AVX2 (optional, the vector kernels; without it every one of them
@@ -258,25 +279,35 @@ cmake --build build --config Release
 cmake --install build --config Release --prefix install
 ```
 
-Three switches, all on by default, all safe to turn off — the build works with
-any combination of them:
+Four switches, all safe to change in any combination:
 
-| Option | Off means |
-|---|---|
-| `-DCFD_ENABLE_CUDA=OFF` | CPU multigrid only, no toolkit needed |
-| `-DCFD_ENABLE_OPENMP=OFF` | single-threaded, bit-identical to the threaded build |
-| `-DCFD_ENABLE_AVX2=OFF` | scalar kernels instead of the vector ones |
+| Option | Default | Off means |
+|---|---|---|
+| `CFD_ENABLE_AVX2` | ON | scalar kernels instead of the vector ones |
+| `CFD_ENABLE_OPENMP` | ON | single-threaded, bit-identical to the threaded build |
+| `CFD_ENABLE_CUDA` | ON | CPU multigrid only, no toolkit needed |
+| `CFD_STATIC` | ON | link against the shared runtime instead of embedding it |
 
-CUDA is also dropped automatically when no toolkit is found, unless
-`-DCFD_ENABLE_CUDA_EXPLICIT=ON` says to treat that as an error instead.
+CUDA is dropped automatically when no toolkit is found, unless
+`-DCFD_ENABLE_CUDA_EXPLICIT=ON` says to treat that as an error instead. A CUDA
+build started on a machine with no NVIDIA device says so and runs on the CPU.
+
+`scripts/build-windows.ps1` and `scripts/build-linux.sh` build every combination
+for their platform in one go; `scripts/make-release.ps1` and
+`scripts/make-release.sh` go further and produce the installers and the release
+folder as well.
 
 ---
 
 # Run
 
 ```powershell
-.\install\bin\cfd_app.exe
+.\install\bin\"Fluid Solver.exe"
 ```
+
+The CMake target is still `cfd_app`, but the file it produces is named
+`Fluid Solver` — `CFD_APP_NAME` sets it, and there will be other solvers next
+to this one.
 
 Configure:
 
@@ -290,6 +321,7 @@ Configure:
 - Geometry
 - Slice orientation
 - Walls (optional: rotation, sliding and free-slip, per object)
+- CUDA on or off
 
 After confirmation the simulation starts immediately.
 
@@ -591,6 +623,85 @@ and, being flat, very nearly ignores `rot` too. A single isolated cell has
 neither kind and cannot drive anything. Both are found, numbered and reported
 like any other object; they just have nothing to push with. §7 explains which
 face is which.
+## Acceleration, and where the choice is kept
+
+The banner says which build this is:
+
+```
+=== CFD-Solver-2D 0.2 (avx2-omp-cuda) ===
+```
+
+AVX2, OpenMP and CUDA can each be turned off without changing which download
+you are running. What that changes is speed, not what is being solved: the
+velocity field comes out the same to the last digit a float holds, and the
+pressure lands on a slightly different multigrid iterate — about a thousandth
+of its peak — the same way the separate AVX2 and non-AVX2 downloads always have
+between them.
+
+An interactive run offers the switches before it asks anything else, and
+
+```powershell
+"Fluid Solver.exe" --settings
+```
+
+opens the same menu on its own. The answers go into `settings.ini` — beside the
+executable when that folder can be written to, which is what a portable unpack
+gives, and in the per-user data directory when it cannot, which is what an
+install under Program Files gives — and are used by every later run.
+
+For one run only, without touching that file:
+
+```powershell
+"Fluid Solver.exe" avx2=0 openmp=1 threads=4 useCuda=0 tray=0 nx=256 ny=128 ...
+```
+
+and the environment overrides everything: `FLUID_SOLVER_NO_AVX2`,
+`FLUID_SOLVER_NO_OPENMP`, `FLUID_SOLVER_NO_CUDA`, `FLUID_SOLVER_NO_TRAY`,
+`FLUID_SOLVER_NO_UPDATE_CHECK`.
+
+A switch for something this build was not compiled with is shown as
+"not in this build" rather than hidden — the menu explains why one machine is
+slower than the one next to it instead of leaving it a mystery.
+
+## While it runs
+
+On Windows the solver puts an icon in the tray for the length of a run. Its
+tooltip is the progress in simulated seconds — `Fluid Solver - 12.5 / 30 s
+(41%)` — the same number fills the taskbar button, and the tray menu can send
+the console window away and bring it back, open the output folder, or ask the
+run to stop.
+
+"Stop" there, and a first Ctrl+C anywhere, mean the same thing: finish the step
+that is running, write the frame, and return. The run can then be continued
+from that frame exactly as described below — which is the point of stopping
+that way rather than killing the process halfway through a file. A second
+Ctrl+C is left to the default handler and kills it outright.
+
+Elsewhere there is no tray a static console binary can reach without dragging
+in a desktop toolkit, so the same progress goes into the terminal's title,
+which is what the taskbar entry or the Dock shows for that window.
+
+`tray=0`, or `tray` in `--settings`, turns all of it off. Ctrl+C keeps working
+either way.
+
+## New releases
+
+At startup the solver asks GitHub once whether anything newer than this build
+has been published, and offers to open the release page if so. Any version
+greater than this one counts, whether it moved the major or only the minor,
+and the comparison is numeric — 0.10 is newer than 0.9, not older.
+
+The request has a short timeout and no network at all is the normal case
+rather than an error: nothing is printed unless there is something newer. On
+Windows it goes through WinHTTP; elsewhere through whichever of `curl` and
+`wget` the machine has.
+
+```powershell
+"Fluid Solver.exe" --check-updates     # ask now, and say so either way
+```
+
+`checkForUpdates=0` in `settings.ini`, or `FLUID_SOLVER_NO_UPDATE_CHECK=1`,
+stops it asking.
 
 # Continuing a run
 
@@ -731,7 +842,9 @@ move a boundary in the middle of a run.
 
 # Visualization
 
-The application provides built-in real-time visualization.
+A separate desktop application, built from its own branch. It configures a run,
+launches the solver as a child process and renders the frames the solver writes.
+The solver itself has no window.
 
 Available display modes:
 

@@ -303,6 +303,16 @@ std::filesystem::path resolveRestartPath(const std::string& path,
     }
     std::error_code ec;
 
+    // "restartFile=output" means the folder the frames were written to, and
+    // those now sit beside the executable rather than in whatever directory
+    // the program was started from. An absolute path, and a relative one that
+    // does resolve against the working directory, are both left alone.
+    if (given.is_relative() && !std::filesystem::exists(given, ec)) {
+        const std::filesystem::path beside = executableDir() / given;
+        if (std::filesystem::exists(beside, ec))
+            given = beside;
+    }
+
     if (std::filesystem::is_directory(given, ec)) {
         std::filesystem::path newest;
         std::filesystem::file_time_type newestTime{};

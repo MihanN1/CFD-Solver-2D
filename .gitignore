@@ -22,3 +22,9 @@ cmake_install.cmake
 *.vtk
 *.csv
 Makefile
+dist/
+build-*/
+.toolchain/
+_to_delete/
+dist-ui/
+release/

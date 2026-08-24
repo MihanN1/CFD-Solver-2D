@@ -1,0 +1,485 @@
+# Builds only the installers, out of a release that already exists. Nothing is
+# compiled here: the zips that "Build every binary" published are unpacked back
+# into dist/ and handed to the three installer builders.
+#
+#   Actions -> Build the installers -> Run workflow
+#
+# Leave the version empty to cut installers for whatever CMakeLists.txt
+# says; fill it in only to cut them for some other published release.
+#
+# By default it pulls the assets of the tag v<version>. Point it at a run of
+# "Build every binary" instead by filling in run_id, which is what you want
+# when the release has not been cut yet.
+#
+# What comes out - one file per platform, not one per architecture:
+#   Fluid Solver <ver> windows setup.exe      x64 + x86 + arm64
+#   Fluid-Solver-<ver>-linux.run              x64 + x86 + arm64
+#   Fluid Solver <ver> macos.pkg              arm64 + x64
+#
+# Each of them reads the machine it is running on and unpacks only the matching
+# build, so nobody downloading a solver has to know what is inside their
+# laptop. The macOS runner produces its .pkg for both architectures at once:
+# pkgbuild and productbuild only repackage binaries that are already built, so
+# the host architecture does not come into it. The Windows and Linux installers
+# do need their own runners - iscc is a Windows program and makeself wants a
+# Linux shell.
+#
+# Where they go: installer_tag. This project publishes two releases per
+# version - v<ver> for the 68 portable archives and v<ver>-installers for
+# these three - because the portable one changes whenever a single row is
+# rebuilt and these are cut from whatever it ended up holding. Set
+# installer_tag to v<ver> instead if you would rather have one release.
+
+name: Build the installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >
+          The version whose release the installers are built from. Leave empty
+          to use the version in CMakeLists.txt; fill it in to cut installers
+          for a release that is not the one this branch is on.
+        default: ""
+        required: false
+      source_tag:
+        description: >
+          Tag of the portable release to take the archives from. Leave empty
+          for v<version>. Fill it in when the portable release is tagged
+          something else - "v0.2-Portable", say - because the version above
+          has to stay the one written into the archive names.
+        required: false
+        default: ""
+      run_id:
+        description: >
+          Optional. Run id of "Build every binary" to take the zips from.
+          Leave empty to use the release of the tag above.
+        required: false
+        default: ""
+      installer_tag:
+        description: >
+          Tag to publish the finished installers to, created if it does not
+          exist. "v0.2-installers" keeps them as a release of their own;
+          "v0.2" puts them beside the portable archives. Leave empty to
+          publish nothing and just collect the artifact.
+        required: false
+        default: ""
+      refresh_ui_archives:
+        description: >
+          Re-upload the icon-stamped "-ui" archives to the PORTABLE release
+          (v<version>). Only needed when those were published without the
+          icon on Fluid Solver UI.exe - merge-ui-release.py already stamps
+          them, so normally leave this off.
+        type: boolean
+        default: false
+
+jobs:
+  # The version comes from CMakeLists.txt, not from a default in this file.
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      value: ${{ steps.pick.outputs.value }}
+      tag: ${{ steps.pick.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: pick
+        run: |
+          set -euo pipefail
+          v="${{ inputs.version }}"
+          if [ -z "$v" ]; then
+            v=$(sed -n 's/^[[:space:]]*VERSION[[:space:]]\+\([0-9]\+\.[0-9]\+\).*/\1/p' \
+                CMakeLists.txt | head -1)
+          fi
+          if [ -z "$v" ]; then
+            echo "::error::no version given and none found in CMakeLists.txt"
+            exit 1
+          fi
+          tag="${{ inputs.source_tag }}"
+          [ -z "$tag" ] && tag="v$v"
+          echo "value=$v" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Building installers for $v, taking the archives from $tag"
+
+  # Downloaded once, here, rather than four times with four sets of
+  # credentials. Everything below just pulls this artifact.
+  fetch:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - name: From the release of tag ${{ needs.version.outputs.tag }}
+        if: inputs.run_id == ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.version.outputs.tag }}
+        run: |
+          mkdir -p zips
+          gh release download "$TAG" --dir zips --pattern '*.zip'
+          ls -1 zips
+
+      - name: From run ${{ inputs.run_id }} of "Build every binary"
+        if: inputs.run_id != ''
+        uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: zips-raw
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+
+      # That artifact is release/<version>/, so the zips sit one level down.
+      - name: Flatten
+        if: inputs.run_id != ''
+        run: |
+          mkdir -p zips
+          find zips-raw -name '*.zip' -exec cp {} zips/ \;
+          ls -1 zips
+
+      - name: Refuse to go on with nothing
+        run: |
+          count=$(ls -1 zips/*.zip 2>/dev/null | wc -l)
+          echo "$count zip(s)"
+          [ "$count" -gt 1 ] || { echo "::error::no release zips were found"; exit 1; }
+
+      # The "<variant>-ui" archives are assembled by hand and no build produces
+      # one, so they are only here if they were uploaded to the release by hand
+      # as well. Without them the installers still come out - just with no UI to
+      # offer - and nothing else in the run would have said so. A warning rather
+      # than an error, because building without the UI on purpose is a real
+      # thing to want.
+      - name: Is the UI in this release
+        run: |
+          ui=$(ls -1 zips/*-ui.zip 2>/dev/null | wc -l)
+          if [ "$ui" -gt 0 ]; then
+            echo "$ui UI archive(s) - the installers will offer the desktop UI"
+            echo "$ui UI archive(s) found: the installers will offer the desktop UI." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::No '*-ui.zip' archives here, so the six installers will be built without a UI component. If that was not deliberate, upload them to the release and run this again."
+            echo ":warning: No UI archives found - the installers are being built **without a UI**." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-zips
+          path: zips/
+          if-no-files-found: error
+
+  windows:
+    needs: [version, fetch]
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    env:
+      # Set these three as repository secrets to get signed builds. With them
+      # empty, scripts\sign-windows.ps1 says so and the job still goes green -
+      # an unsigned installer is a working installer, it just makes SmartScreen
+      # call the publisher unknown.
+      #
+      #   CFD_SIGN_PFX_BASE64      base64 of the .pfx:
+      #                            certutil -encode cert.pfx cert.txt
+      #                            (or: [Convert]::ToBase64String(
+      #                                 [IO.File]::ReadAllBytes("cert.pfx")))
+      #   CFD_SIGN_PFX_PASSWORD    the password that .pfx was exported with
+      #   CFD_SIGN_TIMESTAMP_URL   optional; the default is DigiCert's
+      #
+      # An EV certificate lives on a hardware token and cannot be exported to a
+      # .pfx at all, so it cannot be used from a hosted runner. Sign those
+      # locally with scripts\make-release.ps1, which reads CFD_SIGN_THUMBPRINT
+      # from the machine's own store.
+      CFD_SIGN_PFX_PASSWORD: ${{ secrets.CFD_SIGN_PFX_PASSWORD }}
+      CFD_SIGN_TIMESTAMP_URL: ${{ secrets.CFD_SIGN_TIMESTAMP_URL }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: release-zips, path: zips }
+
+      # Written to RUNNER_TEMP rather than the workspace so it cannot be picked
+      # up by a later upload-artifact glob.
+      - name: Unpack the signing certificate
+        shell: pwsh
+        env:
+          CFD_SIGN_PFX_BASE64: ${{ secrets.CFD_SIGN_PFX_BASE64 }}
+        run: |
+          if ($env:CFD_SIGN_PFX_BASE64) {
+            $path = Join-Path $env:RUNNER_TEMP "cfd-sign.pfx"
+            [IO.File]::WriteAllBytes(
+                $path, [Convert]::FromBase64String($env:CFD_SIGN_PFX_BASE64))
+            "CFD_SIGN_PFX=$path" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            Write-Host "certificate ready"
+          } else {
+            Write-Host "no CFD_SIGN_PFX_BASE64 secret; this build will not be signed"
+          }
+
+      - name: Put the icon on the UI executable
+        shell: bash
+        run: python scripts/stamp-ui-icon.py "${{ needs.version.outputs.value }}" --release zips
+
+      # Goes to the PORTABLE release, not the installer one: these are the
+      # portable "-ui" archives with the icon put on the UI executable.
+      - name: Push the fixed archives back to the portable release
+        if: inputs.refresh_ui_archives
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          for f in zips/*windows*-ui.zip; do
+            for try in 1 2 3 4 5; do
+              gh release upload "${{ needs.version.outputs.tag }}" "$f" --clobber && break
+              echo "retry $try for $(basename "$f")"; sleep $((try * 30))
+            done
+            sleep 5
+          done
+
+      - name: Rebuild dist\ from the zips
+        shell: bash
+        run: |
+          python scripts/unpack-release.py "${{ needs.version.outputs.value }}" zips dist --platform windows
+
+      - name: Inno Setup
+        run: choco install innosetup --no-progress -y
+
+      # Deliberately not scripts\make-release.ps1 -Only Installers: that one
+      # collects failures into a summary and still exits 0, which is exactly
+      # what a CI job must not do.
+      - name: Compile the installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command iscc -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) {
+            foreach ($p in @("${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+                             "${env:ProgramFiles}\Inno Setup 6\ISCC.exe")) {
+              if (Test-Path $p) { $iscc = $p; break }
+            }
+          }
+          if (-not $iscc) { throw "Inno Setup was installed but ISCC.exe was not found" }
+          $dist = (Resolve-Path dist).Path
+          # Sign the payload before iscc packs it. An installer that is signed
+          # while the exe inside it is not still trips SmartScreen the moment
+          # someone runs the program, which is the prompt that matters.
+          Get-ChildItem $dist -Recurse -Filter "Fluid Solver*.exe" |
+              ForEach-Object { $_.FullName } |
+              ForEach-Object { & pwsh -NoLogo -NoProfile -File scripts\sign-windows.ps1 $_ }
+          # No /DArch: one installer carrying every architecture in the
+          # release, picked at run time. That is the file people download.
+          $any = Get-ChildItem dist -Directory |
+                 Where-Object { $_.Name -like "Fluid Solver ${{ needs.version.outputs.value }} windows-* *" -and
+                                $_.Name -notlike "*-ui" }
+          if (-not $any) { throw "no windows rows in the release, nothing was built" }
+          Write-Host "windows : $($any.Count) variant(s) across every architecture"
+          & $iscc "/DAppVersion=${{ needs.version.outputs.value }}" "/DDistDir=$dist" `
+                  installer\windows\fluid-solver.iss
+          if ($LASTEXITCODE -ne 0) { throw "iscc failed" }
+
+      - name: Sign the installer
+        shell: pwsh
+        run: |
+          & pwsh -NoLogo -NoProfile -File scripts\sign-windows.ps1 "dist\*setup.exe"
+          if ($LASTEXITCODE -ne 0) { throw "signing failed" }
+
+      - name: Forget the certificate
+        if: always()
+        shell: pwsh
+        run: |
+          if ($env:CFD_SIGN_PFX -and (Test-Path $env:CFD_SIGN_PFX)) {
+            Remove-Item -Force $env:CFD_SIGN_PFX
+          }
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-windows
+          path: dist/*setup.exe
+          if-no-files-found: error
+
+  linux:
+    needs: [version, fetch]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: release-zips, path: zips }
+
+      - name: Rebuild dist/ from the zips
+        run: |
+          python3 scripts/unpack-release.py "${{ needs.version.outputs.value }}" zips dist --platform linux
+
+      - name: makeself
+        run: sudo apt-get update -qq && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq makeself
+
+      - name: Build both .run installers
+        run: bash scripts/make-release.sh "${{ needs.version.outputs.value }}" --only=installers
+
+      # make-release.sh collects its failures into a summary and still exits 0,
+      # which is right for a person at a terminal and wrong here: with x64 built
+      # and x86 dead the upload still finds a file and the job goes green. So
+      # the count is checked instead of the exit code, the same way the Windows
+      # job counts what iscc produced.
+      - name: It, or nothing
+        run: |
+          f="dist/Fluid-Solver-${{ needs.version.outputs.value }}-linux.run"
+          if [ -f "$f" ]; then echo "ok      $f"
+          else echo "::error::$f was not built"; exit 1; fi
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-linux
+          path: dist/*.run
+          if-no-files-found: error
+
+  macos:
+    needs: [version, fetch]
+    runs-on: macos-latest
+    env:
+      # Apple issues two certificates and they do different jobs, so both are
+      # needed for a package that opens without a warning:
+      #
+      #   CFD_MACOS_CERTS_BASE64   base64 of a .p12 holding BOTH the
+      #                            "Developer ID Application" and the
+      #                            "Developer ID Installer" certificate, with
+      #                            their private keys. Export both together from
+      #                            Keychain Access, then:
+      #                            base64 -i certs.p12 | pbcopy
+      #   CFD_MACOS_CERTS_PASSWORD the password that .p12 was exported with
+      #   CFD_SIGN_MACOS_APP_IDENTITY        "Developer ID Application: NAME (TEAM)"
+      #   CFD_SIGN_MACOS_INSTALLER_IDENTITY  "Developer ID Installer: NAME (TEAM)"
+      #
+      # And for notarisation, which is the part that actually removes the
+      # "Apple cannot check it for malicious software" dialog:
+      #
+      #   CFD_NOTARY_APPLE_ID    the Apple ID of the developer account
+      #   CFD_NOTARY_TEAM_ID     the ten-character team id
+      #   CFD_NOTARY_PASSWORD    an app-specific password, NOT the account one
+      #
+      # With none of them set the .pkg is built unsigned and the job still
+      # passes; scripts/sign-macos.sh prints what is missing.
+      CFD_SIGN_MACOS_APP_IDENTITY: ${{ secrets.CFD_SIGN_MACOS_APP_IDENTITY }}
+      CFD_SIGN_MACOS_INSTALLER_IDENTITY: ${{ secrets.CFD_SIGN_MACOS_INSTALLER_IDENTITY }}
+      CFD_NOTARY_APPLE_ID: ${{ secrets.CFD_NOTARY_APPLE_ID }}
+      CFD_NOTARY_TEAM_ID: ${{ secrets.CFD_NOTARY_TEAM_ID }}
+      CFD_NOTARY_PASSWORD: ${{ secrets.CFD_NOTARY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with: { name: release-zips, path: zips }
+
+      # codesign reads from a keychain, so the certificates have to be in one.
+      # A throwaway keychain rather than the login one: it is unlocked with a
+      # password this job invents, it is deleted at the end, and nothing else on
+      # the runner can be reached through it.
+      - name: Import the signing certificates
+        env:
+          CFD_MACOS_CERTS_BASE64: ${{ secrets.CFD_MACOS_CERTS_BASE64 }}
+          CFD_MACOS_CERTS_PASSWORD: ${{ secrets.CFD_MACOS_CERTS_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CFD_MACOS_CERTS_BASE64:-}" ]; then
+            echo "no CFD_MACOS_CERTS_BASE64 secret; this build will not be signed"
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/cfd-signing.keychain-db"
+          password="$(uuidgen)"
+          certs="$RUNNER_TEMP/certs.p12"
+          echo "$CFD_MACOS_CERTS_BASE64" | base64 --decode > "$certs"
+
+          security create-keychain -p "$password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$password" "$keychain"
+          # -T codesign/productsign, plus the partition list below, is what stops
+          # macOS putting up a GUI prompt for the private key on a headless
+          # runner - which would simply hang the job until it timed out.
+          security import "$certs" -k "$keychain" \
+              -P "${CFD_MACOS_CERTS_PASSWORD:-}" -A \
+              -T /usr/bin/codesign -T /usr/bin/productsign
+          security set-key-partition-list -S apple-tool:,apple: \
+              -k "$password" "$keychain" >/dev/null
+          # Prepend rather than replace: the default keychains still hold the
+          # Apple intermediate certificates the chain is validated against.
+          security list-keychains -d user -s "$keychain" \
+              $(security list-keychains -d user | tr -d '"')
+          rm -f "$certs"
+          echo "identities now available:"
+          security find-identity -v -p codesigning "$keychain"
+
+      - name: Rebuild dist/ from the zips
+        run: |
+          python3 scripts/unpack-release.py "${{ needs.version.outputs.value }}" zips dist --platform macos
+
+      # Both packages from one Mac: this step only repackages, it never builds.
+      # "skipped" is not a pass here - a release that reached this job is meant
+      # to have both architectures in it, so a missing one is an error and not a
+      # note, exactly as it is for the other two platforms.
+      - name: Build the .pkg installer
+        run: |
+          missing=0
+          for a in arm64 x64; do
+            ls dist/"Fluid Solver ${{ needs.version.outputs.value }} macos-$a "* >/dev/null 2>&1 || {
+              echo "::error::no macos-$a rows in this release"; missing=1; }
+          done
+          [ "$missing" = 0 ] || exit 1
+          # Signing and notarising happen inside build-pkg.sh, in the only order
+          # Apple accepts: binaries, then package, then notarise, then staple.
+          bash installer/macos/build-pkg.sh "${{ needs.version.outputs.value }}" all
+          [ -f "dist/Fluid Solver ${{ needs.version.outputs.value }} macos.pkg" ] || {
+            echo "::error::build-pkg.sh produced no .pkg"; exit 1; }
+
+      - name: Forget the keychain
+        if: always()
+        run: |
+          keychain="$RUNNER_TEMP/cfd-signing.keychain-db"
+          [ -f "$keychain" ] || exit 0
+          security delete-keychain "$keychain" || true
+          rm -f "$RUNNER_TEMP/certs.p12" || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers-macos
+          path: dist/*.pkg
+          if-no-files-found: error
+
+  collect:
+    needs: [version, windows, linux, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: installers-*
+          merge-multiple: true
+          path: installers
+
+      - name: What came back
+        run: ls -1sh installers
+
+      - name: Checksums
+        run: |
+          ( cd installers && sha256sum -- * ) > SHA256SUMS-installers.txt
+          mv SHA256SUMS-installers.txt installers/
+          cat installers/SHA256SUMS-installers.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: installers
+          path: installers/
+          if-no-files-found: error
+
+      # A release of their own by default: the portable release is 68 files
+      # that change whenever a row is rebuilt, and these are three files cut
+      # from it. Point installer_tag at v<version> instead to put them
+      # together. Either way the tag is created if it is not there, so this
+      # does not need the release to exist first.
+      - name: Publish the installers
+        if: inputs.installer_tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          V: ${{ needs.version.outputs.value }}
+          TAG: ${{ inputs.installer_tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Fluid Solver $V installers" \
+              --notes "Installers for Fluid Solver $V. One per platform, each carrying every architecture and every accelerator variant that was built; it reads the machine and installs the fastest build that machine can run. The portable archives are in the ${{ needs.version.outputs.tag }} release."
+          fi
+          gh release upload "$TAG" installers/* --clobber
+          echo "Installers published to $TAG" >> "$GITHUB_STEP_SUMMARY"
