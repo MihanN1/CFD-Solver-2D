@@ -56,7 +56,8 @@ This project is **two separate programs** plus the machinery around them.
 ```
 
 Everything in `src/` and `include/` is **the solver only**. SFML is not linked
-into it at all; `lib/sfml/` exists for the UI, which lives on its own branch.
+into it at all, and no copy of it is vendored here any more: the UI lives on its
+own branch and carries its own in `third_party/sfml`.
 The solver draws nothing: it writes `.vtk` frames, and either the UI or
 ParaView draws them.
 

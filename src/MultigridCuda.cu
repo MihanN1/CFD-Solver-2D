@@ -622,7 +622,8 @@ float Multigrid::solveCuda(
     float smootherOmega,
     float coarseOmega,
     int maxCycles,
-    float tolerance)
+    float tolerance,
+    float rhsScale)
 {
     if (!deviceReady) {
         std::fprintf(stderr, "Multigrid::solveCuda called before setGeometry\n");
@@ -646,7 +647,7 @@ float Multigrid::solveCuda(
         CUDA_CHECK_LAUNCH("zeroSolidPressureKernel");
     }
 
-    const float rhsNorm = computeRhsNormCuda(0);
+    const float rhsNorm = (rhsScale > 0.0f) ? rhsScale : computeRhsNormCuda(0);
     const float scale = (rhsNorm > 1e-20f) ? rhsNorm : 1.0f;
 
     if (firstSolve) {
@@ -658,11 +659,15 @@ float Multigrid::solveCuda(
     lastCycles = 0;
     float relative = 1.0f;
 
+    // Same as the CPU path: the first cycle is cheaper than finding out it was
+    // not needed, and here that check also costs a device to host copy
     for (int cycle = 0; cycle < maxCycles; ++cycle) {
-        computeResidualCuda(0);
-        relative = computeResidualNormCuda(0) / scale;
-        if (relative < tolerance)
-            break;
+        if (cycle > 0) {
+            computeResidualCuda(0);
+            relative = computeResidualNormCuda(0) / scale;
+            if (relative < tolerance)
+                break;
+        }
 
         vCycleCuda(0, smootherOmega, coarseOmega);
         ++lastCycles;

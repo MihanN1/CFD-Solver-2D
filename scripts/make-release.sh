@@ -68,7 +68,13 @@ project_version() {
         "$REPO/CMakeLists.txt" 2>/dev/null | head -1
 }
 
-VERSION="${1:-}"; shift 2>/dev/null || true
+# Only a bare first argument is the version. Anything starting with "-" is an
+# option, and swallowing it here used to cost both the flag and the version.
+VERSION=""
+case "${1:-}" in
+    ""|-*) ;;
+    *) VERSION="$1"; shift ;;
+esac
 [ -n "$VERSION" ] || VERSION="$(project_version)"
 if [ -z "$VERSION" ]; then
     echo "no version given and none found in CMakeLists.txt" >&2; exit 1

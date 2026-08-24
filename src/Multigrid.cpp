@@ -691,7 +691,8 @@ float Multigrid::solve(
     float smootherOmega,
     float coarseOmega,
     int maxCycles,
-    float tolerance)
+    float tolerance,
+    float rhsScale)
 {
     if (!geometryReady) {
         std::fprintf(stderr, "Multigrid::solve called before setGeometry\n");
@@ -706,7 +707,8 @@ float Multigrid::solve(
             smootherOmega,
             coarseOmega,
             maxCycles,
-            tolerance);
+            tolerance,
+            rhsScale);
 #endif
 
     Level& finest = gridLevels[0];
@@ -723,7 +725,7 @@ float Multigrid::solve(
         finestRhs[id] = active ? rhs[id] : 0.0f;
     }
 
-    const float rhsNorm = computeVectorNorm(finestRhs, cellCount);
+    const float rhsNorm = (rhsScale > 0.0f) ? rhsScale : computeVectorNorm(finestRhs, cellCount);
     const float scale = (rhsNorm > 1e-20f) ? rhsNorm : 1.0f;
 
     if (firstSolve) {
@@ -737,11 +739,16 @@ float Multigrid::solve(
     lastCycles = 0;
     float relative = 1.0f;
 
+    // The first cycle runs whatever the residual says, because the field comes
+    // from the previous step and one V-cycle costs less than the residual pass
+    // that would find out it was not needed. So that pass is not made at all.
     for (int cycle = 0; cycle < maxCycles; ++cycle) {
-        computeResidual(0);
-        relative = computeResidualNorm(0) / scale;
-        if (relative < tolerance)
-            break;
+        if (cycle > 0) {
+            computeResidual(0);
+            relative = computeResidualNorm(0) / scale;
+            if (relative < tolerance)
+                break;
+        }
         vCycle(0, smootherOmega, coarseOmega);
         ++lastCycles;
     }

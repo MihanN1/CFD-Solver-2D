@@ -22,10 +22,6 @@ cmake_install.cmake
 *.vtk
 *.csv
 Makefile
-# Release and build scratch. dist/ is what the build scripts fill and the
-# installers read; .toolchain/ is a virtualenv with absolute paths in it, so it
-# is worthless on any other machine; build-*/ are the per-row CMake trees; and
-# _to_delete/ is where this repository parks files it cannot unlink.
 dist/
 build-*/
 .toolchain/

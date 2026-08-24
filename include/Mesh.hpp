@@ -23,6 +23,16 @@ public:
         OBJ
     };
 
+    // One connected body in the rasterized mask. radius is the distance from
+    // the centroid to the farthest cell of the body, i.e. what its rim speed
+    // is computed from when it spins.
+    struct SolidObject {
+        int cells = 0;
+        double cx = 0.0;
+        double cy = 0.0;
+        double radius = 0.0;
+    };
+
     // presetSolid short-circuits the whole geometry pipeline: a continuation
     // already has the mask in its frame, so the model file does not have to
     // exist any more and the rasterizer cannot drift between runs.
@@ -31,6 +41,8 @@ public:
 
     std::vector<double> x, y;
     std::vector<int> solid;   // 1 = inside body, 0 = fluid
+    std::vector<int> objectId;   // 0 = fluid, 1..objects.size() = which body
+    std::vector<SolidObject> objects;
     std::vector<Triangle> triangles;
     GeometryType geometryType = GeometryType::STL;
     float dx, dy;
@@ -43,6 +55,13 @@ public:
     void buildSection();
     void rasterizeSection();
     void buildSolid();
+
+    // Flood-fills the mask into numbered bodies, 8-connected: two cells that
+    // meet only at a corner are one object, and the flow cannot squeeze
+    // through that corner either. Numbering follows the scan order of the
+    // grid, so the same mask always produces the same numbers.
+    void labelObjects();
+
     void printInfo() const;
 
 private:
