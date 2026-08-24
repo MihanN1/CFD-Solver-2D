@@ -31,3 +31,4 @@ build-*/
 .toolchain/
 _to_delete/
 dist-ui/
+release/
