@@ -333,8 +333,9 @@ if(CFD_ENABLE_OPENMP)
     # the search at the archive before find_package runs, and the imported
     # target comes out static without anything downstream noticing.
     if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+        separate_arguments(CFD_LIBGOMP_QUERY NATIVE_COMMAND "${CMAKE_CXX_FLAGS}")
         execute_process(
-            COMMAND "${CMAKE_CXX_COMPILER}" ${CMAKE_CXX_FLAGS} -print-file-name=libgomp.a
+            COMMAND "${CMAKE_CXX_COMPILER}" ${CFD_LIBGOMP_QUERY} -print-file-name=libgomp.a
             OUTPUT_VARIABLE CFD_LIBGOMP_A
             OUTPUT_STRIP_TRAILING_WHITESPACE
             ERROR_QUIET
