@@ -68,6 +68,9 @@ Possible future extensions include:
 - ✅ Slivers under a ten-thousandth of the largest loop are dropped as cutting
   noise rather than rasterized into the flow
 
+The section keeps the largest closed loop it finds, so the geometry this handles
+is anything that sections into a single closed outline.
+
 ---
 
 ## Visualization

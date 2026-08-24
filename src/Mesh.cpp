@@ -607,6 +607,23 @@ std::size_t Mesh::sectionPointCount() const {
     return total;
 }
 
+bool Mesh::hasSection() const {
+    for (const std::vector<SectionPoint>& contour : sectionContours) {
+        if (contour.size() >= 3) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::size_t Mesh::sectionPointCount() const {
+    std::size_t total = 0;
+    for (const std::vector<SectionPoint>& contour : sectionContours) {
+        total += contour.size();
+    }
+    return total;
+}
+
 void Mesh::rasterizeSection() {
     clearSolid();
     if (!hasSection()) {
