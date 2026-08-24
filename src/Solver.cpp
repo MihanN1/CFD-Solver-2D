@@ -808,6 +808,8 @@ float Solver::maxDivergence() const {
             const float div =
                 (u[rowU + i + 1] - u[rowU + i]) * invDx +
                 (v[rowVTop + i] - v[rowV + i]) * invDy;
+            if (!std::isfinite(div))
+                return std::numeric_limits<float>::quiet_NaN();
             worst = std::max(worst, std::fabs(div));
         }
     }
@@ -816,9 +818,70 @@ float Solver::maxDivergence() const {
 
 float Solver::maxVelocity() const {
     float maxVel = 0.0f;
-    for (float value : u) maxVel = std::max(maxVel, std::fabs(value));
-    for (float value : v) maxVel = std::max(maxVel, std::fabs(value));
-    return maxVel;
+    int nonFinite = 0;
+
+    const float* const uValues = u.data();
+    const float* const vValues = v.data();
+    const int uCount = static_cast<int>(u.size());
+    const int vCount = static_cast<int>(v.size());
+    int uStart = 0;
+    int vStart = 0;
+
+#ifdef __AVX2__
+    if (runtime::avx2) {
+        const __m256 signMask = absMask();
+        const __m256 infVec =
+            _mm256_set1_ps(std::numeric_limits<float>::infinity());
+
+        #pragma omp parallel reduction(+ : nonFinite) \
+                if (uCount + vCount >= 8192)
+        {
+            __m256 localVec = _mm256_setzero_ps();
+            __m256 localBad = _mm256_setzero_ps();
+
+            #pragma omp for schedule(static) nowait
+            for (int i = 0; i <= uCount - 8; i += 8) {
+                const __m256 magnitude =
+                    _mm256_and_ps(signMask, _mm256_loadu_ps(uValues + i));
+                localBad = _mm256_or_ps(localBad,
+                    _mm256_cmp_ps(magnitude, infVec, _CMP_NLT_UQ));
+                localVec = _mm256_max_ps(localVec, magnitude);
+            }
+
+            #pragma omp for schedule(static) nowait
+            for (int i = 0; i <= vCount - 8; i += 8) {
+                const __m256 magnitude =
+                    _mm256_and_ps(signMask, _mm256_loadu_ps(vValues + i));
+                localBad = _mm256_or_ps(localBad,
+                    _mm256_cmp_ps(magnitude, infVec, _CMP_NLT_UQ));
+                localVec = _mm256_max_ps(localVec, magnitude);
+            }
+
+            nonFinite += (_mm256_movemask_ps(localBad) != 0) ? 1 : 0;
+            #pragma omp critical
+            {
+                maxVel = std::max(maxVel, horizontalMax(localVec));
+            }
+        }
+        uStart = (uCount / 8) * 8;
+        vStart = (vCount / 8) * 8;
+    }
+#endif
+
+    for (int i = uStart; i < uCount; ++i) {
+        if (!std::isfinite(uValues[i]))
+            ++nonFinite;
+        else
+            maxVel = std::max(maxVel, std::fabs(uValues[i]));
+    }
+    for (int i = vStart; i < vCount; ++i) {
+        if (!std::isfinite(vValues[i]))
+            ++nonFinite;
+        else
+            maxVel = std::max(maxVel, std::fabs(vValues[i]));
+    }
+
+    return nonFinite ? std::numeric_limits<float>::quiet_NaN() : maxVel;
 }
 
 void Solver::projectRestartState() {
@@ -897,6 +960,7 @@ void Solver::run() {
     progress::begin("Fluid Solver", currentTime, cfg.totalTime,
                     pathToConsole(outputPath));
     bool stopped = false;
+    bool diverged = false;
 
     while (currentTime < cfg.totalTime) {
         if (step % dtUpdateInterval == 0)
@@ -971,8 +1035,10 @@ void Solver::run() {
             break;
         }
 
-        if (step % 10 == 0) {
-            const float maxVel = maxVelocity();
+        const float maxVel = maxVelocity();
+        diverged = !std::isfinite(maxVel);
+
+        if (diverged || step % 10 == 0) {
             std::cout << "Step " << step
                       << ", t = " << currentTime
                       << " s, dt = " << stepDt
@@ -981,22 +1047,24 @@ void Solver::run() {
                       << ", mg res = " << lastResidual
                       << " (" << multigrid.cyclesUsed() << " cycles)"
                       << std::endl;
-            if (std::isnan(maxVel) || std::isinf(maxVel)) {
-                std::cerr << "Solution diverged at step " << step
-                          << "; aborting.\n";
-                break;
-            }
+        }
+        if (diverged) {
+            std::cerr << "Solution diverged at step " << step
+                      << "; aborting. The last frame on disk is the last good "
+                         "one.\n";
+            break;
         }
 
         if (step % saveInterval == 0)
             saveVTK(step);
     }
 
-    if (step % saveInterval != 0)
+    if (!diverged && step % saveInterval != 0)
         saveVTK(step);
-    progress::finish(!stopped);
-    std::cout << (stopped ? "Simulation stopped at t = "
-                          : "Simulation finished at t = ")
+    progress::finish(!stopped && !diverged);
+    std::cout << (diverged ? "Simulation aborted at t = "
+                           : stopped ? "Simulation stopped at t = "
+                                     : "Simulation finished at t = ")
               << currentTime << " s after " << step << " steps.\n";
     if (stopped)
         std::cout << "Continue it with: restart=1 restartFile="

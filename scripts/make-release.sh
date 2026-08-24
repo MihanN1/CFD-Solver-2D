@@ -690,7 +690,10 @@ stamp_ui_icon() {
     local src="${FROM_RELEASE_DIR:-$REL}"
     [ -f "$script" ] || return 0
     [ -d "$src" ] || return 0
-    ls "$src"/"Fluid Solver $VERSION "*-ui.zip >/dev/null 2>&1 || return 0
+    if ! ls "$src"/"Fluid Solver $VERSION "*-ui.zip >/dev/null 2>&1 \
+       && ! ls "$src"/"Fluid.Solver.$VERSION."*-ui.zip >/dev/null 2>&1; then
+        return 0
+    fi
     command -v python3 >/dev/null 2>&1 || {
         note "the UI icon was not stamped - python3 is missing"; return 0; }
 
