@@ -128,9 +128,12 @@ def main():
 
     wanted = set(args.platform) or {"windows", "linux", "macos"}
     taken, skipped = 0, 0
+    seen_versions = set()
 
     for zip_path in sorted(source.glob("*.zip")):
         info = parse(zip_path.stem)
+        if info is not None:
+            seen_versions.add(info["ver"])
         if info is None or info["ver"] != args.version:
             skipped += 1
             continue
@@ -163,10 +166,21 @@ def main():
     shutil.rmtree(scratch, ignore_errors=True)
 
     if taken == 0:
-        raise SystemExit(
-            f"nothing matched 'Fluid Solver {args.version} <platform>-<arch> <feature>.zip' "
-            f"in {source}"
-        )
+        message = [
+            f"nothing matched 'Fluid Solver {args.version} <platform>-<arch> "
+            f"<feature>.zip' in {source}"
+        ]
+        others = sorted(v for v in seen_versions if v != args.version)
+        if others:
+            message.append(
+                "the archives there are version " + ", ".join(others)
+                + f" - not {args.version}. Pass that as the version instead; a "
+                  "release tag that reads differently is a separate thing.")
+        elif not seen_versions:
+            message.append(
+                "no file there is named like a release row at all - "
+                f"{source} holds {len(list(source.glob('*.zip')))} zip(s).")
+        raise SystemExit("\n".join(message))
     print(f"{taken} row(s) unpacked into {dist}"
           + (f", {skipped} file(s) ignored" if skipped else ""))
     return 0

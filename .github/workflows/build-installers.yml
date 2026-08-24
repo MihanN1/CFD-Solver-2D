@@ -42,10 +42,18 @@ on:
           for a release that is not the one this branch is on.
         default: ""
         required: false
+      source_tag:
+        description: >
+          Tag of the portable release to take the archives from. Leave empty
+          for v<version>. Fill it in when the portable release is tagged
+          something else - "v0.2-Portable", say - because the version above
+          has to stay the one written into the archive names.
+        required: false
+        default: ""
       run_id:
         description: >
           Optional. Run id of "Build every binary" to take the zips from.
-          Leave empty to use the release of tag v<version>.
+          Leave empty to use the release of the tag above.
         required: false
         default: ""
       installer_tag:
@@ -71,6 +79,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       value: ${{ steps.pick.outputs.value }}
+      tag: ${{ steps.pick.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
       - id: pick
@@ -85,8 +94,11 @@ jobs:
             echo "::error::no version given and none found in CMakeLists.txt"
             exit 1
           fi
+          tag="${{ inputs.source_tag }}"
+          [ -z "$tag" ] && tag="v$v"
           echo "value=$v" >> "$GITHUB_OUTPUT"
-          echo "Building installers for $v"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "Building installers for $v, taking the archives from $tag"
 
   # Downloaded once, here, rather than four times with four sets of
   # credentials. Everything below just pulls this artifact.
@@ -94,15 +106,15 @@ jobs:
     needs: version
     runs-on: ubuntu-latest
     steps:
-      - name: From the release of tag v${{ needs.version.outputs.value }}
+      - name: From the release of tag ${{ needs.version.outputs.tag }}
         if: inputs.run_id == ''
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
-          V: ${{ needs.version.outputs.value }}
+          TAG: ${{ needs.version.outputs.tag }}
         run: |
           mkdir -p zips
-          gh release download "v$V" --dir zips --pattern '*.zip'
+          gh release download "$TAG" --dir zips --pattern '*.zip'
           ls -1 zips
 
       - name: From run ${{ inputs.run_id }} of "Build every binary"
@@ -212,7 +224,7 @@ jobs:
         run: |
           for f in zips/*windows*-ui.zip; do
             for try in 1 2 3 4 5; do
-              gh release upload "v${{ needs.version.outputs.value }}" "$f" --clobber && break
+              gh release upload "${{ needs.version.outputs.tag }}" "$f" --clobber && break
               echo "retry $try for $(basename "$f")"; sleep $((try * 30))
             done
             sleep 5
@@ -467,7 +479,7 @@ jobs:
           if ! gh release view "$TAG" >/dev/null 2>&1; then
             gh release create "$TAG" \
               --title "Fluid Solver $V installers" \
-              --notes "Installers for Fluid Solver $V. One per platform, each carrying every architecture and every accelerator variant that was built; it reads the machine and installs the fastest build that machine can run. The portable archives are in the v$V release."
+              --notes "Installers for Fluid Solver $V. One per platform, each carrying every architecture and every accelerator variant that was built; it reads the machine and installs the fastest build that machine can run. The portable archives are in the ${{ needs.version.outputs.tag }} release."
           fi
           gh release upload "$TAG" installers/* --clobber
           echo "Installers published to $TAG" >> "$GITHUB_STEP_SUMMARY"
