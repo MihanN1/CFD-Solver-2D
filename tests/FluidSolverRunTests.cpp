@@ -106,6 +106,36 @@ int main() {
         return fail("zero saveInterval was accepted");
     }
 
+    config.saveInterval = 3;
+
+    // Gravity and wallMotion are held back exactly like the 0.2 switches, and
+    // appear once the executable has been found to understand them.
+    config.supportsGravity = true;
+    config.gravityEnabled = true;
+    config.gravityAccel = 9.81;
+    config.gravityAngle = 30.0;
+    config.supportsWallMotion = true;
+    config.wallMotion = "1:rot=90;2:slip=1";
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("gravity/wallMotion arguments failed: " + error);
+    }
+    if (!contains(arguments, "gravityEnabled=1") ||
+        !hasPrefix(arguments, "gravityAccel=") ||
+        !hasPrefix(arguments, "gravityAngle=") ||
+        !contains(arguments, "wallMotion=1:rot=90;2:slip=1")) {
+        return fail("gravity/wallMotion arguments are incomplete");
+    }
+    config.wallMotion = "1:rot=90\n2:slip=1";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a multi-line wallMotion was accepted");
+    }
+    config.wallMotion.clear();
+    config.gravityAccel = -1.0;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a negative gravityAccel was accepted");
+    }
+    config.gravityAccel = 9.81;
+
     std::error_code cleanupError;
     std::filesystem::remove_all(root, cleanupError);
     return 0;

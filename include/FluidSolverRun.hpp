@@ -59,6 +59,20 @@ struct FluidSolverRunConfig {
     bool useOpenMp = true;
     int threads = 0;          // 0 = every core
     bool solverTray = true;   // the solver's own tray icon and progress
+
+    // ---- gravity and wall behaviour ---------------------------------------
+    // Same rule again: a solver without these keys exits on the first one it
+    // does not know, so the two supports* flags are what the UI sets after
+    // finding the key names in the executable.
+    bool supportsGravity = false;
+    bool gravityEnabled = false;
+    double gravityAccel = 9.81;   // m/s^2
+    double gravityAngle = 0.0;    // degrees, clockwise, 0 = down
+
+    bool supportsWallMotion = false;
+    // "1:rot=90,slideX=0.5;2:slip=1". Empty means every wall is static no-slip,
+    // which is what the solver does when the key is absent.
+    std::string wallMotion;
 };
 
 bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,

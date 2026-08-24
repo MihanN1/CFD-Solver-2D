@@ -189,6 +189,13 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
     if (config.threads < 0) {
         return fail(error, "threads must be zero (all cores) or positive");
     }
+    if (!requireNonNegative("gravityAccel", config.gravityAccel, error) ||
+        !requireFinite("gravityAngle", config.gravityAngle, error)) {
+        return false;
+    }
+    if (config.wallMotion.find_first_of("\r\n") != std::string::npos) {
+        return fail(error, "wallMotion must not contain CR or LF");
+    }
 
     if (config.restart) {
         // The mask, the grid and the geometry all come out of the frame, so
@@ -281,6 +288,17 @@ bool buildFluidSolverArguments(
         arguments.push_back("threads=" + std::to_string(config.threads));
         arguments.push_back(
             "tray=" + std::string(config.solverTray ? "1" : "0"));
+    }
+    if (config.supportsGravity) {
+        arguments.push_back(
+            "gravityEnabled=" + std::string(config.gravityEnabled ? "1" : "0"));
+        arguments.push_back(
+            "gravityAccel=" + serializeDouble(config.gravityAccel));
+        arguments.push_back(
+            "gravityAngle=" + serializeDouble(config.gravityAngle));
+    }
+    if (config.supportsWallMotion) {
+        arguments.push_back("wallMotion=" + config.wallMotion);
     }
     return true;
 }

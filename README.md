@@ -132,9 +132,19 @@ Menu shortcut, a desktop icon or a drag-and-drop each hand the process some othe
 directory, and frames used to land wherever that happened to be. A saved
 `ui-preferences.txt` or a loaded `.cfdui` configuration still overrides it.
 
-The current UI launch contract does not emit gravity, `restart`, `restartFile`,
-or `addTime`. VTK restart parsing/state support is retained for later continuation
-work when the solver has the required restart interface.
+What goes on the command line depends on what the selected executable
+understands, because a solver exits on the first argument it does not know.
+`restart`, `restartFile` and `addTime` need 0.1.1 or newer; `avx2`, `openmp`,
+`threads` and `tray` need 0.2. `gravityEnabled`/`gravityAccel`/`gravityAngle`
+and `wallMotion` came after 0.2 was published, so no version number separates
+them - the UI looks for those key names in the executable's own parameter table
+instead, and leaves them off when they are not there.
+
+`wallMotion` is written for every body the mask holds, numbered 1..n the way the
+solver numbers them: it flood-fills its mask 8-connected in grid scan order, and
+the UI counts the same way so the numbers agree. A continuation sends no
+`wallMotion` at all while the wall controls sit at their defaults, so the setting
+stored in the frame survives.
 
 ## Frame loading
 
@@ -168,8 +178,12 @@ controls on a separate Basic/Advanced page.
 - Mouse wheel over the left parameter panel scrolls the controls.
 - The visible scrollbar can be dragged or clicked.
 - Mouse wheel over the 3D preview still controls preview zoom.
-- The 21 user-editable controls cover the solver's physical, timestep,
-  multigrid, output-frequency, and CUDA settings.
+- The user-editable controls cover the solver's physical, gravity, wall,
+  timestep, multigrid, output-frequency and acceleration settings.
+- The WALLS group is one setting applied to every body: rotation about each
+  body's own centroid, sliding in x and y, or free-slip, which is exclusive
+  with the other three. Per-body lines still have to be typed on the solver's
+  own command line.
 - `outputDir`, `geometryFile`, transformed slice arguments, and `invertSection`
   are generated from the GUI workflow rather than exposed as ordinary sliders.
 

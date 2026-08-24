@@ -763,9 +763,16 @@ enum ParameterIndex : std::size_t {
     WindSpeed,
     Viscosity,
     Density,
+    GravityEnabled,
+    GravityAccel,
+    GravityAngle,
     SliceX,
     SliceZ,
     SliceRotation,
+    WallRotation,
+    WallSlideX,
+    WallSlideY,
+    WallSlip,
     DomainX,
     DomainY,
     CellsX,
@@ -794,9 +801,10 @@ struct ParameterGroupInfo {
     const char* label;
 };
 
-constexpr std::array<ParameterGroupInfo, 8> PARAMETER_GROUPS{{
+constexpr std::array<ParameterGroupInfo, 9> PARAMETER_GROUPS{{
     {WindSpeed, "FLOW"},
     {SliceX, "GEOMETRY"},
+    {WallRotation, "WALLS"},
     {DomainX, "DOMAIN / GRID"},
     {Cfl, "TIME"},
     {CoarseSorOmega, "PRESSURE / MULTIGRID"},
@@ -808,7 +816,9 @@ constexpr std::array<ParameterGroupInfo, 8> PARAMETER_GROUPS{{
 const char* parameterKey(std::size_t index) {
     static constexpr std::array<const char*, ParameterCount> keys{{
         "U0", "nu", "ro",
+        "gravityEnabled", "gravityAccel", "gravityAngle",
         "sliceAngleX", "sliceAngleZ", "sliceRotation",
+        "wallRot", "wallSlideX", "wallSlideY", "wallSlip",
         "Lx", "Ly", "nx", "ny",
         "CFL", "totalTime", "addTime", "dtUpdateInterval", "dtSafety",
         "omega", "smootherOmega", "mgIterations", "mgTolerance",
@@ -826,10 +836,23 @@ std::string parameterHelp(std::size_t index) {
         return "nu: kinematic viscosity; affects Reynolds number and diffusion timestep.";
     case Density:
         return "rho / CLI key ro: physical density used by the solver pressure output.";
+    case GravityEnabled:
+        return "gravityEnabled: adds gravity as a uniform body force. At constant density it moves the pressure map, not the velocity field.";
+    case GravityAccel:
+        return "gravityAccel: magnitude of that body force in m/s2. 9.81 is Earth.";
+    case GravityAngle:
+        return "gravityAngle: direction in degrees, measured clockwise from straight down.";
     case SliceX:
     case SliceZ:
     case SliceRotation:
         return "Geometry section transform. The UI bakes this into section-adapter.obj.";
+    case WallRotation:
+        return "wallMotion rot: surface speed as a spin about each body's own centroid, in deg/s. The body does not move; its walls drag the fluid.";
+    case WallSlideX:
+    case WallSlideY:
+        return "wallMotion slideX / slideY: the wall surface is dragged along in a straight line at this speed, in m/s.";
+    case WallSlip:
+        return "wallMotion slip: free-slip walls instead of no-slip. Exclusive with rotation and sliding, so turning it on clears those.";
     case DomainX:
     case DomainY:
         return "Physical domain size. dx=Lx/nx and dy=Ly/ny.";
@@ -1500,6 +1523,8 @@ struct SolverExecutableInfo {
     bool supportsRuntimeSwitches = false;   // avx2= openmp= threads= tray=
     bool supportsContinuation = false;      // restart= restartFile= addTime=
     bool supportsMultipleContours = false;  // more than one closed loop
+    bool supportsGravity = false;           // gravityEnabled= Accel= Angle=
+    bool supportsWallMotion = false;        // wallMotion=
     std::string version = "unknown";
     std::string features;
     std::string build = "Unknown build";
@@ -1676,6 +1701,11 @@ SolverExecutableInfo inspectSolverExecutable(
         info.version != "unknown" &&
         compareSolverVersions(info.version, "0.2") >= 0;
     info.supportsMultipleContours = info.supportsRuntimeSwitches;
+    // These two came after 0.2 was published, so a version number cannot tell
+    // them apart. The key names are in the binary's own parameter table, which
+    // is the thing that decides whether the argument is accepted.
+    info.supportsGravity = binaryContains(executable, "gravityEnabled");
+    info.supportsWallMotion = binaryContains(executable, "wallMotion");
     info.supportsContinuation =
         info.version != "unknown" &&
         compareSolverVersions(info.version, "0.1.1") >= 0;
@@ -1685,6 +1715,44 @@ SolverExecutableInfo inspectSolverExecutable(
             "Executable is not recognized as the expected Fluid Solver build.";
     }
     return info;
+}
+
+// The solver numbers the bodies by flood-filling its mask 8-connected in grid
+// scan order, and wallMotion is written in those numbers. Counting them the
+// same way here is what lets the UI address them at all.
+std::size_t countSolidBodies(const std::vector<int>& cells, int nx, int ny) {
+    if (nx <= 0 || ny <= 0 ||
+        cells.size() < static_cast<std::size_t>(nx) * ny) {
+        return 0;
+    }
+    std::vector<char> seen(cells.size(), 0);
+    std::vector<int> pending;
+    std::size_t bodies = 0;
+    for (int seed = 0; seed < nx * ny; ++seed) {
+        if (cells[seed] == 0 || seen[seed]) {
+            continue;
+        }
+        ++bodies;
+        seen[seed] = 1;
+        pending.push_back(seed);
+        while (!pending.empty()) {
+            const int id = pending.back();
+            pending.pop_back();
+            const int i = id % nx;
+            const int j = id / nx;
+            for (int nj = std::max(j - 1, 0); nj <= std::min(j + 1, ny - 1); ++nj) {
+                for (int ni = std::max(i - 1, 0); ni <= std::min(i + 1, nx - 1); ++ni) {
+                    const int neighbour = nj * nx + ni;
+                    if (cells[neighbour] == 0 || seen[neighbour]) {
+                        continue;
+                    }
+                    seen[neighbour] = 1;
+                    pending.push_back(neighbour);
+                }
+            }
+        }
+    }
+    return bodies;
 }
 
 bool confirmUseLargestContour(sf::WindowHandle owner,
@@ -1743,9 +1811,16 @@ public:
               Slider{"Wind speed U0", "m/s", 0.0, 200.0, 1.0, false, false},
               Slider{"Viscosity nu", "m2/s", 1e-8, 10.0, 0.01, false, true},
               Slider{"Density rho (ro)", "kg/m3", 0.01, 5000.0, 1.225, false, true},
+              Slider{"Gravity", "", 0.0, 1.0, 0.0, true, false, true},
+              Slider{"Gravity g", "m/s2", 0.0, 100.0, 9.81, false, false},
+              Slider{"Gravity angle", "deg", -180.0, 180.0, 0.0, false, false},
               Slider{"Slice X", "deg", -180.0, 180.0, 90.0, true, false},
               Slider{"Slice Z", "deg", -180.0, 180.0, 90.0, true, false},
               Slider{"Slice rotation", "deg", -180.0, 180.0, 0.0, false, false},
+              Slider{"Wall rotation", "deg/s", -3600.0, 3600.0, 0.0, false, false},
+              Slider{"Wall slide X", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Wall slide Y", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Free-slip walls", "", 0.0, 1.0, 0.0, true, false, true},
               Slider{"Domain Lx", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Domain Ly", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Cells nx", "", 8.0, 5000.0, 50.0, true, true},
@@ -3067,6 +3142,36 @@ private:
         return parameters;
     }
 
+    // One line for every body the mask found, all of them given the same
+    // setting: the solver numbers them 1..n in grid scan order and the UI has
+    // no per-body editor yet. Empty when nothing is asked for, which is what
+    // static no-slip walls are.
+    std::string composeWallMotion() const {
+        const bool slip = sliders_[WallSlip].value >= 0.5;
+        const double rot = sliders_[WallRotation].value;
+        const double slideX = sliders_[WallSlideX].value;
+        const double slideY = sliders_[WallSlideY].value;
+        if (!slip && rot == 0.0 && slideX == 0.0 && slideY == 0.0) {
+            return {};
+        }
+        const std::size_t bodies = std::max<std::size_t>(solidBodyCount_, 1u);
+        std::ostringstream out;
+        out << std::setprecision(std::numeric_limits<double>::max_digits10);
+        for (std::size_t body = 1; body <= bodies; ++body) {
+            if (body > 1) {
+                out << ';';
+            }
+            out << body << ':';
+            if (slip) {
+                out << "slip=1";
+            } else {
+                out << "rot=" << rot << ",slideX=" << slideX
+                    << ",slideY=" << slideY;
+            }
+        }
+        return out.str();
+    }
+
     FluidSolverRunConfig fluidSolverRunConfig() const {
         FluidSolverRunConfig config;
         const MaskParameters parameters = sectionParameters();
@@ -3110,6 +3215,14 @@ private:
         // same thing, so it is turned off for a run the UI started. The
         // progress is here instead.
         config.solverTray = false;
+
+        config.supportsGravity = solverInfo_.supportsGravity;
+        config.gravityEnabled = sliders_[GravityEnabled].value >= 0.5;
+        config.gravityAccel = sliders_[GravityAccel].value;
+        config.gravityAngle = sliders_[GravityAngle].value;
+
+        config.supportsWallMotion = solverInfo_.supportsWallMotion;
+        config.wallMotion = composeWallMotion();
         return config;
     }
 
@@ -3175,6 +3288,13 @@ private:
         assignDouble("mgTolerance", MgTolerance);
         assignDouble("mgMinCoarseSize", MgMinCoarseSize);
         assignDouble("saveInterval", SaveInterval);
+        assignDouble("gravityAccel", GravityAccel);
+        assignDouble("gravityAngle", GravityAngle);
+        const auto gravity = frame.restart.config.find("gravityEnabled");
+        if (gravity != frame.restart.config.end()) {
+            sliders_[GravityEnabled].value =
+                gravity->second == "1" || gravity->second == "true" ? 1.0 : 0.0;
+        }
         const auto cuda = frame.restart.config.find("useCuda");
         if (cuda != frame.restart.config.end()) {
             sliders_[UseCuda].value =
@@ -3568,7 +3688,7 @@ private:
                 "Solver build.";
             return;
         }
-        const FluidSolverRunConfig requestedConfig = fluidSolverRunConfig();
+        FluidSolverRunConfig requestedConfig = fluidSolverRunConfig();
         if (!validateFluidSolverRunConfig(requestedConfig, error)) {
             invalidSlider_ = sliderForValidationError(error);
             status_ = "Cannot run Fluid Solver: " + error;
@@ -3623,6 +3743,13 @@ private:
             reducedToLargestContour = true;
         }
 
+        // Now that the mask is settled, wallMotion can name every body in it
+        // rather than guessing at one.
+        solidBodyCount_ = std::max<std::size_t>(
+            countSolidBodies(mask.cells, requestedConfig.nx, requestedConfig.ny),
+            1u);
+        requestedConfig.wallMotion = composeWallMotion();
+
         const std::filesystem::path runDirectory =
             createRunDirectory(outputRoot_, error);
         if (runDirectory.empty()) {
@@ -3672,6 +3799,8 @@ private:
                   << (reducedToLargestContour ? 1 : 0) << '\n';
         uiRequest << "sliceRotationDegrees="
                   << requestedConfig.sliceRotation << '\n';
+        uiRequest << "solverObjectCount=" << solidBodyCount_ << '\n';
+        uiRequest << "wallMotion=" << requestedConfig.wallMotion << '\n';
         uiRequest.flush();
         if (!uiRequest) {
             status_ =
@@ -3819,6 +3948,12 @@ private:
         config.restartFile = frame.sourcePath;
         config.totalTime = target;
         config.addTime = addTime;
+        // The frame carries its own wallMotion and not the number of bodies it
+        // was written for, so an untouched wall panel says nothing rather than
+        // overwriting it with an empty line.
+        if (config.wallMotion.empty()) {
+            config.supportsWallMotion = false;
+        }
 
         std::string error;
         if (!validateFluidSolverRunConfig(config, error)) {
@@ -5851,6 +5986,10 @@ private:
     std::optional<std::size_t> invalidSlider_;
     std::chrono::steady_clock::time_point lastValueClickTime_{};
     bool invertSection_ = false;
+    // How many bodies the last generated mask had. wallMotion is written for
+    // 1..this, and a continuation reuses it because the frame it continues
+    // does not carry the number.
+    std::size_t solidBodyCount_ = 1;
 
     DisplayMode mode_ = DisplayMode::Setup;
     ResultQuantity resultQuantity_ = ResultQuantity::Pressure;
