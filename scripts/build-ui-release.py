@@ -375,7 +375,8 @@ def should_skip_source(path: Path) -> bool:
     if not parts:
         return False
     first = parts[0]
-    if first in {".git", ".vs", ".vscode", ".release-build", "dist-ui", "release-ui"}:
+    if first in {".git", ".vs", ".vscode", ".release-build", "dist", "dist-ui",
+                 "release", "release-ui", "logs", "_to_delete"}:
         return True
     if first.startswith("build") or first.startswith("out"):
         return True
@@ -389,10 +390,14 @@ def should_skip_source(path: Path) -> bool:
 def create_source_archive(release_dir: Path) -> Path:
     name = "Fluid-Solver-UI-Source-Code"
     archive = release_dir / f"{name}.zip"
+    output = release_dir.resolve()
     with zipfile.ZipFile(archive, "w") as zf:
         zip_add_directory(zf, name)
         for path in sorted(ROOT.rglob("*")):
             if should_skip_source(path):
+                continue
+            here = path.resolve()
+            if here == output or output in here.parents:
                 continue
             rel = path.relative_to(ROOT)
             arc = f"{name}/{rel.as_posix()}"
