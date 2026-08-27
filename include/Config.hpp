@@ -1,6 +1,68 @@
 #pragma once
+#include "Boundary.hpp"
 #include <string>
 #include <vector>
+
+// Where the weight of the fluid goes. reduced keeps the solve untouched and
+// adds the hydrostatic head on output, which is exact while the density is one
+// number for the whole domain. body puts the force in the predictor and solves
+// for the total pressure, which is what a domain holding two densities needs.
+enum class GravityMode {
+    Reduced,
+    Body
+};
+
+// How the convective term reads the field. upwind is the first order scheme
+// this solver has always used. central is second order and keeps nothing back,
+// which needs rk2 or rk3 under it. muscl is the two blended by a limiter, so
+// it is second order where the field is smooth and falls back to upwind where
+// it is not, which is what stops it overshooting at a front.
+enum class ConvectionScheme {
+    Upwind,
+    Central,
+    Muscl
+};
+
+enum class LimiterKind {
+    Minmod,
+    VanLeer,
+    Superbee
+};
+
+// Forward Euler is one projection per step. The two SSP Runge-Kutta schemes
+// project on every stage, which is what keeps the result divergence free, and
+// cost that many times more per step.
+enum class TimeScheme {
+    Euler,
+    RK2,
+    RK3
+};
+
+// One geometry file and where it sits. An unplaced profile keeps the old
+// behaviour: centred in the domain at a fifth of its smaller side.
+struct Profile {
+    std::string file;
+    float x = 0.0f;
+    float y = 0.0f;
+    bool placed = false;
+    float size = 0.0f;
+    float rotation = 0.0f;
+    float angleX = 0.0f;
+    float angleZ = 0.0f;
+    bool angleSet = false;
+    bool invert = false;
+    bool invertSet = false;
+};
+
+// Reads the profiles string: "<file>@x=..,y=..;<file>@x=..". The separator is
+// '@' rather than ':' because a Windows path already owns the colon. A token
+// with no '@' is a file with no placement. Returns false and fills error in
+// exactly the shape setParam uses.
+bool parseProfiles(const std::string& text,
+                   std::vector<Profile>& out,
+                   std::string& error);
+
+std::string profilesHelp();
 
 // What one solid object does to the fluid touching it. rotation turns the
 // surface about the object's own centroid, slideX/slideY drag it in a straight
@@ -48,6 +110,15 @@ struct Config {
     bool gravityEnabled = false;
     float gravityAccel = 9.81f;   // m/s^2
     float gravityAngle = 0.0f;    // degrees, clockwise, 0 = down
+    GravityMode gravityMode = GravityMode::Reduced;
+
+    // Numerics
+    ConvectionScheme convection = ConvectionScheme::Upwind;
+    LimiterKind limiter = LimiterKind::VanLeer;
+    TimeScheme timeScheme = TimeScheme::Euler;
+
+    // Boundaries
+    BoundarySet boundaries = defaultChannelBoundaries();
 
     // Time
     float CFL = 0.5;
@@ -66,11 +137,18 @@ struct Config {
     bool useCuda = true;
 
     // Output
+    // Extra named fields written into every frame beside pressure, solid and
+    // velocity. Comma separated, empty by default so a frame stays exactly the
+    // size it used to be unless somebody asks for more.
+    std::string extraFields = "";
     int saveInterval = 20;              // write a VTK file every N steps
     std::string outputDir = "output";   // directory for solution_*.vtk
 
     // Geometry
     std::string geometryFile = "none";
+    // Several models at once, each with its own place in the domain. Empty
+    // means geometryFile alone, which is every configuration written so far.
+    std::string profiles = "";
     float sliceAngleX = 0.0;   // degrees
     float sliceAngleZ = 0.0;   // degrees
     float sliceRotation = 0.0;   // degrees
@@ -108,6 +186,10 @@ struct Config {
     static std::string canonicalKey(const std::string& key);
     // Nearest parameter name for a typo, empty when nothing is close enough.
     static std::string suggestKey(const std::string& key);
+
+    // geometryFile and profiles say the same thing in two shapes; this is the
+    // one the mesh actually reads.
+    std::vector<Profile> resolvedProfiles() const;
 
     std::string serialize() const;
 };

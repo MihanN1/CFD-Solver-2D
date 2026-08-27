@@ -3,6 +3,20 @@
 #include <cstdint>
 #include <algorithm>
 
+enum class PressureSideBC : uint8_t {
+    Neumann,
+    Dirichlet
+};
+
+// What the pressure sees at each side of the domain. The defaults are the
+// channel every earlier version solved: open on the right, closed elsewhere.
+struct MultigridBC {
+    PressureSideBC left = PressureSideBC::Neumann;
+    PressureSideBC right = PressureSideBC::Dirichlet;
+    PressureSideBC bottom = PressureSideBC::Neumann;
+    PressureSideBC top = PressureSideBC::Neumann;
+};
+
 class Multigrid {
 public:
     Multigrid(int nx, int ny, float dx, float dy, int minCoarseSize = 8);
@@ -15,6 +29,21 @@ public:
     // Builds the level hierarchy and the stencil coefficients for the geometry.
     // Must be called before solve().
     void setGeometry(const std::vector<uint8_t>& solid);
+
+    // Which sides fix the pressure and which only reflect it. Call before
+    // setGeometry, or the stencil is rebuilt for you.
+    void setPressureBC(const MultigridBC& bc);
+
+    // Per face weight of the stencil, which is 1/rho once the density stops
+    // being constant. faceX has (nx+1)*ny entries, faceY has nx*(ny+1); both
+    // may be empty, which means one everywhere and is what the constant
+    // density case uses. Cheap enough to call every step.
+    void setCoefficients(const std::vector<float>& faceX,
+                         const std::vector<float>& faceY);
+
+    // No side fixes the pressure, so the operator has the constants in its
+    // null space and solve() has to remove them. A closed box is exactly this.
+    bool singularPressure() const { return pressureSingular; }
 
     // Returns the relative residual ||r|| / ||rhs|| reached
     float solve(
@@ -85,6 +114,10 @@ private:
 
         std::vector<uint8_t> solid;
 
+        // Face weights of this level, coarsened from the finest one
+        std::vector<float> faceX;   // (nx+1) * ny
+        std::vector<float> faceY;   // nx * (ny+1)
+
         // Sum of the prolongation weights that land on fluid cells, used to
         // normalise both the prolongation and the restriction
         std::vector<float> prolongWeight;
@@ -100,6 +133,11 @@ private:
     int levels = 0;
     int lastCycles = 0;
     bool geometryReady = false;
+    bool pressureSingular = false;
+    bool coefficientsUniform = true;
+    MultigridBC pressureBC;
+    std::vector<float> fineFaceX;
+    std::vector<float> fineFaceY;
     bool firstSolve = true;
     bool useCuda = false;
 
@@ -108,6 +146,10 @@ private:
     void buildHierarchy();
 
     void buildCoefficients(Level& grid);
+
+    void coarsenFaceWeights();
+    void rebuildCoefficients();
+    void removeNullSpace(float* values, const Level& grid) const;
 
     void fullMultigrid(float smootherOmega, float coarseOmega);
 
@@ -141,6 +183,8 @@ private:
         static bool cudaDeviceAvailable();
 
         void setGeometryCuda();
+
+        void uploadCoefficientsCuda();
 
         float solveCuda(
             std::vector<float>& pressure,

@@ -83,16 +83,38 @@ Mesh::Mesh(const Config& cfg, const std::vector<uint8_t>* presetSolid)
         return;
     }
 
-    const bool geometryLoaded = loadGeometry(cfg.geometryFile);
-    buildSection();
+    const std::vector<Profile> profiles = cfg.resolvedProfiles();
+    bool geometryLoaded = false;
+    std::vector<std::vector<SectionPoint>> placed;
+
+    for (const Profile& profile : profiles) {
+        if (!loadGeometry(profile.file)) {
+            std::cerr << "Warning: geometry '" << profile.file
+                      << "' could not be read.\n";
+            continue;
+        }
+        geometryLoaded = true;
+        buildSection(profile);
+        if (sectionContours.empty()) {
+            std::cerr << "Warning: geometry '" << profile.file
+                      << "' produced no section.\n";
+            continue;
+        }
+        for (std::vector<SectionPoint>& contour : sectionContours)
+            placed.push_back(std::move(contour));
+    }
+
+    sectionContours = std::move(placed);
+    if (!placementError.empty())
+        return;
+
     rasterizeSection();
     buildSolid();
 
     if (!geometryLoaded || !hasSection()) {
-        if (!cfg.geometryFile.empty() && lowercase(cfg.geometryFile) != "none")
-            std::cerr << "Warning: geometry '" << cfg.geometryFile
-                      << "' produced no section, falling back to the "
-                         "verification circle.\n";
+        if (!profiles.empty())
+            std::cerr << "Warning: no model produced a section, falling back "
+                         "to the verification circle.\n";
         const double cx = cfg.Lx / 2.0;
         const double cy = cfg.Ly / 2.0;
         const double radius = 0.1 * std::min(cfg.Lx, cfg.Ly);
@@ -265,7 +287,7 @@ bool Mesh::loadSTL(const std::string& filename) {
     return !triangles.empty();
 }
 
-void Mesh::buildSection() {
+void Mesh::buildSection(const Profile& profile) {
     sectionContours.clear();
     if (triangles.empty()) {
         return;
@@ -307,8 +329,8 @@ void Mesh::buildSection() {
         return;
     }
 
-    const double angleX = cfg.sliceAngleX * PI / 180.0;
-    const double angleZ = cfg.sliceAngleZ * PI / 180.0;
+    const double angleX = profile.angleX * PI / 180.0;
+    const double angleZ = profile.angleZ * PI / 180.0;
     const double cosineX = std::cos(angleX);
     const double sineX = std::sin(angleX);
     const double cosineZ = std::cos(angleZ);
@@ -525,7 +547,7 @@ void Mesh::buildSection() {
     // geometry. A genuine second body is never that small next to the first.
     const double areaFloor = 1e-4 * largestArea;
 
-    const double rotation = cfg.sliceRotation * PI / 180.0;
+    const double rotation = profile.rotation * PI / 180.0;
     const double cosineRotation = std::cos(rotation);
     const double sineRotation = std::sin(rotation);
 
@@ -538,7 +560,7 @@ void Mesh::buildSection() {
         contour.reserve(loop.nodes.size());
         for (int nodeIndex : loop.nodes) {
             SectionPoint point = nodes[nodeIndex];
-            if (cfg.invertSection) {
+            if (profile.invert) {
                 point.x = -point.x;
             }
             contour.push_back({
@@ -576,35 +598,70 @@ void Mesh::buildSection() {
     }
 
     const double targetSpan =
-        OBSTACLE_DOMAIN_FRACTION * std::min(cfg.Lx, cfg.Ly);
+        (profile.size > 0.0f)
+            ? static_cast<double>(profile.size)
+            : OBSTACLE_DOMAIN_FRACTION * std::min(cfg.Lx, cfg.Ly);
     const double scale = targetSpan / sectionSpan;
     const double sectionCentreX = 0.5 * (minimumX + maximumX);
     const double sectionCentreY = 0.5 * (minimumY + maximumY);
 
+    const double placeX = profile.placed ? profile.x : cfg.Lx / 2.0;
+    const double placeY = profile.placed ? profile.y : cfg.Ly / 2.0;
+
     // Preserve the former circle diameter while centring imported geometry.
     for (std::vector<SectionPoint>& contour : sectionContours) {
         for (SectionPoint& point : contour) {
-            point.x = cfg.Lx / 2.0 + scale * (point.x - sectionCentreX);
-            point.y = cfg.Ly / 2.0 + scale * (point.y - sectionCentreY);
+            point.x = placeX + scale * (point.x - sectionCentreX);
+            point.y = placeY + scale * (point.y - sectionCentreY);
         }
     }
+
+    checkPlacement(profile);
 }
 
-bool Mesh::hasSection() const {
+// One cell of clearance, because a body sitting exactly on the edge turns that
+// whole side into a wall and nothing about the run says so afterwards.
+void Mesh::checkPlacement(const Profile& profile) {
+    if (!placementError.empty() || sectionContours.empty())
+        return;
+
+    double lowX = std::numeric_limits<double>::max();
+    double lowY = std::numeric_limits<double>::max();
+    double highX = std::numeric_limits<double>::lowest();
+    double highY = std::numeric_limits<double>::lowest();
     for (const std::vector<SectionPoint>& contour : sectionContours) {
-        if (contour.size() >= 3) {
-            return true;
+        for (const SectionPoint& point : contour) {
+            lowX = std::min(lowX, point.x);
+            lowY = std::min(lowY, point.y);
+            highX = std::max(highX, point.x);
+            highY = std::max(highY, point.y);
         }
     }
-    return false;
-}
 
-std::size_t Mesh::sectionPointCount() const {
-    std::size_t total = 0;
-    for (const std::vector<SectionPoint>& contour : sectionContours) {
-        total += contour.size();
-    }
-    return total;
+    const double marginX = dx;
+    const double marginY = dy;
+    std::ostringstream out;
+    const auto miss = [&out](const char* side, double by) {
+        out << "\n    " << side << " by " << by << " m";
+    };
+
+    if (lowX < marginX)          miss("past the left edge", marginX - lowX);
+    if (highX > cfg.Lx - marginX) miss("past the right edge", highX - (cfg.Lx - marginX));
+    if (lowY < marginY)          miss("past the bottom edge", marginY - lowY);
+    if (highY > cfg.Ly - marginY) miss("past the top edge", highY - (cfg.Ly - marginY));
+
+    const std::string misses = out.str();
+    if (misses.empty())
+        return;
+
+    std::ostringstream message;
+    message << "profile '" << profile.file << "' does not fit the domain:"
+            << misses
+            << "\n    it spans x " << lowX << ".." << highX
+            << " and y " << lowY << ".." << highY
+            << " in a domain of " << cfg.Lx << " x " << cfg.Ly << " m."
+            << "\n    Move it with x= and y=, or shrink it with size=.";
+    placementError = message.str();
 }
 
 bool Mesh::hasSection() const {

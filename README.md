@@ -39,17 +39,27 @@ Possible future extensions include:
 - ✅ Incompressible Navier–Stokes equations
 - ✅ Chorin projection method
 - ✅ Staggered (MAC) grid
-- ✅ First-order upwind convection
+- ✅ Convection: first-order upwind, or a limited second-order scheme
+- ✅ Time: forward Euler, or SSP Runge-Kutta of second or third order
 - ✅ Central-difference diffusion
 - ✅ Dynamic CFL-based timestep
 - ✅ Adaptive pressure correction
 - ✅ Optimized Poisson solver
 - ✅ Correct residual evaluation
 - ✅ Immersed boundary method
-- ✅ Optional gravity / uniform body force, direction free
+- ✅ Optional gravity / uniform body force, direction free, as a head added on
+  output or as a real force inside the solve
+- ✅ Named boundary conditions on each of the four sides: inlet, outlet, wall,
+  moving wall, free slip
+- ✅ A pressure problem with no open side at all, solved up to the constant it
+  is defined up to
+- ✅ Variable per-face weights in the pressure operator
 - ✅ Moving walls: rotation and sliding, set per object
 - ✅ Free-slip walls, set per object
+- ✅ Several models at once, each placed where you put it
+- ✅ Extra diagnostic fields written into the frames on request
 - ✅ Restarting sim from a given save
+- ✅ A test suite that checks the answers rather than the exit code
 
 ---
 
@@ -67,9 +77,6 @@ Possible future extensions include:
   by side stay two profiles, and a loop inside a loop comes out as a hole
 - ✅ Slivers under a ten-thousandth of the largest loop are dropped as cutting
   noise rather than rasterized into the flow
-
-The section keeps the largest closed loop it finds, so the geometry this handles
-is anything that sections into a single closed outline.
 
 ---
 
@@ -213,9 +220,18 @@ CFD-Solver-2D/
 │   ├── fluid-solver-{16..1024}.png <- Linux hicolor icons
 │   ├── wizard-*.bmp                <- Inno Setup wizard images
 │   └── toxic-mark-{32..1024}.png   <- the original mark
+├── tests/                          <- ctest suite, built with -DBUILD_TESTING=ON
+│   ├── TestHarness.hpp
+│   ├── PoissonTests.cpp            <- manufactured solution, order of accuracy
+│   ├── ChannelTests.cpp            <- Poiseuille against the exact parabola
+│   ├── ConservationTests.cpp       <- divergence, mass balance, hydrostatics
+│   ├── ConvectionTests.cpp         <- the schemes against each other
+│   ├── RestartTests.cpp            <- a continuation against a straight run
+│   └── BackendAgreementTests.cpp   <- AVX2 and OpenMP on against off
 ├── src/
 │   ├── main.cpp
 │   ├── AppPaths.cpp                <- resolves paths against the executable
+│   ├── Boundary.cpp                <- what each side of the domain does
 │   ├── Config.cpp
 │   ├── Mesh.cpp
 │   ├── Restart.cpp
@@ -226,6 +242,7 @@ CFD-Solver-2D/
 │   └── tiny_obj_loader_impl.cpp
 ├── include/
 │   ├── AppPaths.hpp
+│   ├── Boundary.hpp
 │   ├── Config.hpp
 │   ├── Mesh.hpp
 │   ├── Restart.hpp
@@ -397,6 +414,14 @@ above 0.1, `nu=0`.
 | `gravityEnabled` | switch | 0 | 1 / 0 |
 | `gravityAccel` | float, m/s^2 | 9.81 | >= 0 |
 | `gravityAngle` | float, deg CW from down | 0 | any finite |
+| `gravityMode` | name | `reduced` | `reduced` / `body`, see below |
+| `convection` | name | `upwind` | `upwind` / `muscl` / `central` |
+| `limiter` | name | `vanLeer` | `minmod` / `vanLeer` / `superbee`, only read by `muscl` |
+| `timeScheme` | name | `euler` | `euler` / `rk2` / `rk3` |
+| `bcLeft` `bcRight` `bcBottom` `bcTop` | name | `inlet` `outlet` `slip` `slip` | `inlet` / `outlet` / `wall` / `movingWall` / `slip` |
+| `bcLeftSpeed` … `bcTopSpeed` | float, m/s | unset | what a `movingWall` slides at, or an inlet speed other than `U0` |
+| `inletFrom` `inletTo` | float | 0 / 1 | fraction of the side the inlet occupies |
+| `inletProfile` | name | `uniform` | `uniform` / `parabolic` |
 | `CFL` | float | 0.5 | > 0, warns above 1 |
 | `totalTime` | double, s | 10.0 | > 0 |
 | `dtUpdateInterval` | int, steps | 5 | >= 1 |
@@ -408,11 +433,13 @@ above 0.1, `nu=0`.
 | `mgMinCoarseSize` | int, cells/axis | 8 | >= 2 |
 | `useCuda` | switch | 1 | 1 / 0, ignored on a CPU-only build |
 | `saveInterval` | int, steps | 20 | >= 1 |
+| `extraFields` | list | empty | `vorticity`, `divergence`, `speed`, `objectId`, comma separated |
 | `outputDir` | path | `output` | created on the first frame, empty = current directory |
 | `geometryFile` | path or `none` | `none` | `none` is the verification circle |
 | `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
 | `invertSection` | switch | 0 | 1 / 0 |
 | `wallMotion` | list | empty | `<object>:rot=90,slideX=0.5;<object>:slip=1` — an object either moves or slips, see below |
+| `profiles` | list | empty | `<file>@x=1,y=0.5,size=0.3;<file>@x=3,y=0.5` — several models at once, see below |
 | `restart` | switch | 0 | 1 / 0 |
 | `restartFile` | path | empty | a `.vtk` frame or the folder holding them |
 | `addTime` | double, s | 0.0 | counts forward from the frame |
@@ -459,6 +486,138 @@ command line it is the same three keys:
 short version: at constant density it cannot change the velocity field, only
 the pressure. That is not a limitation of this implementation, it is what the
 equations say.
+
+### `gravityMode`, and why there are two of them
+
+`reduced`, the default, is the shortcut that follows from the paragraph above:
+the force never enters the solve at all, `p` carries only the dynamic part, and
+the hydrostatic head is added back when the frame is written. At one density
+that is not an approximation, it is exact, and it costs nothing.
+
+`body` puts the force in the predictor where it physically belongs and solves
+for the total pressure. On a single-density run it produces the same answer for
+a little more work — a fluid at rest stays at rest to one part in a hundred
+thousand of the head, which is what `ConservationTests` checks. It exists
+because the shortcut stops being exact the moment two densities share a domain,
+and the multiphase work has to have something correct underneath it. It also
+means an open side is held at the head rather than at zero, so the outflow is
+not driven by a pressure step that is not physically there.
+
+```powershell
+"Fluid Solver.exe" gravityEnabled=1 gravityAccel=9.81 gravityMode=body
+```
+
+## Boundaries
+
+Every side of the domain has a name, and the four defaults are the channel
+every earlier version solved: `inlet` on the left, `outlet` on the right,
+`slip` above and below.
+
+| Kind | What it does |
+|---|---|
+| `inlet` | fluid enters at `bc<Side>Speed`, or at `U0` when that was never given |
+| `outlet` | fluid leaves; this is also where the pressure level is fixed |
+| `wall` | no-slip: the fluid sticks to it and is dragged to a stop |
+| `movingWall` | no-slip, but the wall itself slides at `bc<Side>Speed` |
+| `slip` | free-slip: nothing crosses it, nothing rubs against it |
+
+```powershell
+"Fluid Solver.exe" bcBottom=wall bcTop=wall                  # a real channel
+"Fluid Solver.exe" bcLeft=wall bcRight=wall bcBottom=wall bcTop=movingWall bcTopSpeed=1
+```
+
+The second line is a closed box, and a closed box has no side that fixes the
+pressure. The operator then has the constants in its null space: the answer is
+only defined up to one, and the solve says so and takes the mean off every
+cycle instead of letting the level drift. Without that it does not converge at
+all, which is why this had to exist before a cavity could.
+
+An inlet does not have to occupy the whole side. `inletFrom` and `inletTo` cut
+it down to a band measured from the low end of that side, and the rest of the
+side behaves as a wall; `inletProfile=parabolic` bends the band into a parabola
+carrying the same flow rate as the flat one.
+
+## Several models at once
+
+`geometryFile` still takes one model and centres it. `profiles` takes as many as
+you like and puts each one where you say:
+
+```powershell
+"Fluid Solver.exe" "profiles=wing.stl@x=0.6,y=0.5,size=0.3;ball.obj@x=1.6,y=0.5"
+```
+
+The separator between the file and its settings is `@` rather than `:`, because
+a Windows path already owns the colon. The settings are all optional: `x` and
+`y` place the centre in metres, `size` is the larger side of its section in
+metres, `rot` turns it in the plane, `ax` and `az` are slice angles for that
+model alone, and `invert=1` mirrors it. A file written with no `@` keeps the old
+behaviour — centred in the domain at a fifth of its smaller side.
+
+Anything that lands on or outside the domain edge is refused before the run
+starts, with the distance it missed by:
+
+```text
+!!! profile 'cube.obj' does not fit the domain:
+    past the right edge by 0.170833 m
+    it spans x 1.75..2.15 and y 0.3..0.7 in a domain of 2 x 1 m.
+    Move it with x= and y=, or shrink it with size=.
+```
+
+A body touching the border is a wall rather than an obstacle, and a wall nobody
+asked for through the middle of a case is worse than a message.
+
+The bodies are numbered the same way they always were — flood-filled from the
+mask in grid scan order — so `wallMotion` addresses them by the numbers
+`printInfo` lists.
+
+## Convection and time
+
+`convection=upwind` with `timeScheme=euler` is what this solver has always done
+and stays the default, so nothing about an existing run changes. The solver
+prints how much numerical viscosity that costs on every start:
+
+```text
+note: upwind adds 3.125x more viscosity than the fluid has.
+      The run behaves like Re 9.7, not 40.
+```
+
+`convection=muscl` reads one cell further in each direction and blends the
+upwind difference towards the central one by however much the limiter allows.
+Where the field is smooth that is second order; where it is not, the limiter
+pulls it back to upwind rather than letting it overshoot. `central` does no
+limiting at all and is the least dissipative and the least forgiving.
+
+Second order in space with one stage in time is only conditionally stable, and
+not by the CFL number anybody has in mind when they set it, so anything other
+than `upwind` wants `timeScheme=rk2` or `rk3` under it. The solver says so
+rather than letting it blow up on step one. Each Runge-Kutta stage is a whole
+projection, so `rk2` costs twice a step and `rk3` three times; in exchange the
+result is a convex combination of divergence-free fields, which is what keeps
+it divergence free.
+
+What it buys, measured on the same case by how much vorticity is still there at
+the end — this is what `ConvectionTests` asserts:
+
+| Scheme | Peak vorticity |
+|---|---|
+| `upwind` + `euler` | 1.20 |
+| `muscl` `minmod` + `rk2` | 1.45 |
+| `muscl` `vanLeer` + `rk2` | 1.75 |
+| `central` + `rk3` | 2.01 |
+
+## Extra fields
+
+A frame carries pressure, the solid mask and velocity, and nothing else unless
+asked. `extraFields` adds any of `vorticity`, `divergence`, `speed` and
+`objectId` to every frame:
+
+```powershell
+"Fluid Solver.exe" "extraFields=vorticity,speed"
+```
+
+They cost four bytes a cell each and are written for ParaView and the UI to
+read; nothing in the solver reads them back, and a frame carrying them still
+continues exactly like one that does not.
 
 ## Walls: moving and slipping
 
@@ -879,6 +1038,35 @@ The exported files contain:
 - Solid mask
 
 The files can be opened directly in ParaView for further analysis, contour generation, streamline visualization and animation.
+
+---
+
+# Tests
+
+Off by default, because the release matrix is 34 rows and none of them needs
+them built. One switch turns them on:
+
+```bash
+cmake -S . -B build -DBUILD_TESTING=ON -DCFD_ENABLE_CUDA=OFF
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+```
+
+Everything except `main.cpp` lives in a library called `cfd_core`, and both the
+executable and the tests link the same objects, so what is tested is what runs.
+
+| Test | What it would catch |
+|---|---|
+| `PoissonTests` | a manufactured solution the pressure operator has to reproduce to second order, plus the two things the operator gained here: face weights that scale it, and a closed box whose answer is only defined up to a constant |
+| `ChannelTests` | the developed profile between two no-slip walls against the exact parabola, and the same channel with free-slip walls to prove the number came from the wall and not the inlet |
+| `ConservationTests` | divergence left after the projection, inflow against outflow, and a fluid at rest under real gravity staying at rest |
+| `ConvectionTests` | every scheme run on the same case, and the ordering of how much of the field each one throws away |
+| `RestartTests` | a run cut in half and continued reproducing the run that was never cut |
+| `BackendAgreementTests` | AVX2 on against off and many threads against one, which is the thing that quietly turns one solver into several that disagree |
+
+`.github/workflows/build-all.yml` runs `ctest` before it builds a single
+release row, and every platform job waits on it. Before this the matrix only
+ever checked that the thing linked.
 
 ---
 

@@ -18,6 +18,93 @@
 #include <utility>
 
 namespace {
+
+enum PhiKind {
+    PhiUpwind = 0,
+    PhiCentral,
+    PhiMinmod,
+    PhiVanLeer,
+    PhiSuperbee
+};
+
+constexpr float kLimiterFloor = 1e-20f;
+
+// The convective derivative as the upwind difference plus a fraction of the
+// way towards the central one. phi = 0 is the first order scheme this solver
+// has always used and comes out bit for bit the same; phi = 1 is central;
+// everything between is a limiter deciding how much of the second order term
+// survives where the field stops being smooth. Both differences come from the
+// three values the upwind stencil already loads, so nothing extra is read.
+template <int Phi>
+inline float phiOf(float r) {
+    switch (Phi) {
+    case PhiCentral:  return 1.0f;
+    case PhiMinmod:   return std::max(0.0f, std::min(1.0f, r));
+    case PhiVanLeer:  return (r + std::fabs(r)) / (1.0f + std::fabs(r));
+    case PhiSuperbee:
+        return std::max(0.0f,
+                        std::max(std::min(2.0f * r, 1.0f),
+                                 std::min(r, 2.0f)));
+    default:          return 0.0f;
+    }
+}
+
+template <int Phi>
+inline float limitedDelta(float back, float fwd) {
+    if (Phi == PhiUpwind)
+        return back;
+    const float safe = (std::fabs(fwd) > kLimiterFloor)
+                           ? fwd
+                           : (fwd < 0.0f ? -kLimiterFloor : kLimiterFloor);
+    return back + phiOf<Phi>(back / safe) * 0.5f * (fwd - back);
+}
+
+#ifdef __AVX2__
+
+template <int Phi>
+inline __m256 phiOfVec(__m256 r) {
+    const __m256 zero = _mm256_setzero_ps();
+    const __m256 one = _mm256_set1_ps(1.0f);
+    const __m256 two = _mm256_set1_ps(2.0f);
+    switch (Phi) {
+    case PhiCentral:
+        return one;
+    case PhiMinmod:
+        return _mm256_max_ps(zero, _mm256_min_ps(one, r));
+    case PhiVanLeer: {
+        const __m256 mag =
+            _mm256_and_ps(r, _mm256_castsi256_ps(_mm256_set1_epi32(0x7FFFFFFF)));
+        return _mm256_div_ps(_mm256_add_ps(r, mag), _mm256_add_ps(one, mag));
+    }
+    case PhiSuperbee:
+        return _mm256_max_ps(
+            zero,
+            _mm256_max_ps(_mm256_min_ps(_mm256_mul_ps(two, r), one),
+                          _mm256_min_ps(r, two)));
+    default:
+        return zero;
+    }
+}
+
+template <int Phi>
+inline __m256 limitedDeltaVec(__m256 back, __m256 fwd) {
+    if (Phi == PhiUpwind)
+        return back;
+    const __m256 signBit = _mm256_castsi256_ps(_mm256_set1_epi32(0x80000000));
+    const __m256 magnitude =
+        _mm256_max_ps(_mm256_andnot_ps(signBit, fwd),
+                      _mm256_set1_ps(kLimiterFloor));
+    const __m256 safe =
+        _mm256_or_ps(magnitude, _mm256_and_ps(signBit, fwd));
+    return _mm256_add_ps(
+        back,
+        _mm256_mul_ps(
+            _mm256_mul_ps(phiOfVec<Phi>(_mm256_div_ps(back, safe)),
+                          _mm256_set1_ps(0.5f)),
+            _mm256_sub_ps(fwd, back)));
+}
+
+#endif
 #ifdef __AVX2__
 // Largest of the 8 lanes
 float horizontalMax(__m256 v) {
@@ -74,6 +161,7 @@ Solver::Solver(const Config& cfg, const Mesh& mesh)
         const float rad = cfg.gravityAngle * degToRad;
         gx = -cfg.gravityAccel * std::sin(rad) + 0.f;
         gy = -cfg.gravityAccel * std::cos(rad) + 0.f;
+        bodyGravity = cfg.gravityMode == GravityMode::Body;
     }
 
     // Relative to the executable, not to the working directory: a shortcut, a
@@ -100,7 +188,7 @@ bool Solver::setInitialState(RestartData&& state,
     // so the hydrostatic field of the run that wrote the frame comes back off
     // here. Gravity may differ from that run, or be gone; either way what is
     // subtracted is the head the frame was written with.
-    if (state.cfg.gravityEnabled) {
+    if (state.cfg.gravityEnabled && !bodyGravity) {
         constexpr float degToRad = 3.14159265358979f / 180.0f;
         const float rad = state.cfg.gravityAngle * degToRad;
         const float oldGx = -state.cfg.gravityAccel * std::sin(rad) + 0.f;
@@ -121,6 +209,171 @@ bool Solver::setInitialState(RestartData&& state,
         framePrefix = prefix;
 
     return true;
+}
+
+void Solver::resolveBoundaries() {
+    const int nx = cfg.nx;
+    const int ny = cfg.ny;
+
+    const auto fill = [this](SideData& data, BoundarySide which) {
+        const BoundarySpec& spec = cfg.boundaries[which];
+        data.kind = spec.kind;
+        data.outlet = spec.kind == BoundaryKind::Outlet;
+        data.inlet = spec.kind == BoundaryKind::Inlet;
+
+        // Zero gradient across an open or frictionless side, mirrored across a
+        // solid one so the velocity the stencil sees at the wall itself is the
+        // wall's own. That is the whole difference between slip and no-slip.
+        switch (spec.kind) {
+        case BoundaryKind::Wall:
+            data.ghostSign = -1.0f;
+            data.ghostOffset = 0.0f;
+            break;
+        case BoundaryKind::MovingWall:
+            data.ghostSign = -1.0f;
+            data.ghostOffset = 2.0f * (spec.speedSet ? spec.speed : 0.0f);
+            break;
+        default:
+            data.ghostSign = 1.0f;
+            data.ghostOffset = 0.0f;
+            break;
+        }
+    };
+
+    fill(sideLeft, BoundarySide::Left);
+    fill(sideRight, BoundarySide::Right);
+    fill(sideBottom, BoundarySide::Bottom);
+    fill(sideTop, BoundarySide::Top);
+
+    const auto band = [this](BoundarySide which, int cells,
+                             std::vector<float>& out) {
+        const BoundarySpec& spec = cfg.boundaries[which];
+        out.assign(static_cast<size_t>(cells), 0.0f);
+        if (spec.kind != BoundaryKind::Inlet)
+            return;
+        BoundarySpec resolved = spec;
+        if (!resolved.speedSet)
+            resolved.speed = cfg.U0;
+        for (int k = 0; k < cells; ++k)
+            out[k] = inletVelocityAt(resolved,
+                                     (k + 0.5f) / static_cast<float>(cells));
+    };
+
+    band(BoundarySide::Left, ny, uInletLeft);
+    band(BoundarySide::Right, ny, uInletRight);
+    band(BoundarySide::Bottom, nx, vInletBottom);
+    band(BoundarySide::Top, nx, vInletTop);
+
+    MultigridBC bc;
+    const auto level = [](const SideData& data) {
+        return data.outlet ? PressureSideBC::Dirichlet : PressureSideBC::Neumann;
+    };
+    bc.left = level(sideLeft);
+    bc.right = level(sideRight);
+    bc.bottom = level(sideBottom);
+    bc.top = level(sideTop);
+    multigrid.setPressureBC(bc);
+
+    if (multigrid.singularPressure())
+        std::cout << "  note: no side lets fluid out, so the pressure has no "
+                     "level of its own.\n  It is solved up to a constant and "
+                     "the mean is taken off every cycle, which is correct for "
+                     "a\n  closed box and is what a lid driven cavity needs.\n";
+}
+
+void Solver::applyBoundaryVelocities(std::vector<float>& uf,
+                                     std::vector<float>& vf,
+                                     bool extrapolateOutlet) const {
+    const int nx = cfg.nx;
+    const int ny = cfg.ny;
+
+    for (int j = 0; j < ny; ++j) {
+        const bool solidLow = solidMask[idxP(0, j)] != 0;
+        const bool solidHigh = solidMask[idxP(nx - 1, j)] != 0;
+
+        if (sideLeft.inlet)
+            uf[idxU(0, j)] = solidLow ? 0.0f : uInletLeft[j];
+        else if (sideLeft.outlet) {
+            if (extrapolateOutlet)
+                uf[idxU(0, j)] = solidLow ? 0.0f : uf[idxU(1, j)];
+        } else
+            uf[idxU(0, j)] = 0.0f;
+
+        if (sideRight.inlet)
+            uf[idxU(nx, j)] = solidHigh ? 0.0f : -uInletRight[j];
+        else if (sideRight.outlet) {
+            if (extrapolateOutlet)
+                uf[idxU(nx, j)] = solidHigh ? 0.0f : uf[idxU(nx - 1, j)];
+        } else
+            uf[idxU(nx, j)] = 0.0f;
+    }
+
+    for (int i = 0; i < nx; ++i) {
+        const bool solidLow = solidMask[idxP(i, 0)] != 0;
+        const bool solidHigh = solidMask[idxP(i, ny - 1)] != 0;
+
+        if (sideBottom.inlet)
+            vf[idxV(i, 0)] = solidLow ? 0.0f : vInletBottom[i];
+        else if (sideBottom.outlet) {
+            if (extrapolateOutlet)
+                vf[idxV(i, 0)] = solidLow ? 0.0f : vf[idxV(i, 1)];
+        } else
+            vf[idxV(i, 0)] = 0.0f;
+
+        if (sideTop.inlet)
+            vf[idxV(i, ny)] = solidHigh ? 0.0f : -vInletTop[i];
+        else if (sideTop.outlet) {
+            if (extrapolateOutlet)
+                vf[idxV(i, ny)] = solidHigh ? 0.0f : vf[idxV(i, ny - 1)];
+        } else
+            vf[idxV(i, ny)] = 0.0f;
+    }
+}
+
+// The pressure gradient across an open side, with the level fixed half a cell
+// outside it. Same expression on all four, only the sign of the outward normal
+// and which neighbour cell is read change.
+void Solver::applyOutletFaces() {
+    const int nx = cfg.nx;
+    const int ny = cfg.ny;
+    const float factorX = 2.f * dt * invDx;
+    const float factorY = 2.f * dt * invDy;
+
+    if (sideLeft.outlet)
+        for (int j = 0; j < ny; ++j)
+            u[idxU(0, j)] =
+                solidMask[idxP(0, j)]
+                    ? 0.0f
+                    : u_star[idxU(0, j)] -
+                          factorX * (p[idxP(0, j)] -
+                                     phiFace(BoundarySide::Left, j));
+
+    if (sideRight.outlet)
+        for (int j = 0; j < ny; ++j)
+            u[idxU(nx, j)] =
+                solidMask[idxP(nx - 1, j)]
+                    ? 0.0f
+                    : u_star[idxU(nx, j)] +
+                          factorX * (p[idxP(nx - 1, j)] -
+                                     phiFace(BoundarySide::Right, j));
+
+    if (sideBottom.outlet)
+        for (int i = 0; i < nx; ++i)
+            v[idxV(i, 0)] =
+                solidMask[idxP(i, 0)]
+                    ? 0.0f
+                    : v_star[idxV(i, 0)] -
+                          factorY * (p[idxP(i, 0)] -
+                                     phiFace(BoundarySide::Bottom, i));
+
+    if (sideTop.outlet)
+        for (int i = 0; i < nx; ++i)
+            v[idxV(i, ny)] =
+                solidMask[idxP(i, ny - 1)]
+                    ? 0.0f
+                    : v_star[idxV(i, ny)] +
+                          factorY * (p[idxP(i, ny - 1)] -
+                                     phiFace(BoundarySide::Top, i));
 }
 
 void Solver::buildFaceMasks(){
@@ -424,6 +677,7 @@ void Solver::initFields()
     }
 
     resolveWallMotion();
+    resolveBoundaries();
     buildFaceMasks();
     buildSlipFaces();
     buildMirrorFaces();
@@ -443,14 +697,15 @@ void Solver::initFields()
         std::fill(v.begin(), v.end(), 0.0f);
 
         for (int j = 0; j < ny; ++j) {
+            const float seed = uInletLeft[j];
             for (int i = 1; i < nx; ++i)
                 if (uFluidMask[idxU(i, j)])
-                    u[idxU(i, j)] = cfg.U0;
+                    u[idxU(i, j)] = seed;
 
             if (!solidMask[idxP(0, j)])
-                u[idxU(0, j)] = cfg.U0;
+                u[idxU(0, j)] = uInletLeft[j];
             if (!solidMask[idxP(nx - 1, j)])
-                u[idxU(nx, j)] = cfg.U0;
+                u[idxU(nx, j)] = uInletLeft[j];
         }
     }
 
@@ -699,9 +954,26 @@ void Solver::computeDt(){
 }
 
 void Solver::predictor() {
+    switch (cfg.convection) {
+    case ConvectionScheme::Central: predictorImpl<PhiCentral>(); return;
+    case ConvectionScheme::Muscl:
+        switch (cfg.limiter) {
+        case LimiterKind::Minmod:   predictorImpl<PhiMinmod>();   return;
+        case LimiterKind::Superbee: predictorImpl<PhiSuperbee>(); return;
+        default:                    predictorImpl<PhiVanLeer>();  return;
+        }
+    default: break;
+    }
+    predictorImpl<PhiUpwind>();
+}
+
+template <int Phi>
+void Solver::predictorImpl() {
     const int nx = cfg.nx, ny = cfg.ny;
     const float dtNu = dt * cfg.nu;
     const float dtConv = dt;
+    const float bodyGx = bodyGravity ? dt * gx : 0.0f;
+    const float bodyGy = bodyGravity ? dt * gy : 0.0f;
     const float* __restrict uPtr = u.data();
     const float* __restrict vPtr = v.data();
     float* __restrict uStar = u_star.data();
@@ -717,6 +989,8 @@ void Solver::predictor() {
     const __m256 invDy2Vec = _mm256_set1_ps(invDy2);
     const __m256 dtConvVec = _mm256_set1_ps(dtConv);
     const __m256 dtNuVec   = _mm256_set1_ps(dtNu);
+    const __m256 bodyGxVec = _mm256_set1_ps(bodyGx);
+    const __m256 bodyGyVec = _mm256_set1_ps(bodyGy);
 #endif
 
     #pragma omp parallel for schedule(static)
@@ -754,16 +1028,25 @@ void Solver::predictor() {
                             _mm256_loadu_ps(vRow + i - 1),
                             _mm256_loadu_ps(vRow + i))),
                     quarter);
+            const __m256 backX = _mm256_sub_ps(uij, uleft);
+            const __m256 fwdX = _mm256_sub_ps(uright, uij);
+            const __m256 towardsX = _mm256_cmp_ps(uij, zero, _CMP_GT_OS);
             const __m256 dudx =
-                _mm256_blendv_ps(
-                    _mm256_mul_ps(_mm256_sub_ps(uright, uij), invDxVec),
-                    _mm256_mul_ps(_mm256_sub_ps(uij, uleft), invDxVec),
-                    _mm256_cmp_ps(uij, zero, _CMP_GT_OS));
+                _mm256_mul_ps(
+                    limitedDeltaVec<Phi>(
+                        _mm256_blendv_ps(fwdX, backX, towardsX),
+                        _mm256_blendv_ps(backX, fwdX, towardsX)),
+                    invDxVec);
+
+            const __m256 backY = _mm256_sub_ps(uij, ubot);
+            const __m256 fwdY = _mm256_sub_ps(utop, uij);
+            const __m256 towardsY = _mm256_cmp_ps(vn, zero, _CMP_GT_OS);
             const __m256 dudy =
-                _mm256_blendv_ps(
-                    _mm256_mul_ps(_mm256_sub_ps(utop, uij), invDyVec),
-                    _mm256_mul_ps(_mm256_sub_ps(uij, ubot), invDyVec),
-                    _mm256_cmp_ps(vn, zero, _CMP_GT_OS));
+                _mm256_mul_ps(
+                    limitedDeltaVec<Phi>(
+                        _mm256_blendv_ps(fwdY, backY, towardsY),
+                        _mm256_blendv_ps(backY, fwdY, towardsY)),
+                    invDyVec);
             // Diffusion: central differences
             const __m256 d2udx2 =
                 _mm256_mul_ps(
@@ -791,10 +1074,12 @@ void Solver::predictor() {
                     d2udy2);
             const __m256 res =
                 _mm256_add_ps(
-                    _mm256_sub_ps(
-                        uij,
-                        _mm256_mul_ps(dtConvVec, conv)),
-                    _mm256_mul_ps(dtNuVec, diff));
+                    _mm256_add_ps(
+                        _mm256_sub_ps(
+                            uij,
+                            _mm256_mul_ps(dtConvVec, conv)),
+                        _mm256_mul_ps(dtNuVec, diff)),
+                    bodyGxVec);
             _mm256_storeu_ps(
                 uStarRow + i,
                 _mm256_add_ps(
@@ -815,15 +1100,17 @@ void Solver::predictor() {
             const float u_bot   = uBot[i];
             const float u_top   = uTop[i];
 
+            const float backX = u_ij - u_left;
+            const float fwdX = u_right - u_ij;
             const float dudx =
-                (u_ij > 0.f) ?
-                (u_ij - u_left) * invDx :
-                (u_right - u_ij) * invDx;
+                ((u_ij > 0.f) ? limitedDelta<Phi>(backX, fwdX)
+                              : limitedDelta<Phi>(fwdX, backX)) * invDx;
 
+            const float backY = u_ij - u_bot;
+            const float fwdY = u_top - u_ij;
             const float dudy =
-                (v_n > 0.f) ?
-                (u_ij - u_bot) * invDy :
-                (u_top - u_ij) * invDy;
+                ((v_n > 0.f) ? limitedDelta<Phi>(backY, fwdY)
+                             : limitedDelta<Phi>(fwdY, backY)) * invDy;
 
             const float d2udx2 =
                 (u_right - 2.f*u_ij + u_left) * invDx2;
@@ -834,7 +1121,8 @@ void Solver::predictor() {
             uStarRow[i] = uMask[i] * (
                 u_ij
                 - dtConv * (u_ij*dudx + v_n*dudy)
-                + dtNu * (d2udx2 + d2udy2))
+                + dtNu * (d2udx2 + d2udy2)
+                + bodyGx)
                 + uWallRow[i];
         }
     }
@@ -862,18 +1150,24 @@ void Solver::predictor() {
 
             const float u_left  = uRow[i-1];
             const float u_right = uRow[i+1];
-            const float u_bot = (pass == 0) ? u_ij : uOther[i];
-            const float u_top = (pass == 0) ? uOther[i] : u_ij;
+            const float u_bot = (pass == 0)
+                ? sideBottom.ghostSign * u_ij + sideBottom.ghostOffset
+                : uOther[i];
+            const float u_top = (pass == 0)
+                ? uOther[i]
+                : sideTop.ghostSign * u_ij + sideTop.ghostOffset;
 
+            const float backX = u_ij - u_left;
+            const float fwdX = u_right - u_ij;
             const float dudx =
-                (u_ij > 0.f) ?
-                (u_ij - u_left) * invDx :
-                (u_right - u_ij) * invDx;
+                ((u_ij > 0.f) ? limitedDelta<Phi>(backX, fwdX)
+                              : limitedDelta<Phi>(fwdX, backX)) * invDx;
 
+            const float backY = u_ij - u_bot;
+            const float fwdY = u_top - u_ij;
             const float dudy =
-                (v_n > 0.f) ?
-                (u_ij - u_bot) * invDy :
-                (u_top - u_ij) * invDy;
+                ((v_n > 0.f) ? limitedDelta<Phi>(backY, fwdY)
+                             : limitedDelta<Phi>(fwdY, backY)) * invDy;
 
             const float d2udx2 =
                 (u_right - 2.f*u_ij + u_left) * invDx2;
@@ -884,7 +1178,8 @@ void Solver::predictor() {
             uStarRow[i] = uMask[i] * (
                 u_ij
                 - dtConv * (u_ij*dudx + v_n*dudy)
-                + dtNu * (d2udx2 + d2udy2))
+                + dtNu * (d2udx2 + d2udy2)
+                + bodyGx)
                 + uWallRow[i];
         }
     }
@@ -923,16 +1218,25 @@ void Solver::predictor() {
                             _mm256_loadu_ps(uBot + i),
                             _mm256_loadu_ps(uBot + i + 1))),
                     quarter);
+            const __m256 backX = _mm256_sub_ps(vij, vleft);
+            const __m256 fwdX = _mm256_sub_ps(vright, vij);
+            const __m256 towardsX = _mm256_cmp_ps(ue, zero, _CMP_GT_OS);
             const __m256 dvdx =
-                _mm256_blendv_ps(
-                    _mm256_mul_ps(_mm256_sub_ps(vright, vij), invDxVec),
-                    _mm256_mul_ps(_mm256_sub_ps(vij, vleft), invDxVec),
-                    _mm256_cmp_ps(ue, zero, _CMP_GT_OS));
+                _mm256_mul_ps(
+                    limitedDeltaVec<Phi>(
+                        _mm256_blendv_ps(fwdX, backX, towardsX),
+                        _mm256_blendv_ps(backX, fwdX, towardsX)),
+                    invDxVec);
+
+            const __m256 backY = _mm256_sub_ps(vij, vbot);
+            const __m256 fwdY = _mm256_sub_ps(vtop, vij);
+            const __m256 towardsY = _mm256_cmp_ps(vij, zero, _CMP_GT_OS);
             const __m256 dvdy =
-                _mm256_blendv_ps(
-                    _mm256_mul_ps(_mm256_sub_ps(vtop, vij), invDyVec),
-                    _mm256_mul_ps(_mm256_sub_ps(vij, vbot), invDyVec),
-                    _mm256_cmp_ps(vij, zero, _CMP_GT_OS));
+                _mm256_mul_ps(
+                    limitedDeltaVec<Phi>(
+                        _mm256_blendv_ps(fwdY, backY, towardsY),
+                        _mm256_blendv_ps(backY, fwdY, towardsY)),
+                    invDyVec);
             const __m256 d2vdx2 =
                 _mm256_mul_ps(
                     _mm256_add_ps(
@@ -959,10 +1263,12 @@ void Solver::predictor() {
                     d2vdy2);
             const __m256 res =
                 _mm256_add_ps(
-                    _mm256_sub_ps(
-                        vij,
-                        _mm256_mul_ps(dtConvVec, conv)),
-                    _mm256_mul_ps(dtNuVec, diff));
+                    _mm256_add_ps(
+                        _mm256_sub_ps(
+                            vij,
+                            _mm256_mul_ps(dtConvVec, conv)),
+                        _mm256_mul_ps(dtNuVec, diff)),
+                    bodyGyVec);
             _mm256_storeu_ps(
                 vStarRow + i,
                 _mm256_add_ps(
@@ -983,15 +1289,17 @@ void Solver::predictor() {
             const float v_bot   = vBot[i];
             const float v_top   = vTop[i];
 
+            const float backX = v_ij - v_left;
+            const float fwdX = v_right - v_ij;
             const float dvdx =
-                (u_e > 0.f) ?
-                (v_ij - v_left) * invDx :
-                (v_right - v_ij) * invDx;
+                ((u_e > 0.f) ? limitedDelta<Phi>(backX, fwdX)
+                             : limitedDelta<Phi>(fwdX, backX)) * invDx;
 
+            const float backY = v_ij - v_bot;
+            const float fwdY = v_top - v_ij;
             const float dvdy =
-                (v_ij > 0.f) ?
-                (v_ij - v_bot) * invDy :
-                (v_top - v_ij) * invDy;
+                ((v_ij > 0.f) ? limitedDelta<Phi>(backY, fwdY)
+                              : limitedDelta<Phi>(fwdY, backY)) * invDy;
 
             const float d2vdx2 =
                 (v_right - 2.f*v_ij + v_left) * invDx2;
@@ -1002,7 +1310,8 @@ void Solver::predictor() {
             vStarRow[i] = vMask[i] * (
                 v_ij
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
-                + dtNu * (d2vdx2 + d2vdy2))
+                + dtNu * (d2vdx2 + d2vdy2)
+                + bodyGy)
                 + vWallRow[i];
         }
 
@@ -1017,20 +1326,26 @@ void Solver::predictor() {
                 uBot[iCol] +
                 uBot[iCol+1]);
 
-            const float v_left  = (iCol == 0)      ? v_ij : vRow[iCol-1];
-            const float v_right = (iCol == nx - 1) ? v_ij : vRow[iCol+1];
+            const float v_left  = (iCol == 0)
+                ? sideLeft.ghostSign * v_ij + sideLeft.ghostOffset
+                : vRow[iCol-1];
+            const float v_right = (iCol == nx - 1)
+                ? sideRight.ghostSign * v_ij + sideRight.ghostOffset
+                : vRow[iCol+1];
             const float v_bot   = vBot[iCol];
             const float v_top   = vTop[iCol];
 
+            const float backX = v_ij - v_left;
+            const float fwdX = v_right - v_ij;
             const float dvdx =
-                (u_e > 0.f) ?
-                (v_ij - v_left) * invDx :
-                (v_right - v_ij) * invDx;
+                ((u_e > 0.f) ? limitedDelta<Phi>(backX, fwdX)
+                             : limitedDelta<Phi>(fwdX, backX)) * invDx;
 
+            const float backY = v_ij - v_bot;
+            const float fwdY = v_top - v_ij;
             const float dvdy =
-                (v_ij > 0.f) ?
-                (v_ij - v_bot) * invDy :
-                (v_top - v_ij) * invDy;
+                ((v_ij > 0.f) ? limitedDelta<Phi>(backY, fwdY)
+                              : limitedDelta<Phi>(fwdY, backY)) * invDy;
 
             const float d2vdx2 =
                 (v_right - 2.f*v_ij + v_left) * invDx2;
@@ -1041,22 +1356,37 @@ void Solver::predictor() {
             vStarRow[iCol] = vMask[iCol] * (
                 v_ij
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
-                + dtNu * (d2vdx2 + d2vdy2))
+                + dtNu * (d2vdx2 + d2vdy2)
+                + bodyGy)
                 + vWallRow[iCol];
         }
     }
 
-    for (int j = 0; j < ny; ++j) {
-        uStar[idxU(0, j)] = solidMask[idxP(0, j)] ? 0.0f : cfg.U0;
-        uStar[idxU(nx, j)] =
-            solidMask[idxP(nx - 1, j)] ?
-            0.0f :
-            uStar[idxU(nx - 1, j)];
-    }
-    for (int i = 0; i < nx; ++i) {
-        vStar[idxV(i, 0)] = 0.0f;
-        vStar[idxV(i, ny)] = 0.0f;
-    }
+    applyBoundaryVelocities(u_star, v_star, true);
+}
+
+void Solver::advanceStage() {
+    applySlipFaces();
+    applyMirrorFaces();
+    predictor();
+    solvePoisson();
+    corrector();
+}
+
+void Solver::blendWithPrevious(float weightPrevious) {
+    const float weightNow = 1.0f - weightPrevious;
+    const int uCount = static_cast<int>(u.size());
+    const int vCount = static_cast<int>(v.size());
+
+    #pragma omp parallel for schedule(static)
+    for (int id = 0; id < uCount; ++id)
+        u[id] = weightPrevious * uPrev[id] + weightNow * u[id];
+
+    #pragma omp parallel for schedule(static)
+    for (int id = 0; id < vCount; ++id)
+        v[id] = weightPrevious * vPrev[id] + weightNow * v[id];
+
+    applyBC();
 }
 
 void Solver::solvePoisson() {
@@ -1123,6 +1453,43 @@ void Solver::solvePoisson() {
             rowSum += val * val;
         }
         rhsSqSum += double(rowSum);
+    }
+
+    // The boundary term below is not small, and it lands after the sum above
+    // was taken, so the norm the tolerance is judged against has to be taken
+    // again. Without this the solve is measured against a right hand side that
+    // is nearly zero and stops far short of where it should.
+    if (bodyGravity) {
+        const float twoX = 2.f * invDx2;
+        const float twoY = 2.f * invDy2;
+        if (sideLeft.outlet)
+            for (int j = 0; j < ny; ++j)
+                rhsPtr[idxP(0, j)] -= twoX * phiFace(BoundarySide::Left, j) *
+                                      cellMask[idxP(0, j)];
+        if (sideRight.outlet)
+            for (int j = 0; j < ny; ++j)
+                rhsPtr[idxP(nx - 1, j)] -=
+                    twoX * phiFace(BoundarySide::Right, j) *
+                    cellMask[idxP(nx - 1, j)];
+        if (sideBottom.outlet)
+            for (int i = 0; i < nx; ++i)
+                rhsPtr[idxP(i, 0)] -= twoY * phiFace(BoundarySide::Bottom, i) *
+                                      cellMask[idxP(i, 0)];
+        if (sideTop.outlet)
+            for (int i = 0; i < nx; ++i)
+                rhsPtr[idxP(i, ny - 1)] -=
+                    twoY * phiFace(BoundarySide::Top, i) *
+                    cellMask[idxP(i, ny - 1)];
+        rhsSqSum = 0.0;
+        #pragma omp parallel for schedule(static) reduction(+ : rhsSqSum)
+        for (int j = 0; j < ny; ++j) {
+            double rowSum = 0.0;
+            for (int i = 0; i < nx; ++i) {
+                const float value = rhsPtr[j * nx + i];
+                rowSum += static_cast<double>(value) * value;
+            }
+            rhsSqSum += rowSum;
+        }
     }
 
     const float rhsNorm = float(std::sqrt(rhsSqSum));
@@ -1252,29 +1619,12 @@ void Solver::corrector() {
         }
     }
 
-    const float outletFactor = 2.f * dt * invDx;
-    for (int j = 0; j < ny; ++j) {
-        if (solidMask[idxP(nx - 1, j)]) {
-            u[idxU(nx, j)] = 0.0f;
-        } else {
-            u[idxU(nx, j)] =
-                u_star[idxU(nx, j)] +
-                outletFactor * p[idxP(nx - 1, j)];
-        }
-    }
-
+    applyOutletFaces();
     applyBC();
 }
 
 void Solver::applyBC() {
-    const int nx = cfg.nx, ny = cfg.ny;
-    for (int j = 0; j < ny; ++j)
-        u[idxU(0, j)] = solidMask[idxP(0, j)] ? 0.0f : cfg.U0;
-
-    for (int i = 0; i < nx; ++i) {
-        v[idxV(i, 0)] = 0.0f;
-        v[idxV(i, ny)] = 0.0f;
-    }
+    applyBoundaryVelocities(u, v, false);
 }
 
 float Solver::maxDivergence() const {
@@ -1491,11 +1841,30 @@ void Solver::run() {
         const float savedDt = dt;
         dt = stepDt;
 
-        applySlipFaces();
-        applyMirrorFaces();
-        predictor();
-        solvePoisson();
-        corrector();
+        // Forward Euler is one of these. The two SSP schemes are convex
+        // combinations of several, and because each one ends in a projection
+        // the combination is divergence free as well.
+        switch (cfg.timeScheme) {
+        case TimeScheme::RK2:
+            uPrev = u;
+            vPrev = v;
+            advanceStage();
+            advanceStage();
+            blendWithPrevious(0.5f);
+            break;
+        case TimeScheme::RK3:
+            uPrev = u;
+            vPrev = v;
+            advanceStage();
+            advanceStage();
+            blendWithPrevious(0.75f);
+            advanceStage();
+            blendWithPrevious(1.0f / 3.0f);
+            break;
+        default:
+            advanceStage();
+            break;
+        }
 
         currentTime += dt;
         // stepDt is a float and the remainder it was cut from is a double, so
@@ -1563,6 +1932,75 @@ void Solver::run() {
                   << " is low for this case.\n";
 }
 
+std::vector<Solver::ExtraField> Solver::buildExtraFields(
+    const std::vector<float>& uCell,
+    const std::vector<float>& vCell) const {
+    std::vector<ExtraField> fields;
+    if (cfg.extraFields.empty())
+        return fields;
+
+    const int nx = cfg.nx, ny = cfg.ny;
+    const size_t cells = static_cast<size_t>(nx) * ny;
+
+    size_t pos = 0;
+    while (pos <= cfg.extraFields.size()) {
+        const size_t comma = cfg.extraFields.find(',', pos);
+        std::string name = cfg.extraFields.substr(
+            pos, comma == std::string::npos ? std::string::npos : comma - pos);
+        pos = (comma == std::string::npos) ? cfg.extraFields.size() + 1
+                                           : comma + 1;
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front())))
+            name.erase(name.begin());
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back())))
+            name.pop_back();
+        if (name.empty())
+            continue;
+        std::string key = name;
+        for (char& c : key)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+        ExtraField field;
+        field.values.assign(cells, 0.0f);
+
+        if (key == "vorticity") {
+            field.name = "vorticity";
+            for (int j = 0; j < ny; ++j)
+                for (int i = 0; i < nx; ++i) {
+                    const int im = std::max(i - 1, 0);
+                    const int ip = std::min(i + 1, nx - 1);
+                    const int jm = std::max(j - 1, 0);
+                    const int jp = std::min(j + 1, ny - 1);
+                    const float dvdx = (vCell[j * nx + ip] - vCell[j * nx + im]) /
+                                       ((ip - im) * dx);
+                    const float dudy = (uCell[jp * nx + i] - uCell[jm * nx + i]) /
+                                       ((jp - jm) * dy);
+                    field.values[j * nx + i] = dvdx - dudy;
+                }
+        } else if (key == "divergence") {
+            field.name = "divergence";
+            for (int j = 0; j < ny; ++j)
+                for (int i = 0; i < nx; ++i)
+                    field.values[j * nx + i] =
+                        solidMask[j * nx + i]
+                            ? 0.0f
+                            : (u[idxU(i + 1, j)] - u[idxU(i, j)]) * invDx +
+                                  (v[idxV(i, j + 1)] - v[idxV(i, j)]) * invDy;
+        } else if (key == "speed") {
+            field.name = "speed";
+            for (size_t id = 0; id < cells; ++id)
+                field.values[id] = std::hypot(uCell[id], vCell[id]);
+        } else if (key == "objectid") {
+            field.name = "objectId";
+            for (size_t id = 0; id < cells; ++id)
+                field.values[id] = static_cast<float>(mesh.objectId[id]);
+        } else {
+            continue;
+        }
+        fields.push_back(std::move(field));
+    }
+    return fields;
+}
+
 void Solver::saveVTK(int stepNum) const {
     const int nx = cfg.nx, ny = cfg.ny;
     constexpr size_t BUFFER_WORDS = 4096;
@@ -1624,7 +2062,8 @@ void Solver::saveVTK(int stepNum) const {
             // never take part in the solve, so they keep the hydrostatic value
             // alone instead of punching a hole through the pressure map.
             const float value =
-                phiCell(i, j) + (solidMask[row + i] ? 0.0f : p[row + i]);
+                solidMask[row + i] ? headCell(i, j)
+                                   : phiCell(i, j) + p[row + i];
             writeFloat(value * cfg.ro);
         }
     }
@@ -1672,6 +2111,18 @@ void Solver::saveVTK(int stepNum) const {
     }
     flushFloatBuffer();
     fout << "\n";
+
+    // Whatever else this run was asked to carry. The writer knows nothing
+    // about what is in the list, which is the point: the next field is one
+    // entry in buildExtraFields and no change here at all.
+    for (const ExtraField& field : buildExtraFields(uCell, vCell)) {
+        fout << "SCALARS " << field.name << " float 1\n"
+             << "LOOKUP_TABLE default\n";
+        for (float value : field.values)
+            writeFloat(value);
+        flushFloatBuffer();
+        fout << "\n";
+    }
 
     std::ostringstream state;
     state << std::setprecision(std::numeric_limits<double>::max_digits10)

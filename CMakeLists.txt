@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(CFD-Solver-2D
-    VERSION 0.2.0
+    VERSION 0.3.0
     LANGUAGES CXX
 )
 
@@ -166,10 +166,13 @@ else()
     add_library(cfd_stl_reader ALIAS stl_reader)
 endif()
 
-set(CFD_SOURCES
-    src/main.cpp
+# Everything except main() lives in a library so the tests can link the same
+# objects the executable runs. Nothing else about the build changes: every
+# setting below is PUBLIC on cfd_core and reaches cfd_app through the link.
+set(CFD_CORE_SOURCES
     src/tiny_obj_loader_impl.cpp
     src/AppPaths.cpp
+    src/Boundary.cpp
     src/Config.cpp
     src/Restart.cpp
     src/Mesh.cpp
@@ -181,8 +184,10 @@ set(CFD_SOURCES
 )
 
 if(CFD_ENABLE_CUDA)
-    list(APPEND CFD_SOURCES src/MultigridCuda.cu)
+    list(APPEND CFD_CORE_SOURCES src/MultigridCuda.cu)
 endif()
+
+set(CFD_SOURCES src/main.cpp)
 
 # ---- what this binary knows about itself ------------------------------------
 # The version, the repository the update check asks about, and which of the
@@ -229,7 +234,9 @@ if(WIN32 AND CFD_ENABLE_ICON)
     endif()
 endif()
 
+add_library(cfd_core STATIC ${CFD_CORE_SOURCES})
 add_executable(cfd_app ${CFD_SOURCES})
+target_link_libraries(cfd_app PRIVATE cfd_core)
 
 add_custom_command(
     TARGET cfd_app
@@ -237,6 +244,12 @@ add_custom_command(
     COMMAND "${CMAKE_COMMAND}" -E echo
         "Built executable: $<TARGET_FILE:cfd_app>"
     VERBATIM
+)
+
+set_target_properties(cfd_core PROPERTIES
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_EXTENSIONS OFF
 )
 
 set_target_properties(cfd_app PROPERTIES
@@ -250,7 +263,7 @@ set_target_properties(cfd_app PROPERTIES
 )
 
 if(CFD_ENABLE_CUDA)
-    set_target_properties(cfd_app PROPERTIES
+    set_target_properties(cfd_core PROPERTIES
         CUDA_STANDARD 17
         CUDA_STANDARD_REQUIRED ON
         CUDA_EXTENSIONS OFF
@@ -258,22 +271,22 @@ if(CFD_ENABLE_CUDA)
     )
 endif()
 
-target_include_directories(cfd_app PRIVATE
+target_include_directories(cfd_core PUBLIC
     "${CFD_INCLUDE_DIR}"
     "${CFD_GENERATED_DIR}"
 )
 
-target_link_libraries(cfd_app
-    PRIVATE
+target_link_libraries(cfd_core
+    PUBLIC
         cfd_tinyobj
         cfd_stl_reader
 )
 
 if(CFD_ENABLE_CUDA)
     if(CFD_STATIC)
-        target_link_libraries(cfd_app PRIVATE CUDA::cudart_static)
+        target_link_libraries(cfd_core PUBLIC CUDA::cudart_static)
     else()
-        target_link_libraries(cfd_app PRIVATE CUDA::cudart)
+        target_link_libraries(cfd_core PUBLIC CUDA::cudart)
     endif()
 endif()
 
@@ -282,7 +295,7 @@ if(WIN32)
     # shell32  the tray icon, and opening the release page in a browser
     # ole32    ITaskbarList3, which draws the progress on the taskbar button
     # user32   the hidden window the tray icon posts its clicks to
-    target_link_libraries(cfd_app PRIVATE winhttp shell32 ole32 user32)
+    target_link_libraries(cfd_core PUBLIC winhttp shell32 ole32 user32)
 endif()
 
 if(NOT WIN32)
@@ -296,32 +309,32 @@ if(NOT WIN32)
     endif()
 
     if(CFD_WHOLE_PTHREAD)
-        target_compile_options(cfd_app PRIVATE -pthread)
+        target_compile_options(cfd_core PUBLIC -pthread)
     else()
-        target_link_libraries(cfd_app PRIVATE Threads::Threads)
+        target_link_libraries(cfd_core PUBLIC Threads::Threads)
     endif()
 endif()
 
-target_compile_definitions(cfd_app
-    PRIVATE
+target_compile_definitions(cfd_core
+    PUBLIC
         CFD_MODELS_DIR="${CFD_MODELS_DIR}"
         NOMINMAX
 )
 
 if(CFD_ENABLE_CUDA)
-    target_compile_definitions(cfd_app PRIVATE USE_CUDA=1)
+    target_compile_definitions(cfd_core PUBLIC USE_CUDA=1)
 endif()
 
 # CUDA 13.x CCCL requires MSVC's standards-conforming preprocessor.
 # For .cu files, nvcc must forward the option to its MSVC host compiler.
 if(MSVC)
-    target_compile_options(cfd_app
-        PRIVATE
+    target_compile_options(cfd_core
+        PUBLIC
             $<$<COMPILE_LANGUAGE:CXX>:/Zc:preprocessor>
     )
     if(CFD_ENABLE_CUDA)
-        target_compile_options(cfd_app
-            PRIVATE
+        target_compile_options(cfd_core
+            PUBLIC
                 $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=/Zc:preprocessor>
         )
     endif()
@@ -368,7 +381,7 @@ if(CFD_ENABLE_OPENMP)
 
     find_package(OpenMP QUIET COMPONENTS CXX)
     if(OpenMP_CXX_FOUND)
-        target_link_libraries(cfd_app PRIVATE OpenMP::OpenMP_CXX)
+        target_link_libraries(cfd_core PUBLIC OpenMP::OpenMP_CXX)
         message(STATUS "OpenMP: enabled")
     else()
         # Same reason as the CUDA one: silently dropping OpenMP here would
@@ -450,17 +463,35 @@ endif()
 
 if(CFD_ENABLE_AVX2)
     if(MSVC)
-        target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
+        target_compile_options(cfd_core PUBLIC $<$<COMPILE_LANGUAGE:CXX>:/arch:AVX2>)
     elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         # /arch:AVX2 already implies FMA on MSVC; -mavx2 alone does not on
         # GCC/Clang, and the predictor contracts into FMA once it is allowed.
-        target_compile_options(cfd_app PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma>)
+        target_compile_options(cfd_core PUBLIC $<$<COMPILE_LANGUAGE:CXX>:-mavx2 -mfma>)
     else()
         message(WARNING "AVX2 flags are not configured for ${CMAKE_CXX_COMPILER_ID}")
     endif()
 endif()
 
+option(BUILD_TESTING "Build the solver test suite" OFF)
 include(CTest)
+
+if(BUILD_TESTING)
+    set(CFD_TESTS
+        PoissonTests
+        ConservationTests
+        RestartTests
+        BackendAgreementTests
+        ConvectionTests
+        ChannelTests
+    )
+    foreach(test ${CFD_TESTS})
+        add_executable(${test} "tests/${test}.cpp")
+        target_link_libraries(${test} PRIVATE cfd_core)
+        add_test(NAME ${test} COMMAND ${test})
+        set_tests_properties(${test} PROPERTIES TIMEOUT 900)
+    endforeach()
+endif()
 
 
 install(

@@ -407,6 +407,34 @@ void Multigrid::setGeometryCuda() {
     deviceReady = true;
 }
 
+// Only the stencil, and only what the host just rebuilt. The hierarchy, the
+// masks and the transfer weights are untouched, so this is what a per step
+// coefficient change costs on the device: six copies per level and no
+// allocation at all.
+void Multigrid::uploadCoefficientsCuda() {
+    if (!deviceReady)
+        return;
+
+    for (int l = 0; l < levels; ++l) {
+        const Level& grid = gridLevels[l];
+        DeviceLevel& d = deviceLevels[l];
+        const size_t plain = static_cast<size_t>(grid.cellCount) + 16u;
+
+        CUDA_CHECK(cudaMemcpy(d.coefW, grid.coefW.data(),
+                              plain * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d.coefE, grid.coefE.data(),
+                              plain * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d.coefS, grid.coefS.data(),
+                              plain * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d.coefN, grid.coefN.data(),
+                              plain * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d.diag, grid.diag.data(),
+                              plain * sizeof(float), cudaMemcpyHostToDevice));
+        CUDA_CHECK(cudaMemcpy(d.invDiag, grid.invDiag.data(),
+                              plain * sizeof(float), cudaMemcpyHostToDevice));
+    }
+}
+
 void Multigrid::smoothSORCuda(
     int level,
     float omega,
@@ -647,7 +675,20 @@ float Multigrid::solveCuda(
         CUDA_CHECK_LAUNCH("zeroSolidPressureKernel");
     }
 
-    const float rhsNorm = (rhsScale > 0.0f) ? rhsScale : computeRhsNormCuda(0);
+    if (pressureSingular) {
+        std::vector<float> hostRhs(finest.cellCount);
+        CUDA_CHECK(cudaMemcpy(hostRhs.data(), dFinest.rhs,
+                              static_cast<size_t>(finest.cellCount) * sizeof(float),
+                              cudaMemcpyDeviceToHost));
+        removeNullSpace(hostRhs.data(), finest);
+        CUDA_CHECK(cudaMemcpy(dFinest.rhs, hostRhs.data(),
+                              static_cast<size_t>(finest.cellCount) * sizeof(float),
+                              cudaMemcpyHostToDevice));
+    }
+
+    const float rhsNorm = (rhsScale > 0.0f && !pressureSingular)
+                              ? rhsScale
+                              : computeRhsNormCuda(0);
     const float scale = (rhsNorm > 1e-20f) ? rhsNorm : 1.0f;
 
     if (firstSolve) {
@@ -670,6 +711,14 @@ float Multigrid::solveCuda(
         }
 
         vCycleCuda(0, smootherOmega, coarseOmega);
+        if (pressureSingular) {
+            std::vector<float> host(finest.cellCount);
+            CUDA_CHECK(cudaMemcpy(host.data(), dFinest.pressure, bytes,
+                                  cudaMemcpyDeviceToHost));
+            removeNullSpace(host.data(), finest);
+            CUDA_CHECK(cudaMemcpy(dFinest.pressure, host.data(), bytes,
+                                  cudaMemcpyHostToDevice));
+        }
         ++lastCycles;
     }
 

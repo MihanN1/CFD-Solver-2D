@@ -1,4 +1,5 @@
 #pragma once
+#include "Boundary.hpp"
 #include "Config.hpp"
 #include "Mesh.hpp"
 #include "Multigrid.hpp"
@@ -27,6 +28,7 @@ private:
     std::vector<float> rhs;
     // u on vertical faces: size (nx+1) * ny
     std::vector<float> u, u_star;
+    std::vector<float> uPrev, vPrev;
     // v on horizontal faces: size nx * (ny+1)
     std::vector<float> v, v_star;
 
@@ -103,6 +105,25 @@ private:
     std::vector<MirrorFace> uMirrorFaces;
     std::vector<MirrorFace> vMirrorFaces;
 
+    // One side of the domain, reduced to what the kernels actually need: the
+    // ghost value a tangential stencil reads across it, written as
+    // ghost = sign * inner + offset, and whether the normal face is driven,
+    // held shut or left to the pressure.
+    struct SideData {
+        BoundaryKind kind = BoundaryKind::Slip;
+        float ghostSign = 1.0f;
+        float ghostOffset = 0.0f;
+        bool outlet = false;
+        bool inlet = false;
+    };
+
+    SideData sideLeft, sideRight, sideBottom, sideTop;
+    std::vector<float> uInletLeft, uInletRight;
+    std::vector<float> vInletBottom, vInletTop;
+
+    void resolveBoundaries();
+    void applyOutletFaces();
+
     float dx = 0.0f, dy = 0.0f;
     float invDx = 0.0f, invDy = 0.0f;
     float invDx2 = 0.0f, invDy2 = 0.0f;
@@ -110,14 +131,25 @@ private:
     // Gravity as a vector, resolved once in the constructor. Both stay at zero
     // when gravity is off, so every expression below degenerates to the old one.
     float gx = 0.0f, gy = 0.0f;
+    bool bodyGravity = false;
 
     void initFields();
     void computeDt();
 
     void predictor();
+    template <int Phi> void predictorImpl();
+
+    // One whole forward Euler step of the projection method. The Runge-Kutta
+    // schemes are convex combinations of these, which is what keeps the result
+    // divergence free: every stage ends in a projection.
+    void advanceStage();
+    void blendWithPrevious(float weightPrevious);
     void solvePoisson();
     void corrector();
     void applyBC();
+    void applyBoundaryVelocities(std::vector<float>& uf,
+                                 std::vector<float>& vf,
+                                 bool extrapolateOutlet) const;
     void buildFaceMasks();
     void projectRestartState(); // one projection after an approximate restart
 
@@ -144,14 +176,59 @@ private:
 
     void saveVTK(int stepNum) const;
 
+    // Named fields the frame carries beyond the three it has always had. The
+    // writer walks this list rather than knowing what is in it, so a field
+    // added later is one entry here and nothing else.
+    struct ExtraField {
+        std::string name;
+        std::vector<float> values;
+    };
+    std::vector<ExtraField> buildExtraFields(
+        const std::vector<float>& uCell,
+        const std::vector<float>& vCell) const;
+
     // Gravity potential, phi = g . x, i.e. the hydrostatic pressure. At
     // constant density it is an exact solution of the discrete pressure
     // problem for the body force, so p carries only the reduced pressure and
     // this is added on output. Identically zero when gravity is off. The
     // reference point is the outlet at mid-height, which keeps phi small.
-    inline float phiCell(int i, int j) const {
+    // The hydrostatic potential itself, whichever mode is running. A solid
+    // cell has no solved pressure in it, so this is what goes in its place;
+    // leaving it at zero punches a hole through the pressure map that has
+    // nothing to do with the flow.
+    inline float headCell(int i, int j) const {
         return gx * ((i + 0.5f - cfg.nx) * dx) +
                gy * ((j + 0.5f - 0.5f * cfg.ny) * dy);
+    }
+
+    inline float phiCell(int i, int j) const {
+        if (bodyGravity)
+            return 0.0f;
+        return gx * ((i + 0.5f - cfg.nx) * dx) +
+               gy * ((j + 0.5f - 0.5f * cfg.ny) * dy);
+    }
+
+    // Same field at the middle of a boundary face rather than a cell centre.
+    // With the force in the solve, p carries the head as well, so an open side
+    // is held at the head rather than at zero and the outflow stops being
+    // driven by a step in pressure that is not physically there.
+    inline float phiFace(BoundarySide side, int k) const {
+        if (!bodyGravity)
+            return 0.0f;
+        switch (side) {
+        case BoundarySide::Left:
+            return gx * (-static_cast<float>(cfg.nx) * dx) +
+                   gy * ((k + 0.5f - 0.5f * cfg.ny) * dy);
+        case BoundarySide::Right:
+            return gy * ((k + 0.5f - 0.5f * cfg.ny) * dy);
+        case BoundarySide::Bottom:
+            return gx * ((k + 0.5f - cfg.nx) * dx) +
+                   gy * (-0.5f * static_cast<float>(cfg.ny) * dy);
+        case BoundarySide::Top:
+            return gx * ((k + 0.5f - cfg.nx) * dx) +
+                   gy * (0.5f * static_cast<float>(cfg.ny) * dy);
+        }
+        return 0.0f;
     }
 
     // Inline index helpers (for readability)
