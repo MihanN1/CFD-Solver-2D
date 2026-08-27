@@ -22,9 +22,7 @@ Possible future extensions include:
 - Adaptive mesh refinement (AMR)
 - Turbulence models
 - Compressible flow solver
-- Cavity flow
 - Moving objects (NO idea how to do it for now, but ill figure that out)
-- Flow start coordinates and width of the flow
 - Multiphase(multiple liquids/gases)(painting with them too and making profile OPTIONAL)
 - Surface tension
 - MAY add several other solvers(deforming solver + electronic solver + thermal solver) and merge all of them into one
@@ -224,6 +222,8 @@ CFD-Solver-2D/
 │   ├── TestHarness.hpp
 │   ├── PoissonTests.cpp            <- manufactured solution, order of accuracy
 │   ├── ChannelTests.cpp            <- Poiseuille against the exact parabola
+│   ├── CavityTests.cpp             <- the lid driven cavity against Ghia 1982
+│   ├── InletTests.cpp              <- inlet bands, profiles and mass balance
 │   ├── ConservationTests.cpp       <- divergence, mass balance, hydrostatics
 │   ├── ConvectionTests.cpp         <- the schemes against each other
 │   ├── RestartTests.cpp            <- a continuation against a straight run
@@ -422,6 +422,9 @@ above 0.1, `nu=0`.
 | `bcLeftSpeed` … `bcTopSpeed` | float, m/s | unset | what a `movingWall` slides at, or an inlet speed other than `U0` |
 | `inletFrom` `inletTo` | float | 0 / 1 | fraction of the side the inlet occupies |
 | `inletProfile` | name | `uniform` | `uniform` / `parabolic` |
+| `caseType` | name | `channel` | `channel` / `cavity`, a preset that writes all four sides at once |
+| `lidSpeed` | float, m/s | 1.0 | how fast the cavity lid slides |
+| `steadyTolerance` | float | 0 | stop early once the field stops changing; 0 runs the whole of `totalTime` |
 | `CFL` | float | 0.5 | > 0, warns above 1 |
 | `totalTime` | double, s | 10.0 | > 0 |
 | `dtUpdateInterval` | int, steps | 5 | >= 1 |
@@ -435,7 +438,7 @@ above 0.1, `nu=0`.
 | `saveInterval` | int, steps | 20 | >= 1 |
 | `extraFields` | list | empty | `vorticity`, `divergence`, `speed`, `objectId`, comma separated |
 | `outputDir` | path | `output` | created on the first frame, empty = current directory |
-| `geometryFile` | path or `none` | `none` | `none` is the verification circle |
+| `geometryFile` | path, `none` or `empty` | `none` | `none` is the verification circle, `empty` is nothing at all |
 | `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
 | `invertSection` | switch | 0 | 1 / 0 |
 | `wallMotion` | list | empty | `<object>:rot=90,slideX=0.5;<object>:slip=1` — an object either moves or slips, see below |
@@ -536,6 +539,90 @@ An inlet does not have to occupy the whole side. `inletFrom` and `inletTo` cut
 it down to a band measured from the low end of that side, and the rest of the
 side behaves as a wall; `inletProfile=parabolic` bends the band into a parabola
 carrying the same flow rate as the flat one.
+
+```powershell
+"Fluid Solver.exe" inletFrom=0.4 inletTo=0.6 inletProfile=parabolic
+```
+
+The outlet is never told about any of this. It has no speed of its own: the
+pressure solve works out what has to leave, so a band a fifth of the height
+wide arrives at the far end spread over the whole of it, and what went in comes
+back out to one part in a hundred million. What cannot work is fluid pushed
+into a domain with nothing open, and that is now refused before the run starts
+rather than reported as a divergence on every step to the end:
+
+```
+!!! the inlets push 1.000000 m^2/s of fluid in and no side lets any of it out.
+    An incompressible fluid does not compress: no pressure field can take it,
+    the projection cannot remove the divergence it makes, and the run would
+    report the same leftover on every single step to the end.
+    Open a side with bcRight=outlet (or whichever one the flow should leave
+    by), or make the inlet a wall.
+```
+
+A band narrower than one cell gets the same treatment, because an inlet that
+lets nothing in is a run that does nothing for however long you asked it to.
+
+## Cases: the cavity, and stopping when it settles
+
+Writing five keys to get four walls and a moving lid is exactly the kind of
+thing that gets typed wrong once and debugged for an hour, so there is a name
+for it:
+
+```powershell
+"Fluid Solver.exe" caseType=cavity lidSpeed=1 nx=64 ny=64 Lx=1 Ly=1 nu=0.01
+```
+
+`caseType=cavity` writes all four sides itself - wall, wall, wall, and
+`movingWall` on top at `lidSpeed` - and empties the domain, because a cavity
+with the verification circle floating in the middle of it is not a cavity.
+Anything you say after it still wins, so `caseType=cavity bcBottom=movingWall`
+is a two-sided cavity and `caseType=cavity profiles=wing.obj@x=0.5,y=0.5` is a
+cavity with something in it.
+
+`geometryFile=empty` is what does the emptying and can be asked for on its own.
+`none` still means the verification circle, which is a body like any other and
+was never a way of saying "nothing".
+
+Re is `lidSpeed * Ly / nu`, so the line above is Re 100 - the case Ghia, Ghia
+and Shin tabulated in 1982 and every solver since has been checked against.
+`CavityTests` runs it at 64x64 and compares seventeen points down the vertical
+centreline and seventeen across the horizontal one:
+
+```
+  steady at t = 17.85 s, 3250 steps, 64x64
+       y   Ghia u    solver u |      x   Ghia v    solver v
+  0.9766  0.84123    0.84454 |   0.9688 -0.05906   -0.06512
+  ...
+  worst interior miss: u 0.0065, v 0.0153
+```
+
+That is the first thing in this project with an answer that did not come out of
+this project.
+
+### `steadyTolerance`
+
+A cavity has a steady state and reaching it is the whole point, but nobody knows
+in advance how long that takes - the run above needed 17.85 s of simulated time
+and `totalTime` was set to 200 to be safe.
+
+```powershell
+"Fluid Solver.exe" caseType=cavity steadyTolerance=1e-5 totalTime=200
+```
+
+Every ten steps the field is compared against the last snapshot, and the largest
+velocity change per second is divided by whatever drives the case - the lid, or
+`U0` on a channel. Under the tolerance, the run says so and stops:
+
+```
+Step 3250, t = 17.8528 s: the field is changing at 9.49436e-06 per second
+against the driving speed, under the steadyTolerance of 1e-05.
+  Steady state, stopping here.
+```
+
+The last frame is written either way, so a run that stops early is continued
+exactly like one that ran out of time. Zero, the default, turns the whole thing
+off and nothing about a normal run changes.
 
 ## Several models at once
 
@@ -1059,6 +1146,8 @@ executable and the tests link the same objects, so what is tested is what runs.
 |---|---|
 | `PoissonTests` | a manufactured solution the pressure operator has to reproduce to second order, plus the two things the operator gained here: face weights that scale it, and a closed box whose answer is only defined up to a constant |
 | `ChannelTests` | the developed profile between two no-slip walls against the exact parabola, and the same channel with free-slip walls to prove the number came from the wall and not the inlet |
+| `CavityTests` | the lid driven cavity at Re 100 against the Ghia, Ghia and Shin tables - the first numbers in this project that were not produced by this project |
+| `InletTests` | an inlet cut down to a band of its side: where the open faces actually are, that a parabolic band carries the same flow rate as a flat one, and that what goes in comes back out |
 | `ConservationTests` | divergence left after the projection, inflow against outflow, and a fluid at rest under real gravity staying at rest |
 | `ConvectionTests` | every scheme run on the same case, and the ordering of how much of the field each one throws away |
 | `RestartTests` | a run cut in half and continued reproducing the run that was never cut |

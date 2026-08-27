@@ -78,9 +78,40 @@ void inletBandCells(const BoundarySpec& spec,
 // Zero outside the inlet band and for every kind that is not an inlet.
 float inletVelocityAt(const BoundarySpec& spec, float t);
 
+enum class CaseType {
+    Channel,
+    Cavity
+};
+
+bool parseCaseType(const std::string& text, CaseType& out, std::string& error);
+const char* caseTypeName(CaseType type);
+
 // Inlet on the left, outlet on the right, free slip above and below: the
 // channel every version before the boundary layer existed solved, and what a
 // run that never mentions a side still gets.
 BoundarySet defaultChannelBoundaries();
+
+// Four walls with the top one sliding: a lid driven cavity, the case every
+// incompressible solver is measured against because Ghia, Ghia and Shin
+// tabulated the answer in 1982 and nobody has had to argue about it since.
+BoundarySet cavityBoundaries(float lidSpeed);
+
+struct DomainExtent {
+    float Lx = 1.0f;
+    float Ly = 1.0f;
+    int nx = 0;
+    int ny = 0;
+};
+
+// Adds up what the sides prescribe against what they leave open. An outlet
+// carries whatever the pressure sends through it, so a set with one of those
+// balances itself and this only has to catch the sets that cannot: fluid
+// pushed into a domain with nothing open, and an inlet band too narrow to
+// cover a single cell. Both run to the end producing nonsense otherwise.
+bool checkBoundaryMassBalance(const BoundarySet& sides,
+                              float defaultSpeed,
+                              const DomainExtent& domain,
+                              const std::vector<int>& solid,
+                              std::string& error);
 
 std::string boundaryHelp();

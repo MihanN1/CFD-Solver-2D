@@ -42,6 +42,7 @@ const char* const kKeys[] = {
     "invertSection", "wallMotion", "profiles",
     "restart", "restartFile", "addTime",
     "gravityMode", "convection", "limiter", "timeScheme",
+    "caseType", "lidSpeed", "steadyTolerance",
     "bcLeft", "bcRight", "bcBottom", "bcTop",
     "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed",
     "inletFrom", "inletTo", "inletProfile",
@@ -753,6 +754,10 @@ void Config::readFromConsole() {
             return;
     }
     std::cout << boundaryHelp();
+    if (!ask("caseType", "Case: channel or cavity")) return;
+    if (caseType == CaseType::Cavity) {
+        if (!ask("lidSpeed", "Speed the lid slides at (m/s)")) return;
+    } else {
     if (!ask("bcLeft", "Left boundary")) return;
     if (boundaries[BoundarySide::Left].kind == BoundaryKind::MovingWall)
         if (!ask("bcLeftSpeed", "Speed the left wall slides at (m/s)")) return;
@@ -765,6 +770,11 @@ void Config::readFromConsole() {
     if (!ask("bcTop", "Top boundary")) return;
     if (boundaries[BoundarySide::Top].kind == BoundaryKind::MovingWall)
         if (!ask("bcTopSpeed", "Speed the top wall slides at (m/s)")) return;
+    }
+    if (!ask("steadyTolerance",
+             "Stop when the field stops changing? Give the rate, or 0 to run "
+             "the whole of totalTime (1e-5 is a good number for a cavity)"))
+        return;
     if (!ask("convection",
              "Convective scheme: upwind (first order, what this solver has "
              "always used), muscl or central")) return;
@@ -854,12 +864,37 @@ void Config::print() const {
     std::cout << "\n";
     std::cout << "  timeScheme       = "
               << enumName(static_cast<int>(timeScheme), kTimeSchemes) << "\n";
+    std::cout << "  caseType         = " << caseTypeName(caseType);
+    if (caseType == CaseType::Cavity)
+        std::cout << ", lid at " << lidSpeed << " m/s";
+    std::cout << "\n";
+    if (steadyTolerance > 0.0f)
+        std::cout << "  steadyTolerance  = " << steadyTolerance
+                  << " (stops when the field stops changing)\n";
     std::cout << "  boundaries       = "
               << boundaryKindName(boundaries[BoundarySide::Left].kind) << " | "
               << boundaryKindName(boundaries[BoundarySide::Right].kind) << " | "
               << boundaryKindName(boundaries[BoundarySide::Bottom].kind) << " | "
               << boundaryKindName(boundaries[BoundarySide::Top].kind)
               << "   (left | right | bottom | top)\n";
+    for (int side = 0; side < 4; ++side) {
+        const BoundarySpec& spec = boundaries.side[side];
+        if (spec.kind != BoundaryKind::Inlet)
+            continue;
+        std::cout << "  inlet ("
+                  << boundarySideName(static_cast<BoundarySide>(side))
+                  << ")"
+                  << std::string(std::max<size_t>(
+                         1, 9 - std::string(boundarySideName(
+                                    static_cast<BoundarySide>(side))).size()),
+                                 ' ')
+                  << "= " << (spec.speedSet ? spec.speed : U0) << " m/s, "
+                  << inletProfileName(spec.profile);
+        if (spec.from > 0.0f || spec.to < 1.0f)
+            std::cout << ", band " << spec.from << ".." << spec.to
+                      << " of the side";
+        std::cout << "\n";
+    }
     std::cout << "  CFL              = " << CFL << "\n";
     std::cout << "  totalTime        = " << totalTime << " s\n";
     std::cout << "  dtUpdateInterval = " << dtUpdateInterval << " steps\n";
@@ -886,6 +921,15 @@ void Config::print() const {
     std::cout << "--------------------------------\n";
 }
 
+bool Config::emptyDomain() const {
+    if (!profiles.empty())
+        return false;
+    std::string lowered = geometryFile;
+    for (char& c : lowered)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return lowered == "empty";
+}
+
 std::vector<Profile> Config::resolvedProfiles() const {
     std::vector<Profile> list;
     std::string ignored;
@@ -897,7 +941,7 @@ std::vector<Profile> Config::resolvedProfiles() const {
         std::string lowered = name;
         for (char& c : lowered)
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-        if (name.empty() || lowered == "none")
+        if (name.empty() || lowered == "none" || lowered == "empty")
             return list;
         Profile only;
         only.file = std::move(name);
@@ -944,6 +988,9 @@ std::string Config::serialize() const {
         << enumName(static_cast<int>(limiter), kLimiters) << "\n"
         << "timeScheme="
         << enumName(static_cast<int>(timeScheme), kTimeSchemes) << "\n"
+        << "caseType=" << caseTypeName(caseType) << "\n"
+        << "lidSpeed=" << lidSpeed << "\n"
+        << "steadyTolerance=" << steadyTolerance << "\n"
         << "bcLeft=" << boundaryKindName(boundaries[BoundarySide::Left].kind) << "\n"
         << "bcRight=" << boundaryKindName(boundaries[BoundarySide::Right].kind) << "\n"
         << "bcBottom=" << boundaryKindName(boundaries[BoundarySide::Bottom].kind) << "\n"
@@ -1062,6 +1109,35 @@ bool Config::setParam(const std::string& key,
         ok = assignEnumValue(scheme, k, value, kTimeSchemes, error);
         if (ok) timeScheme = static_cast<TimeScheme>(scheme);
     }
+    else if (k == "caseType") {
+        CaseType type = caseType;
+        std::string why;
+        ok = parseCaseType(trimSpace(cleanValue(value)), type, why);
+        if (!ok) {
+            error = badValue(k, cleanValue(value), why);
+        } else {
+            caseType = type;
+            boundaries = (type == CaseType::Cavity)
+                             ? cavityBoundaries(lidSpeed)
+                             : defaultChannelBoundaries();
+            // A cavity is an empty box unless somebody puts something in it.
+            // Leaving the default in place would drop the verification circle
+            // into the middle of the one case whose answer is tabulated.
+            if (type == CaseType::Cavity && geometryFile == "none")
+                geometryFile = "empty";
+        }
+    }
+    else if (k == "lidSpeed") {
+        ok = assignFloat(lidSpeed, k, value, -kHuge, kHuge,
+             "the lid slides at a finite number of m/s", error);
+        if (ok && caseType == CaseType::Cavity) {
+            boundaries[BoundarySide::Top].speed = lidSpeed;
+            boundaries[BoundarySide::Top].speedSet = true;
+        }
+    }
+    else if (k == "steadyTolerance") ok = assignFloat(steadyTolerance, k, value, 0.0, kHuge,
+             "this is a rate of change measured against the driving speed, so "
+             "it cannot be negative; 0 turns the check off", error);
     else if (k == "bcLeft")   ok = assignSideKind(boundaries[BoundarySide::Left], k, value, error);
     else if (k == "bcRight")  ok = assignSideKind(boundaries[BoundarySide::Right], k, value, error);
     else if (k == "bcBottom") ok = assignSideKind(boundaries[BoundarySide::Bottom], k, value, error);
