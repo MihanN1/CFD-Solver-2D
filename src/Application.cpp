@@ -860,6 +860,8 @@ enum ParameterIndex : std::size_t {
     SliceZ,
     SliceRotation,
     Profiles,
+    CaseKind,
+    LidSpeed,
     BcLeft,
     BcRight,
     BcBottom,
@@ -878,6 +880,7 @@ enum ParameterIndex : std::size_t {
     CellsY,
     Cfl,
     TotalTime,
+    SteadyTolerance,
     AddTime,
     DtUpdateInterval,
     DtSafety,
@@ -907,7 +910,7 @@ struct ParameterGroupInfo {
 constexpr std::array<ParameterGroupInfo, 11> PARAMETER_GROUPS{{
     {WindSpeed, "FLOW"},
     {SliceX, "GEOMETRY"},
-    {BcLeft, "BOUNDARIES"},
+    {CaseKind, "BOUNDARIES"},
     {WallMotionLine, "WALLS"},
     {DomainX, "DOMAIN / GRID"},
     {Cfl, "TIME"},
@@ -923,12 +926,14 @@ const char* parameterKey(std::size_t index) {
         "U0", "nu", "ro",
         "gravityEnabled", "gravityAccel", "gravityAngle", "gravityMode",
         "sliceAngleX", "sliceAngleZ", "sliceRotation", "profiles",
+        "caseType", "lidSpeed",
         "bcLeft", "bcRight", "bcBottom", "bcTop",
         "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed",
         "inletFrom", "inletTo", "inletProfile",
         "wallMotion",
         "Lx", "Ly", "nx", "ny",
-        "CFL", "totalTime", "addTime", "dtUpdateInterval", "dtSafety",
+        "CFL", "totalTime", "steadyTolerance", "addTime",
+        "dtUpdateInterval", "dtSafety",
         "convection", "limiter", "timeScheme",
         "omega", "smootherOmega", "mgIterations", "mgTolerance",
         "mgMinCoarseSize", "saveInterval", "extraFields",
@@ -960,6 +965,12 @@ std::string parameterHelp(std::size_t index) {
         return "gravityMode: reduced adds the head on output only, which is exact at one density. body puts the force in the solve and p becomes the total pressure.";
     case Profiles:
         return "profiles: several models at once, each placed where you say. <file>@x=1,y=0.5,size=0.3;<file>@x=3,y=0.5 - the separator is @ because a Windows path owns the colon.";
+    case CaseKind:
+        return "caseType: channel leaves the four sides to you. cavity is the lid driven cavity - four walls, the top one sliding - and it sets all four sides itself, so the boundary rows below are not sent when it is picked.";
+    case LidSpeed:
+        return "lidSpeed: how fast the cavity lid slides. Re = lidSpeed * Ly / nu, and 1 m/s with nu = 0.01 over a 1 m box is the Re 100 case everybody checks against Ghia.";
+    case SteadyTolerance:
+        return "steadyTolerance: stop early once the field stops changing. It is the largest velocity change per second divided by whatever drives the case, so 1e-5 means one part in a hundred thousand. Zero runs the whole of Total time.";
     case BcLeft:
     case BcRight:
     case BcBottom:
@@ -1661,6 +1672,7 @@ struct SolverExecutableInfo {
     bool supportsExtraFields = false;       // extraFields=
     bool supportsSchemes = false;           // convection= limiter= timeScheme=
     bool supportsBoundaries = false;        // bcLeft= .. inletProfile=
+    bool supportsCase = false;              // caseType= lidSpeed= steadyTolerance=
     std::string version = "unknown";
     std::string features;
     std::string build = "Unknown build";
@@ -1846,6 +1858,7 @@ SolverExecutableInfo inspectSolverExecutable(
     info.supportsExtraFields = binaryContains(executable, "extraFields");
     info.supportsSchemes = binaryContains(executable, "timeScheme");
     info.supportsBoundaries = binaryContains(executable, "bcBottom");
+    info.supportsCase = binaryContains(executable, "caseType");
     info.supportsContinuation =
         info.version != "unknown" &&
         compareSolverVersions(info.version, "0.1.1") >= 0;
@@ -1961,6 +1974,9 @@ public:
               Slider{"Slice rotation", "deg", -180.0, 180.0, 0.0, false, false},
               Slider{"Extra profiles", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
                      ControlKind::Text},
+              Slider{"Case", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"channel", "cavity"}},
+              Slider{"Lid speed", "m/s", -200.0, 200.0, 1.0, false, false},
               Slider{"Left boundary", "", 0.0, 4.0, 0.0, true, false, false, 0.0,
                      ControlKind::Choice, {"inlet", "outlet", "wall", "movingWall", "slip"}},
               Slider{"Right boundary", "", 0.0, 4.0, 1.0, true, false, false, 0.0,
@@ -1985,6 +2001,7 @@ public:
               Slider{"Cells ny", "", 8.0, 5000.0, 50.0, true, true},
               Slider{"CFL", "", 0.01, 1.0, 0.5, false, false},
               Slider{"Total time", "s", 0.001, 10000.0, 10.0, false, true},
+              Slider{"Stop when steady", "", 0.0, 0.001, 0.0, false, false},
               Slider{"Continue: add time", "s", 0.0, 10000.0, 0.0, false, true},
               Slider{"dt update interval", "steps", 1.0, 1000.0, 5.0, true, false},
               Slider{"dt safety", "", 0.01, 1.0, 0.9, false, false},
@@ -3369,7 +3386,14 @@ private:
         config.saveInterval =
             static_cast<int>(std::lround(sliders_[SaveInterval].value));
         config.useCuda = sliders_[UseCuda].value >= 0.5;
-        config.geometryFile = geometry_.sourcePath();
+        // Nothing loaded is a real answer once the solver understands it: a
+        // lid driven cavity has no model in it and never wanted one. Older
+        // solvers have no word for that, so they keep getting the empty path
+        // and the same "load a model first" they always got.
+        config.geometryFile =
+            (geometry_.triangles().empty() && solverInfo_.supportsCase)
+                ? std::filesystem::path("empty")
+                : geometry_.sourcePath();
         config.sliceAngleX = parameters.sliceAngleX;
         config.sliceAngleZ = parameters.sliceAngleZ;
         config.sliceRotation = parameters.sliceRotation;
@@ -3406,6 +3430,11 @@ private:
         config.limiter = sliders_[Limiter].choice();
         config.timeScheme = sliders_[TimeSchemeKind].choice();
         config.gravityMode = sliders_[GravityMode].choice();
+
+        config.supportsCase = solverInfo_.supportsCase;
+        config.caseType = sliders_[CaseKind].choice();
+        config.lidSpeed = sliders_[LidSpeed].value;
+        config.steadyTolerance = sliders_[SteadyTolerance].value;
 
         config.supportsBoundaries = solverInfo_.supportsBoundaries;
         static constexpr ParameterIndex kSideKind[4] = {
@@ -3913,7 +3942,21 @@ private:
         invalidSlider_.reset();
         applyCacheBudget();
 
-        MaskResult mask = geometry_.generateMask(sectionParameters());
+        // An empty domain has no section to cut, so the mask, the contour
+        // warning and the adapter are all skipped rather than asked to produce
+        // something out of nothing.
+        const bool emptyDomain = requestedConfig.geometryFile == "empty";
+
+        MaskResult mask;
+        if (emptyDomain) {
+            mask.success = true;
+            mask.cells.assign(
+                static_cast<std::size_t>(requestedConfig.nx) *
+                    static_cast<std::size_t>(requestedConfig.ny),
+                0);
+        } else {
+            mask = geometry_.generateMask(sectionParameters());
+        }
         if (!mask.success) {
             if (mask.error.find("10000000-cell") != std::string::npos) {
                 invalidSlider_ = CellsX;
@@ -3929,7 +3972,8 @@ private:
         // loop comes out as a hole. Before that it kept the largest and threw
         // the rest away, so the UI had to ask first and throw them away itself
         // to keep the preview honest about what would be solved.
-        if (mask.contours.size() > 1 && !solverInfo_.supportsMultipleContours) {
+        if (!emptyDomain && mask.contours.size() > 1 &&
+            !solverInfo_.supportsMultipleContours) {
             if (!confirmUseLargestContour(
                     window_->getNativeHandle(), mask.contours.size())) {
                 status_ =
@@ -3959,9 +4003,13 @@ private:
             reducedToLargestContour = true;
         }
 
-        solidBodyCount_ = std::max<std::size_t>(
-            countSolidBodies(mask.cells, requestedConfig.nx, requestedConfig.ny),
-            1u);
+        solidBodyCount_ =
+            emptyDomain
+                ? 0u
+                : std::max<std::size_t>(
+                      countSolidBodies(
+                          mask.cells, requestedConfig.nx, requestedConfig.ny),
+                      1u);
 
         const std::filesystem::path runDirectory =
             createRunDirectory(outputRoot_, error);
@@ -4022,15 +4070,21 @@ private:
             return;
         }
 
+        // An adapter with no contours in it makes the solver fall back to its
+        // verification circle, which is how a lid driven cavity ends up with a
+        // cylinder sitting in the middle of it. The word empty is the solver
+        // saying outright that there is nothing there.
         const std::filesystem::path adapterFile =
             runDirectory / "section-adapter.obj";
-        if (!writeSectionAdapterOBJ(adapterFile, mask.contours, error)) {
+        if (!emptyDomain &&
+            !writeSectionAdapterOBJ(adapterFile, mask.contours, error)) {
             status_ = "Cannot write section adapter: " + error;
             return;
         }
 
         FluidSolverRunConfig solverConfig = requestedConfig;
-        solverConfig.geometryFile = adapterFile;
+        solverConfig.geometryFile =
+            emptyDomain ? std::filesystem::path("empty") : adapterFile;
         solverConfig.sliceAngleX = 0.0;
         solverConfig.sliceAngleZ = 0.0;
         solverConfig.sliceRotation = 0.0;

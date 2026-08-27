@@ -77,6 +77,18 @@ bool validateGeometry(const std::filesystem::path& filename,
     if (pathText.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "geometryFile must not contain CR or LF");
     }
+    // The two words the solver reads as "there is nothing in the domain".
+    // empty leaves it empty; none is the older spelling and puts the
+    // verification circle in the middle, which is a body like any other.
+    {
+        std::string lowered = pathText;
+        std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                       [](unsigned char character) {
+                           return static_cast<char>(std::tolower(character));
+                       });
+        if (lowered == "empty" || lowered == "none")
+            return true;
+    }
     if (filename.empty()) {
         return fail(error, "geometryFile must not be empty");
     }
@@ -202,6 +214,17 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
     if (config.extraFields.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "extraFields must not contain CR or LF");
     }
+    if (!std::isfinite(config.lidSpeed)) {
+        return fail(error, "lidSpeed must be finite");
+    }
+    if (!std::isfinite(config.steadyTolerance) ||
+        config.steadyTolerance < 0.0) {
+        return fail(error, "steadyTolerance is a fraction and cannot be "
+                           "negative; zero means the run goes the whole way");
+    }
+    if (config.caseType != "channel" && config.caseType != "cavity") {
+        return fail(error, "caseType must be channel or cavity");
+    }
     if (!(config.inletFrom >= 0.0 && config.inletFrom <= 1.0) ||
         !(config.inletTo >= 0.0 && config.inletTo <= 1.0)) {
         return fail(error, "inletFrom and inletTo are fractions of a side, so "
@@ -226,8 +249,8 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
             if (!std::isfinite(config.boundarySpeed[side]))
                 return fail(error, "boundary speeds must be finite");
         }
-        if (config.supportsBoundaries && anyInlet && !anyOutlet &&
-            !config.restart)
+        if (config.supportsBoundaries && config.caseType != "cavity" &&
+            anyInlet && !anyOutlet && !config.restart)
             return fail(error,
                         "there is an inlet but no outlet, so fluid is pushed "
                         "into a box it cannot leave. Give one side outlet, or "
@@ -349,7 +372,14 @@ bool buildFluidSolverArguments(
         arguments.push_back("timeScheme=" + config.timeScheme);
         arguments.push_back("gravityMode=" + config.gravityMode);
     }
-    if (config.supportsBoundaries) {
+    if (config.supportsCase) {
+        arguments.push_back("caseType=" + config.caseType);
+        if (config.caseType == "cavity")
+            arguments.push_back("lidSpeed=" + serializeDouble(config.lidSpeed));
+        arguments.push_back(
+            "steadyTolerance=" + serializeDouble(config.steadyTolerance));
+    }
+    if (config.supportsBoundaries && config.caseType != "cavity") {
         static const char* const kKind[4] = {
             "bcLeft", "bcRight", "bcBottom", "bcTop"};
         static const char* const kSpeed[4] = {

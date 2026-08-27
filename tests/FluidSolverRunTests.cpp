@@ -136,6 +136,98 @@ int main() {
     }
     config.gravityAccel = 9.81;
 
+    // Sides, then the case preset that replaces all of them.
+    config.supportsBoundaries = true;
+    config.boundaryKind[0] = "inlet";
+    config.boundaryKind[3] = "movingWall";
+    config.boundarySpeed[3] = 2.0;
+    config.inletFrom = 0.25;
+    config.inletTo = 0.75;
+    config.inletProfile = "parabolic";
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("boundary arguments failed: " + error);
+    }
+    if (!contains(arguments, "bcLeft=inlet") ||
+        !contains(arguments, "bcTop=movingWall") ||
+        !contains(arguments, "bcTopSpeed=2") ||
+        !contains(arguments, "inletProfile=parabolic") ||
+        !hasPrefix(arguments, "inletFrom=")) {
+        return fail("boundary arguments are incomplete");
+    }
+    // The trap from the last branch: a zero speed written out for an inlet
+    // tells the solver a standstill was asked for.
+    if (hasPrefix(arguments, "bcLeftSpeed=")) {
+        return fail("a zero inlet speed was written out again");
+    }
+
+    config.supportsCase = true;
+    config.steadyTolerance = 1e-5;
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("case arguments failed: " + error);
+    }
+    if (!contains(arguments, "caseType=channel") ||
+        !hasPrefix(arguments, "steadyTolerance=") ||
+        !contains(arguments, "bcLeft=inlet")) {
+        return fail("a channel case must still send its own sides");
+    }
+    if (hasPrefix(arguments, "lidSpeed=")) {
+        return fail("a channel has no lid to give a speed to");
+    }
+
+    config.caseType = "cavity";
+    config.lidSpeed = 1.5;
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("cavity arguments failed: " + error);
+    }
+    if (!contains(arguments, "caseType=cavity") ||
+        !contains(arguments, "lidSpeed=1.5")) {
+        return fail("cavity arguments are incomplete");
+    }
+    // The preset owns all four sides. Sending the boundary rows after it would
+    // undo it and quietly give back a channel.
+    if (hasPrefix(arguments, "bcLeft=") || hasPrefix(arguments, "bcTop=") ||
+        hasPrefix(arguments, "inletFrom=")) {
+        return fail("the cavity preset was overwritten by the boundary rows");
+    }
+
+    // Four walls and no outlet is what a cavity is, and only a channel has to
+    // give the fluid somewhere to go.
+    for (int side = 0; side < 4; ++side) {
+        config.boundaryKind[side] = "wall";
+    }
+    config.boundaryKind[0] = "inlet";
+    if (!maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a cavity was refused over its sides: " + error);
+    }
+    config.caseType = "channel";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("an inlet with no outlet was accepted");
+    }
+    config.caseType = "cavity";
+
+    config.steadyTolerance = -1.0;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a negative steadyTolerance was accepted");
+    }
+    config.steadyTolerance = 0.0;
+    config.caseType = "vortex street please";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("an unknown caseType was accepted");
+    }
+    config.caseType = "cavity";
+
+    // An empty domain is a real answer to "what geometry", and the only way
+    // the UI can ask for a cavity with nothing floating in the middle of it.
+    config.geometryFile = "empty";
+    if (!maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("geometryFile=empty was refused: " + error);
+    }
+    config.geometryFile = root / "not-here.obj";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a geometry file that does not exist was accepted");
+    }
+    config.geometryFile = geometry;
+
     std::error_code cleanupError;
     std::filesystem::remove_all(root, cleanupError);
     return 0;

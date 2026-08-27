@@ -148,6 +148,7 @@ is not there:
 | `extraFields` | `extraFields` |
 | `convection` `limiter` `timeScheme` `gravityMode` | `timeScheme` |
 | `bcLeft` … `inletProfile` | `bcBottom` |
+| `caseType` `lidSpeed` `steadyTolerance` | `caseType` |
 
 `bc<Side>Speed` is only written when that side is a `movingWall` or the speed is
 not zero. Writing `bcLeftSpeed=0` for an inlet would tell the solver a standstill
@@ -155,6 +156,22 @@ was asked for, and an inlet meant to run at `U0` would come out stopped.
 
 A continuation sends no `wallMotion` and no `profiles` while those two boxes are
 empty, so whatever the frame was run with survives.
+
+**Case** is a preset rather than another parameter. `cavity` makes the solver
+write all four sides itself - three walls and a lid sliding at **Lid speed** -
+so the UI leaves the whole BOUNDARIES block off the command line when it is
+picked. Sending both would run the preset and then overwrite it with whatever
+the boundary rows happened to say, which is not what picking a preset means.
+`channel` sends the rows exactly as before.
+
+**Stop when steady** is `steadyTolerance`: the run ends early once the largest
+velocity change per second, measured against whatever drives the case, drops
+under it. Zero, the default, runs the whole of **Total time**.
+
+When nothing has been drawn, the UI now sends `geometryFile=empty` instead of a
+section adapter with no contours in it. An empty adapter used to make the solver
+fall back to its verification circle, which is how a lid driven cavity ended up
+with a cylinder sitting in the middle of it.
 
 ## Result fields
 
@@ -214,7 +231,7 @@ controls on a separate Basic/Advanced page.
   individually - `1:rot=90,slideX=0.5;2:slip=1` - rather than one setting being
   applied to all of them.
 - GEOMETRY has a second text row for `profiles`, which places several models at
-  once, and BOUNDARIES has a choice row per side.
+  once, and BOUNDARIES has a choice row per side under a **Case** preset.
 - `outputDir`, `geometryFile`, transformed slice arguments, and `invertSection`
   are generated from the GUI workflow rather than exposed as ordinary sliders.
 

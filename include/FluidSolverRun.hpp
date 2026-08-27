@@ -90,6 +90,15 @@ struct FluidSolverRunConfig {
     std::string timeScheme = "euler";
     std::string gravityMode = "reduced";
 
+    // caseType is a preset: cavity replaces all four sides with its own, so
+    // the bc keys are left off the line entirely when it is picked. Sending
+    // both would mean the preset ran and was then overwritten by whatever the
+    // boundary rows happened to say, which is not what picking a preset means.
+    bool supportsCase = false;
+    std::string caseType = "channel";
+    double lidSpeed = 1.0;
+    double steadyTolerance = 0.0;
+
     bool supportsBoundaries = false;
     // left, right, bottom, top
     std::string boundaryKind[4] = {"inlet", "outlet", "slip", "slip"};
