@@ -388,6 +388,15 @@ int main(int argc, char** argv) {
     }
     mesh.printInfo();
 
+    std::string balanceError;
+    if (!checkBoundaryMassBalance(cfg.boundaries, cfg.U0,
+                                  DomainExtent{cfg.Lx, cfg.Ly, cfg.nx, cfg.ny},
+                                  mesh.solid, balanceError)) {
+        std::cerr << "\n!!! " << balanceError << "\n\nNothing has been "
+                     "started.\n";
+        return 1;
+    }
+
     Solver solver(cfg, mesh);
 
     if (cfg.restart &&

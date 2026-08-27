@@ -118,7 +118,18 @@ struct Config {
     TimeScheme timeScheme = TimeScheme::Euler;
 
     // Boundaries
+    // caseType is a preset over the four sides below rather than a mode of its
+    // own: setting it rewrites them, and naming a side afterwards overrides
+    // whatever the preset put there.
+    CaseType caseType = CaseType::Channel;
+    float lidSpeed = 1.0f;
     BoundarySet boundaries = defaultChannelBoundaries();
+
+    // Ends the run when the field stops changing, measured as the largest
+    // velocity change per unit time against U0 or the lid speed. Zero is off,
+    // which is what every run before this one did. A cavity has no natural end
+    // time and this is the only sensible one it has.
+    float steadyTolerance = 0.0f;
 
     // Time
     float CFL = 0.5;
@@ -190,6 +201,12 @@ struct Config {
     // geometryFile and profiles say the same thing in two shapes; this is the
     // one the mesh actually reads.
     std::vector<Profile> resolvedProfiles() const;
+
+    // "none" has always meant the verification circle rather than nothing at
+    // all, and every configuration written so far relies on that. "empty" is
+    // the way to ask for a domain with no body in it, which is what a cavity
+    // wants and what there was no way to say before.
+    bool emptyDomain() const;
 
     std::string serialize() const;
 };

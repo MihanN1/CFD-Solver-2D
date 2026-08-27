@@ -111,7 +111,7 @@ Mesh::Mesh(const Config& cfg, const std::vector<uint8_t>* presetSolid)
     rasterizeSection();
     buildSolid();
 
-    if (!geometryLoaded || !hasSection()) {
+    if ((!geometryLoaded || !hasSection()) && !cfg.emptyDomain()) {
         if (!profiles.empty())
             std::cerr << "Warning: no model produced a section, falling back "
                          "to the verification circle.\n";

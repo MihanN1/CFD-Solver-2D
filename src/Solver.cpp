@@ -1373,6 +1373,47 @@ void Solver::advanceStage() {
     corrector();
 }
 
+bool Solver::steadyReached() {
+    if (!(cfg.steadyTolerance > 0.0f))
+        return false;
+
+    if (uSteady.size() != u.size()) {
+        uSteady = u;
+        vSteady = v;
+        steadyStamp = currentTime;
+        return false;
+    }
+
+    const double elapsed = currentTime - steadyStamp;
+    if (!(elapsed > 0.0))
+        return false;
+
+    float worst = 0.0f;
+    for (size_t id = 0; id < u.size(); ++id)
+        worst = std::max(worst, std::fabs(u[id] - uSteady[id]));
+    for (size_t id = 0; id < v.size(); ++id)
+        worst = std::max(worst, std::fabs(v[id] - vSteady[id]));
+
+    // Against whatever is actually driving the case: the inlet on a channel,
+    // the lid on a cavity. A rate measured against nothing is a rate that
+    // never converges on one case and converges instantly on the other.
+    float driving = std::fabs(cfg.U0);
+    for (int side = 0; side < 4; ++side) {
+        const BoundarySpec& spec = cfg.boundaries.side[side];
+        if (spec.kind == BoundaryKind::MovingWall || spec.speedSet)
+            driving = std::max(driving, std::fabs(spec.speed));
+    }
+    if (!(driving > 0.0f))
+        driving = 1.0f;
+
+    steadyRate = static_cast<float>(worst / elapsed) / driving;
+
+    uSteady = u;
+    vSteady = v;
+    steadyStamp = currentTime;
+    return steadyRate < cfg.steadyTolerance;
+}
+
 void Solver::blendWithPrevious(float weightPrevious) {
     const float weightNow = 1.0f - weightPrevious;
     const int uCount = static_cast<int>(u.size());
@@ -1790,6 +1831,7 @@ void Solver::run() {
                     pathToConsole(outputPath));
     bool stopped = false;
     bool diverged = false;
+    bool steady = false;
 
     while (currentTime < cfg.totalTime) {
         if (step % dtUpdateInterval == 0)
@@ -1902,6 +1944,18 @@ void Solver::run() {
                       << " (" << multigrid.cyclesUsed() << " cycles)"
                       << std::endl;
         }
+        // Checked on the same beat as the step lines, so the number that ends
+        // the run is one that was printed on the way there.
+        if (step % 10 == 0 && steadyReached()) {
+            std::cout << "Step " << step << ", t = " << currentTime
+                      << " s: the field is changing at " << steadyRate
+                      << " per second against the driving speed, under the "
+                         "steadyTolerance of " << cfg.steadyTolerance
+                      << ".\n  Steady state, stopping here.\n";
+            steady = true;
+            break;
+        }
+
         if (diverged) {
             std::cerr << "Solution diverged at step " << step
                       << "; aborting. The last frame on disk is the last good "
@@ -1917,9 +1971,10 @@ void Solver::run() {
         saveVTK(step);
     progress::finish(!stopped && !diverged && !fieldBroken);
     std::cout << (diverged ? "Simulation aborted at t = "
-                           : (stopped || fieldBroken)
-                                 ? "Simulation stopped at t = "
-                                 : "Simulation finished at t = ")
+                           : steady ? "Simulation reached steady state at t = "
+                                    : (stopped || fieldBroken)
+                                          ? "Simulation stopped at t = "
+                                          : "Simulation finished at t = ")
               << currentTime << " s after " << step << " steps.\n";
     if (stopped)
         std::cout << "Continue it with: restart=1 restartFile="

@@ -29,6 +29,13 @@ private:
     // u on vertical faces: size (nx+1) * ny
     std::vector<float> u, u_star;
     std::vector<float> uPrev, vPrev;
+
+    // Snapshot the steady check compares against, and the time it was taken
+    // at. Only allocated when the check is on, because on a channel it is dead
+    // weight the size of the velocity field.
+    std::vector<float> uSteady, vSteady;
+    double steadyStamp = 0.0;
+    float steadyRate = 0.0f;
     // v on horizontal faces: size nx * (ny+1)
     std::vector<float> v, v_star;
 
@@ -144,6 +151,11 @@ private:
     // divergence free: every stage ends in a projection.
     void advanceStage();
     void blendWithPrevious(float weightPrevious);
+
+    // Largest velocity change per unit time since the last snapshot, divided by
+    // whatever drives this case. Returns false while there is nothing to
+    // compare against yet.
+    bool steadyReached();
     void solvePoisson();
     void corrector();
     void applyBC();
