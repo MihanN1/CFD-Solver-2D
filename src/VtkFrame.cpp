@@ -468,6 +468,12 @@ std::size_t VtkFrame::decodedByteSize() const {
     bytes += velocityMagnitude.capacity() * sizeof(float);
     bytes += pressureFinite.capacity() * sizeof(std::uint8_t);
     bytes += velocityFinite.capacity() * sizeof(std::uint8_t);
+    for (const std::string& name : scalarNames) {
+        bytes += name.capacity();
+        const auto found = scalars.find(name);
+        if (found != scalars.end())
+            bytes += found->second.capacity() * sizeof(float);
+    }
     for (const std::string& warning : warnings) {
         bytes += warning.capacity();
     }
@@ -826,6 +832,7 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
     bool hasUFace = false;
     bool hasVFace = false;
     bool hasPRaw = false;
+    bool hasFacePack = false;
     std::size_t uFaceCount = 0;
     std::size_t vFaceCount = 0;
     std::size_t pRawCount = 0;
@@ -872,12 +879,32 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                 if (hasSolid) {
                     throw VtkParseError("Duplicate solid array");
                 }
-                if (type != "int" || componentCount != 1) {
+                const bool byteSolid =
+                    type == "unsigned_char" || type == "char";
+                if ((type != "int" && !byteSolid) || componentCount != 1) {
                     throw VtkParseError(
-                        "solid must be SCALARS solid int 1");
+                        "solid must be SCALARS solid int, unsigned_char or "
+                        "char, with one component");
                 }
                 frame.solid.reserve(sampleCount);
-                if (binary) {
+                if (binary && byteSolid) {
+                    cursor.beginBinaryPayload("solid");
+                    const std::string bytes =
+                        cursor.takeBinaryBytes(sampleCount, "solid");
+                    frame.solid.resize(sampleCount);
+                    unsigned char invalid = 0;
+                    for (std::size_t index = 0; index < sampleCount; ++index) {
+                        const unsigned char value =
+                            static_cast<unsigned char>(bytes[index]);
+                        invalid |= static_cast<unsigned char>(value & ~1u);
+                        frame.solid[index] =
+                            static_cast<std::uint8_t>(value != 0);
+                    }
+                    if (invalid != 0) {
+                        throw VtkParseError("solid values must be 0 or 1");
+                    }
+                    cursor.endBinaryPayload("solid");
+                } else if (binary) {
                     cursor.beginBinaryPayload("solid");
                     // Read as 32-bit words, then narrow to the byte the frame
                     // keeps. The scratch buffer is worth it: it turns 100k
@@ -912,6 +939,30 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                     }
                 }
                 hasSolid = true;
+            } else if (type == "float" && componentCount == 1 &&
+                       frame.scalars.find(name) == frame.scalars.end()) {
+                // Anything else the solver decided to write. The reader does
+                // not need to know what it means, only that it is one float a
+                // cell, and the view lists whatever turned up.
+                if (!allRequiredArraysPresent(
+                        hasPressure, hasSolid, hasVelocity)) {
+                    throw VtkParseError(
+                        "Unknown scalar array before required arrays: " + name);
+                }
+                std::vector<float> values(sampleCount);
+                if (binary) {
+                    cursor.beginBinaryPayload(name);
+                    cursor.readBigEndianFloats(
+                        values.data(), sampleCount, name);
+                    cursor.endBinaryPayload(name);
+                } else {
+                    for (std::size_t index = 0; index < sampleCount; ++index) {
+                        values[index] =
+                            static_cast<float>(parseNumber(cursor.take(), name));
+                    }
+                }
+                frame.scalarNames.push_back(name);
+                frame.scalars.emplace(name, std::move(values));
             } else {
                 if (!allRequiredArraysPresent(
                         hasPressure, hasSolid, hasVelocity)) {
@@ -1033,6 +1084,14 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                         parseRestartConfig(frame, bytes);
                         hasRestartConfig = true;
                         frame.restart.hasConfigText = true;
+                    } else if (name == "facePack") {
+                        // The face velocities as what is left of them once the
+                        // cell averages have predicted them - a quarter of the
+                        // space the three plain arrays took, and what every
+                        // frame has carried since. The UI never decodes it; it
+                        // only has to know the frame can be continued, and the
+                        // solver is the one that reads it back.
+                        hasFacePack = componentCount == 1 && !bytes.empty();
                     }
                 } else if (type == "float" || type == "int") {
                     cursor.skipBinaryValues(
@@ -1068,12 +1127,17 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
             "VTK frame is missing pressure, solid, or velocity");
     }
 
-    const bool restartSizesMatch =
+    // Two shapes are continuable. The old one spelled the state out as three
+    // plain arrays; the one every current frame uses packs the faces into a
+    // single block and drops pRaw, because the pressure array already holds
+    // what it repeated.
+    const bool legacyArraysMatch =
         frame.nx < std::numeric_limits<std::size_t>::max() &&
         hasUFace && hasVFace && hasPRaw &&
         uFaceCount == (frame.nx + 1u) * frame.ny &&
         vFaceCount == frame.nx * (frame.ny + 1u) &&
         pRawCount == frame.nx * frame.ny;
+    const bool restartSizesMatch = legacyArraysMatch || hasFacePack;
     frame.restart.restartCapable =
         hasRestartConfig && restartSizesMatch &&
         frame.restart.currentTime.has_value() &&
@@ -1249,6 +1313,23 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
 
         frame.pressureTrimmedRange = trimmed(pressureSamples);
         frame.velocityMagnitudeTrimmedRange = trimmed(magnitudeSamples);
+
+        // Same two ranges for whatever else the frame carried. A colour scale
+        // needs them and the view has no idea in advance what it is scaling.
+        for (const std::string& name : frame.scalarNames) {
+            const std::vector<float>& values = frame.scalars.at(name);
+            DataRange full;
+            std::vector<float> finite;
+            finite.reserve(values.size());
+            for (float value : values) {
+                if (!std::isfinite(value))
+                    continue;
+                includeValue(full, value);
+                finite.push_back(value);
+            }
+            frame.scalarRanges[name] = full;
+            frame.scalarTrimmedRanges[name] = trimmed(finite);
+        }
     }
 
     if (nonFinitePressureCount != 0) {

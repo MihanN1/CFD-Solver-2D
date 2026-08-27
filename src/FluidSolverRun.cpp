@@ -196,6 +196,43 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
     if (config.wallMotion.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "wallMotion must not contain CR or LF");
     }
+    if (config.profiles.find_first_of("\r\n") != std::string::npos) {
+        return fail(error, "profiles must not contain CR or LF");
+    }
+    if (config.extraFields.find_first_of("\r\n") != std::string::npos) {
+        return fail(error, "extraFields must not contain CR or LF");
+    }
+    if (!(config.inletFrom >= 0.0 && config.inletFrom <= 1.0) ||
+        !(config.inletTo >= 0.0 && config.inletTo <= 1.0)) {
+        return fail(error, "inletFrom and inletTo are fractions of a side, so "
+                           "they live between 0 and 1");
+    }
+    if (config.inletFrom >= config.inletTo) {
+        return fail(error, "inletFrom must be below inletTo, or the band the "
+                           "inlet occupies is empty");
+    }
+    {
+        // A closed box is a perfectly good case - it is what a lid driven
+        // cavity is - and the solver knows its pressure is only defined up to
+        // a constant. Fluid pushed into one that cannot leave is not: that is
+        // a mass balance nothing can satisfy.
+        bool anyOutlet = false;
+        bool anyInlet = false;
+        for (int side = 0; side < 4; ++side) {
+            if (config.boundaryKind[side] == "outlet")
+                anyOutlet = true;
+            if (config.boundaryKind[side] == "inlet")
+                anyInlet = true;
+            if (!std::isfinite(config.boundarySpeed[side]))
+                return fail(error, "boundary speeds must be finite");
+        }
+        if (config.supportsBoundaries && anyInlet && !anyOutlet &&
+            !config.restart)
+            return fail(error,
+                        "there is an inlet but no outlet, so fluid is pushed "
+                        "into a box it cannot leave. Give one side outlet, or "
+                        "make every side a wall for a closed case");
+    }
 
     if (config.restart) {
         // The mask, the grid and the geometry all come out of the frame, so
@@ -299,6 +336,39 @@ bool buildFluidSolverArguments(
     }
     if (config.supportsWallMotion) {
         arguments.push_back("wallMotion=" + config.wallMotion);
+    }
+    if (config.supportsProfiles && !config.profiles.empty()) {
+        arguments.push_back("profiles=" + config.profiles);
+    }
+    if (config.supportsExtraFields) {
+        arguments.push_back("extraFields=" + config.extraFields);
+    }
+    if (config.supportsSchemes) {
+        arguments.push_back("convection=" + config.convection);
+        arguments.push_back("limiter=" + config.limiter);
+        arguments.push_back("timeScheme=" + config.timeScheme);
+        arguments.push_back("gravityMode=" + config.gravityMode);
+    }
+    if (config.supportsBoundaries) {
+        static const char* const kKind[4] = {
+            "bcLeft", "bcRight", "bcBottom", "bcTop"};
+        static const char* const kSpeed[4] = {
+            "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed"};
+        for (int side = 0; side < 4; ++side) {
+            arguments.push_back(std::string(kKind[side]) + "=" +
+                                config.boundaryKind[side]);
+            // A speed is only named when it means something. Writing
+            // "bcLeftSpeed=0" for an inlet would tell the solver that a
+            // standstill was asked for, and an inlet at U0 would come out
+            // stopped - which is exactly how that goes wrong.
+            const bool movingWall = config.boundaryKind[side] == "movingWall";
+            if (movingWall || config.boundarySpeed[side] != 0.0)
+                arguments.push_back(std::string(kSpeed[side]) + "=" +
+                                    serializeDouble(config.boundarySpeed[side]));
+        }
+        arguments.push_back("inletFrom=" + serializeDouble(config.inletFrom));
+        arguments.push_back("inletTo=" + serializeDouble(config.inletTo));
+        arguments.push_back("inletProfile=" + config.inletProfile);
     }
     return true;
 }

@@ -73,6 +73,30 @@ struct FluidSolverRunConfig {
     // "1:rot=90,slideX=0.5;2:slip=1". Empty means every wall is static no-slip,
     // which is what the solver does when the key is absent.
     std::string wallMotion;
+
+    // ---- everything the fundamentals branch added -------------------------
+    // Each block is held back the same way: the UI looks for the key name in
+    // the executable and only puts it on the line when it is there, so a newer
+    // UI still drives an older solver instead of stopping it on argument one.
+    bool supportsProfiles = false;
+    std::string profiles;
+
+    bool supportsExtraFields = false;
+    std::string extraFields;
+
+    bool supportsSchemes = false;
+    std::string convection = "upwind";
+    std::string limiter = "vanLeer";
+    std::string timeScheme = "euler";
+    std::string gravityMode = "reduced";
+
+    bool supportsBoundaries = false;
+    // left, right, bottom, top
+    std::string boundaryKind[4] = {"inlet", "outlet", "slip", "slip"};
+    double boundarySpeed[4] = {0.0, 0.0, 0.0, 0.0};
+    double inletFrom = 0.0;
+    double inletTo = 1.0;
+    std::string inletProfile = "uniform";
 };
 
 bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,

@@ -135,16 +135,39 @@ directory, and frames used to land wherever that happened to be. A saved
 What goes on the command line depends on what the selected executable
 understands, because a solver exits on the first argument it does not know.
 `restart`, `restartFile` and `addTime` need 0.1.1 or newer; `avx2`, `openmp`,
-`threads` and `tray` need 0.2. `gravityEnabled`/`gravityAccel`/`gravityAngle`
-and `wallMotion` came after 0.2 was published, so no version number separates
-them - the UI looks for those key names in the executable's own parameter table
-instead, and leaves them off when they are not there.
+`threads` and `tray` need 0.2. Everything added after 0.2 was published has no
+version number to separate it, so the UI looks for the key name in the
+executable's own parameter table instead and leaves the whole block off when it
+is not there:
 
-`wallMotion` is written for every body the mask holds, numbered 1..n the way the
-solver numbers them: it flood-fills its mask 8-connected in grid scan order, and
-the UI counts the same way so the numbers agree. A continuation sends no
-`wallMotion` at all while the wall controls sit at their defaults, so the setting
-stored in the frame survives.
+| Block | Found by |
+|---|---|
+| `gravityEnabled` `gravityAccel` `gravityAngle` | `gravityEnabled` |
+| `wallMotion` | `wallMotion` |
+| `profiles` | `profiles` |
+| `extraFields` | `extraFields` |
+| `convection` `limiter` `timeScheme` `gravityMode` | `timeScheme` |
+| `bcLeft` … `inletProfile` | `bcBottom` |
+
+`bc<Side>Speed` is only written when that side is a `movingWall` or the speed is
+not zero. Writing `bcLeftSpeed=0` for an inlet would tell the solver a standstill
+was asked for, and an inlet meant to run at `U0` would come out stopped.
+
+A continuation sends no `wallMotion` and no `profiles` while those two boxes are
+empty, so whatever the frame was run with survives.
+
+## Result fields
+
+A frame carries pressure, the solid mask and velocity. Anything else the solver
+was asked to write - `vorticity`, `divergence`, `speed`, `objectId` - is read
+into a registry keyed by the name the frame used, and the **Field** button walks
+whatever turned up and back round to pressure. Nothing in the UI has a list of
+which fields exist, so a field the solver learns to write later shows up without
+this project changing.
+
+The three that were always there stay named members rather than map entries:
+they are read on every pixel of every redraw and have no business going through
+a hash lookup to get there.
 
 ## Frame loading
 
@@ -178,12 +201,20 @@ controls on a separate Basic/Advanced page.
 - Mouse wheel over the left parameter panel scrolls the controls.
 - The visible scrollbar can be dragged or clicked.
 - Mouse wheel over the 3D preview still controls preview zoom.
-- The user-editable controls cover the solver's physical, gravity, wall,
-  timestep, multigrid, output-frequency and acceleration settings.
-- The WALLS group is one setting applied to every body: rotation about each
-  body's own centroid, sliding in x and y, or free-slip, which is exclusive
-  with the other three. Per-body lines still have to be typed on the solver's
-  own command line.
+- A row is a number, a choice or a line of text. The panel is one list and
+  everything about it works by index, so a dropdown and a text box are kinds of
+  row rather than separate widgets: the layout, the scrolling, the group
+  headers and the `.cfdui` file did not have to learn they exist.
+- A choice row is dragged or clicked across its options like any other slider,
+  and double-clicking its value lets the name be typed instead.
+- A text row holds the solver's own grammar and is handed over untouched. The
+  UI only refuses a line break; what a line means is the solver's opinion, and
+  having two opinions about the same string is how they end up disagreeing.
+- The WALLS group is one such text row, so every body can be addressed
+  individually - `1:rot=90,slideX=0.5;2:slip=1` - rather than one setting being
+  applied to all of them.
+- GEOMETRY has a second text row for `profiles`, which places several models at
+  once, and BOUNDARIES has a choice row per side.
 - `outputDir`, `geometryFile`, transformed slice arguments, and `invertSection`
   are generated from the GUI workflow rather than exposed as ordinary sliders.
 

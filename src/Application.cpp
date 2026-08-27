@@ -182,6 +182,16 @@ void drawThickLine(
     target.draw(segment);
 }
 
+// The panel is one list of rows and everything about it - the layout, the
+// scrolling, the group headers, the config file - works off that list by
+// index. So a dropdown and a text box are kinds of row rather than new
+// widgets: nothing else in here has to learn they exist.
+enum class ControlKind {
+    Number,
+    Choice,
+    Text
+};
+
 struct Slider {
     std::string label;
     std::string unit;
@@ -192,6 +202,10 @@ struct Slider {
     bool logarithmic = false;
     bool boolean = false;
     double defaultValue = 0.0;
+    ControlKind kind = ControlKind::Number;
+    std::vector<std::string> options;
+    std::string text;
+    std::string defaultText;
     sf::FloatRect track{{0.0f, 0.0f}, {1.0f, 1.0f}};
     bool dragging = false;
 
@@ -206,6 +220,8 @@ struct Slider {
 
     void setNormalized(double normalizedValue) {
         normalizedValue = std::clamp(normalizedValue, 0.0, 1.0);
+        if (kind == ControlKind::Text)
+            return;
         if (logarithmic) {
             const double low = std::log10(minimum);
             const double high = std::log10(maximum);
@@ -219,6 +235,17 @@ struct Slider {
     }
 
     void setFromX(float mouseX) {
+        if (kind == ControlKind::Text)
+            return;
+        if (kind == ControlKind::Choice) {
+            const double span = static_cast<double>(std::max<std::size_t>(
+                options.size(), 1u));
+            const double t = std::clamp(
+                static_cast<double>((mouseX - track.position.x) / track.size.x),
+                0.0, 0.999999);
+            value = std::floor(t * span);
+            return;
+        }
         if (boolean) {
             value = mouseX >= track.position.x + track.size.x * 0.5f
                         ? 1.0
@@ -265,7 +292,71 @@ struct Slider {
         return editBounds().contains(point);
     }
 
-    bool setFromText(const std::string& text, std::string& error) {
+    const std::string& choice() const {
+        static const std::string empty;
+        if (options.empty())
+            return empty;
+        const std::size_t index = static_cast<std::size_t>(
+            std::clamp(std::llround(value), 0LL,
+                       static_cast<long long>(options.size()) - 1));
+        return options[index];
+    }
+
+    bool setChoice(const std::string& wanted) {
+        for (std::size_t index = 0; index < options.size(); ++index) {
+            if (options[index] == wanted) {
+                value = static_cast<double>(index);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    std::string displayValue() const {
+        if (kind == ControlKind::Choice)
+            return choice();
+        if (kind == ControlKind::Text)
+            return text.empty() ? std::string("none") : text;
+        if (boolean)
+            return value >= 0.5 ? "Requested" : "Off";
+        return formatValue(value, integer, unit);
+    }
+
+    bool setFromText(const std::string& input, std::string& error) {
+        if (kind == ControlKind::Text) {
+            // The solver owns the grammar of these, and says exactly what is
+            // wrong with a line it will not take. Refusing it here as well
+            // would only mean two opinions about the same string.
+            if (input.find_first_of("\r\n") != std::string::npos) {
+                error = "this has to stay on one line";
+                return false;
+            }
+            text = input;
+            return true;
+        }
+        if (kind == ControlKind::Choice) {
+            for (std::size_t index = 0; index < options.size(); ++index) {
+                std::string a = options[index];
+                std::string b = input;
+                for (char& c : a)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                for (char& c : b)
+                    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                while (!b.empty() && std::isspace(static_cast<unsigned char>(b.back())))
+                    b.pop_back();
+                while (!b.empty() && std::isspace(static_cast<unsigned char>(b.front())))
+                    b.erase(b.begin());
+                if (a == b) {
+                    value = static_cast<double>(index);
+                    return true;
+                }
+            }
+            error = "this one takes one of: ";
+            for (std::size_t index = 0; index < options.size(); ++index)
+                error += (index ? ", " : "") + options[index];
+            return false;
+        }
+        const std::string& text = input;
         double parsed = value;
         if (!parseNumericInput(
                 text,
@@ -293,11 +384,8 @@ struct Slider {
             13,
             {track.position.x, track.position.y - 24.0f},
             invalid ? WARNING_OUTLINE : TEXT));
-        const std::string display = editing
-            ? inputText + "|"
-            : boolean
-                  ? (value >= 0.5 ? "Requested" : "Off")
-                  : formatValue(value, integer, unit);
+        const std::string display =
+            editing ? inputText + "|" : displayValue();
         if (editing) {
             const sf::FloatRect bounds = editBounds();
             sf::RectangleShape editor(bounds.size);
@@ -319,7 +407,7 @@ struct Slider {
         valueText.setOrigin({valueText.getLocalBounds().size.x, 0.0f});
         target.draw(valueText);
 
-        if (integer && !boolean && !editing) {
+        if (integer && !boolean && !editing && kind == ControlKind::Number) {
             for (const auto& control :
                  std::array<std::pair<sf::FloatRect, const char*>, 2>{{
                      {stepMinusBounds(), "-"},
@@ -749,7 +837,8 @@ enum class DisplayMode {
 
 enum class ResultQuantity {
     Pressure,
-    Velocity
+    Velocity,
+    Scalar
 };
 
 enum class ResultOrigin {
@@ -766,13 +855,23 @@ enum ParameterIndex : std::size_t {
     GravityEnabled,
     GravityAccel,
     GravityAngle,
+    GravityMode,
     SliceX,
     SliceZ,
     SliceRotation,
-    WallRotation,
-    WallSlideX,
-    WallSlideY,
-    WallSlip,
+    Profiles,
+    BcLeft,
+    BcRight,
+    BcBottom,
+    BcTop,
+    BcLeftSpeed,
+    BcRightSpeed,
+    BcBottomSpeed,
+    BcTopSpeed,
+    InletFrom,
+    InletTo,
+    InletProfileKind,
+    WallMotionLine,
     DomainX,
     DomainY,
     CellsX,
@@ -782,12 +881,16 @@ enum ParameterIndex : std::size_t {
     AddTime,
     DtUpdateInterval,
     DtSafety,
+    Convection,
+    Limiter,
+    TimeSchemeKind,
     CoarseSorOmega,
     SmootherOmega,
     MgIterations,
     MgTolerance,
     MgMinCoarseSize,
     SaveInterval,
+    ExtraFields,
     UseCuda,
     UseAvx2,
     UseOpenMp,
@@ -801,12 +904,14 @@ struct ParameterGroupInfo {
     const char* label;
 };
 
-constexpr std::array<ParameterGroupInfo, 9> PARAMETER_GROUPS{{
+constexpr std::array<ParameterGroupInfo, 11> PARAMETER_GROUPS{{
     {WindSpeed, "FLOW"},
     {SliceX, "GEOMETRY"},
-    {WallRotation, "WALLS"},
+    {BcLeft, "BOUNDARIES"},
+    {WallMotionLine, "WALLS"},
     {DomainX, "DOMAIN / GRID"},
     {Cfl, "TIME"},
+    {Convection, "NUMERICS"},
     {CoarseSorOmega, "PRESSURE / MULTIGRID"},
     {SaveInterval, "OUTPUT"},
     {UseCuda, "ACCELERATION"},
@@ -816,13 +921,18 @@ constexpr std::array<ParameterGroupInfo, 9> PARAMETER_GROUPS{{
 const char* parameterKey(std::size_t index) {
     static constexpr std::array<const char*, ParameterCount> keys{{
         "U0", "nu", "ro",
-        "gravityEnabled", "gravityAccel", "gravityAngle",
-        "sliceAngleX", "sliceAngleZ", "sliceRotation",
-        "wallRot", "wallSlideX", "wallSlideY", "wallSlip",
+        "gravityEnabled", "gravityAccel", "gravityAngle", "gravityMode",
+        "sliceAngleX", "sliceAngleZ", "sliceRotation", "profiles",
+        "bcLeft", "bcRight", "bcBottom", "bcTop",
+        "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed",
+        "inletFrom", "inletTo", "inletProfile",
+        "wallMotion",
         "Lx", "Ly", "nx", "ny",
         "CFL", "totalTime", "addTime", "dtUpdateInterval", "dtSafety",
+        "convection", "limiter", "timeScheme",
         "omega", "smootherOmega", "mgIterations", "mgTolerance",
-        "mgMinCoarseSize", "saveInterval", "useCuda", "useAvx2", "useOpenMP",
+        "mgMinCoarseSize", "saveInterval", "extraFields",
+        "useCuda", "useAvx2", "useOpenMP",
         "threads", "uiCacheMB"
     }};
     return index < keys.size() ? keys[index] : "unknown";
@@ -846,13 +956,35 @@ std::string parameterHelp(std::size_t index) {
     case SliceZ:
     case SliceRotation:
         return "Geometry section transform. The UI bakes this into section-adapter.obj.";
-    case WallRotation:
-        return "wallMotion rot: surface speed as a spin about each body's own centroid, in deg/s. The body does not move; its walls drag the fluid.";
-    case WallSlideX:
-    case WallSlideY:
-        return "wallMotion slideX / slideY: the wall surface is dragged along in a straight line at this speed, in m/s.";
-    case WallSlip:
-        return "wallMotion slip: free-slip walls instead of no-slip. Exclusive with rotation and sliding, so turning it on clears those.";
+    case GravityMode:
+        return "gravityMode: reduced adds the head on output only, which is exact at one density. body puts the force in the solve and p becomes the total pressure.";
+    case Profiles:
+        return "profiles: several models at once, each placed where you say. <file>@x=1,y=0.5,size=0.3;<file>@x=3,y=0.5 - the separator is @ because a Windows path owns the colon.";
+    case BcLeft:
+    case BcRight:
+    case BcBottom:
+    case BcTop:
+        return "What this side of the domain does. A run needs at least one outlet, or the pressure has no level to sit at.";
+    case BcLeftSpeed:
+    case BcRightSpeed:
+    case BcBottomSpeed:
+    case BcTopSpeed:
+        return "Speed this side imposes: what a movingWall slides at, or an inlet speed other than U0. Left at zero on an inlet it means U0.";
+    case InletFrom:
+    case InletTo:
+        return "Cuts the inlet down to a band of its side, as fractions measured from the low end. The rest of that side becomes a wall.";
+    case InletProfileKind:
+        return "uniform is a flat inlet, parabolic bends it into a parabola carrying the same flow rate.";
+    case WallMotionLine:
+        return "wallMotion, in the solver's own grammar: <object>:rot=90,slideX=0.5;<object>:slip=1. The object numbers are the ones the solver prints for the mask.";
+    case Convection:
+        return "upwind is first order and what this solver has always used. muscl is second order where the field is smooth, limited where it is not. central does no limiting at all.";
+    case Limiter:
+        return "Which limiter muscl uses. minmod is the most diffusive and the safest, superbee the least of both.";
+    case TimeSchemeKind:
+        return "euler is one projection a step. rk2 and rk3 project on every stage, cost that many times more and are what anything other than upwind needs under it.";
+    case ExtraFields:
+        return "Extra fields written into every frame for ParaView and the results view: vorticity, divergence, speed, objectId, comma separated.";
     case DomainX:
     case DomainY:
         return "Physical domain size. dx=Lx/nx and dy=Ly/ny.";
@@ -1525,6 +1657,10 @@ struct SolverExecutableInfo {
     bool supportsMultipleContours = false;  // more than one closed loop
     bool supportsGravity = false;           // gravityEnabled= Accel= Angle=
     bool supportsWallMotion = false;        // wallMotion=
+    bool supportsProfiles = false;          // profiles=
+    bool supportsExtraFields = false;       // extraFields=
+    bool supportsSchemes = false;           // convection= limiter= timeScheme=
+    bool supportsBoundaries = false;        // bcLeft= .. inletProfile=
     std::string version = "unknown";
     std::string features;
     std::string build = "Unknown build";
@@ -1706,6 +1842,10 @@ SolverExecutableInfo inspectSolverExecutable(
     // is the thing that decides whether the argument is accepted.
     info.supportsGravity = binaryContains(executable, "gravityEnabled");
     info.supportsWallMotion = binaryContains(executable, "wallMotion");
+    info.supportsProfiles = binaryContains(executable, "profiles");
+    info.supportsExtraFields = binaryContains(executable, "extraFields");
+    info.supportsSchemes = binaryContains(executable, "timeScheme");
+    info.supportsBoundaries = binaryContains(executable, "bcBottom");
     info.supportsContinuation =
         info.version != "unknown" &&
         compareSolverVersions(info.version, "0.1.1") >= 0;
@@ -1814,13 +1954,31 @@ public:
               Slider{"Gravity", "", 0.0, 1.0, 0.0, true, false, true},
               Slider{"Gravity g", "m/s2", 0.0, 100.0, 9.81, false, false},
               Slider{"Gravity angle", "deg", -180.0, 180.0, 0.0, false, false},
+              Slider{"Gravity mode", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"reduced", "body"}},
               Slider{"Slice X", "deg", -180.0, 180.0, 90.0, true, false},
               Slider{"Slice Z", "deg", -180.0, 180.0, 90.0, true, false},
               Slider{"Slice rotation", "deg", -180.0, 180.0, 0.0, false, false},
-              Slider{"Wall rotation", "deg/s", -3600.0, 3600.0, 0.0, false, false},
-              Slider{"Wall slide X", "m/s", -200.0, 200.0, 0.0, false, false},
-              Slider{"Wall slide Y", "m/s", -200.0, 200.0, 0.0, false, false},
-              Slider{"Free-slip walls", "", 0.0, 1.0, 0.0, true, false, true},
+              Slider{"Extra profiles", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
+                     ControlKind::Text},
+              Slider{"Left boundary", "", 0.0, 4.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"inlet", "outlet", "wall", "movingWall", "slip"}},
+              Slider{"Right boundary", "", 0.0, 4.0, 1.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"inlet", "outlet", "wall", "movingWall", "slip"}},
+              Slider{"Bottom boundary", "", 0.0, 4.0, 4.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"inlet", "outlet", "wall", "movingWall", "slip"}},
+              Slider{"Top boundary", "", 0.0, 4.0, 4.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"inlet", "outlet", "wall", "movingWall", "slip"}},
+              Slider{"Left side speed", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Right side speed", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Bottom side speed", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Top side speed", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Inlet band from", "", 0.0, 1.0, 0.0, false, false},
+              Slider{"Inlet band to", "", 0.0, 1.0, 1.0, false, false},
+              Slider{"Inlet profile", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"uniform", "parabolic"}},
+              Slider{"Wall motion", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
+                     ControlKind::Text},
               Slider{"Domain Lx", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Domain Ly", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Cells nx", "", 8.0, 5000.0, 50.0, true, true},
@@ -1830,12 +1988,20 @@ public:
               Slider{"Continue: add time", "s", 0.0, 10000.0, 0.0, false, true},
               Slider{"dt update interval", "steps", 1.0, 1000.0, 5.0, true, false},
               Slider{"dt safety", "", 0.01, 1.0, 0.9, false, false},
+              Slider{"Convection", "", 0.0, 2.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"upwind", "muscl", "central"}},
+              Slider{"Limiter", "", 0.0, 2.0, 1.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"minmod", "vanLeer", "superbee"}},
+              Slider{"Time scheme", "", 0.0, 2.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"euler", "rk2", "rk3"}},
               Slider{"Coarse SOR omega", "", 0.1, 1.99, 1.85, false, false},
               Slider{"MG smoother omega", "", 0.1, 1.99, 1.15, false, false},
               Slider{"MG V-cycles", "", 1.0, 100.0, 2.0, true, false},
               Slider{"MG tolerance", "", 1e-10, 1e-2, 1e-4, false, true},
               Slider{"MG minimum coarse size", "cells", 1.0, 512.0, 8.0, true, false},
               Slider{"VTK save interval", "steps", 1.0, 100000.0, 20.0, true, true},
+              Slider{"Extra frame fields", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
+                     ControlKind::Text},
               Slider{"Request CUDA", "", 0.0, 1.0, 1.0, true, false, true},
               Slider{"Use AVX2", "", 0.0, 1.0, 1.0, true, false, true},
               Slider{"Use OpenMP", "", 0.0, 1.0, 1.0, true, false, true},
@@ -1844,6 +2010,7 @@ public:
           } {
         for (Slider& slider : sliders_) {
             slider.defaultValue = slider.value;
+            slider.defaultText = slider.text;
         }
         loadPreferences();
         std::string selectionError;
@@ -2114,11 +2281,12 @@ private:
 
         pressureButton_.bounds = {{20.0f, 72.0f}, {126.0f, 36.0f}};
         velocityButton_.bounds = {{154.0f, 72.0f}, {126.0f, 36.0f}};
-        vectorButton_.bounds = {{288.0f, 72.0f}, {144.0f, 36.0f}};
-        rangeButton_.bounds = {{440.0f, 72.0f}, {144.0f, 36.0f}};
-        playbackButton_.bounds = {{592.0f, 72.0f}, {110.0f, 36.0f}};
-        runDetailsButton_.bounds = {{710.0f, 72.0f}, {130.0f, 36.0f}};
-        continueRunButton_.bounds = {{848.0f, 72.0f}, {166.0f, 36.0f}};
+        fieldButton_.bounds = {{288.0f, 72.0f}, {156.0f, 36.0f}};
+        vectorButton_.bounds = {{452.0f, 72.0f}, {144.0f, 36.0f}};
+        rangeButton_.bounds = {{604.0f, 72.0f}, {144.0f, 36.0f}};
+        playbackButton_.bounds = {{756.0f, 72.0f}, {110.0f, 36.0f}};
+        runDetailsButton_.bounds = {{874.0f, 72.0f}, {130.0f, 36.0f}};
+        continueRunButton_.bounds = {{1012.0f, 72.0f}, {166.0f, 36.0f}};
         resultViewport_ = {
             {20.0f, 122.0f},
             {
@@ -2154,6 +2322,15 @@ private:
             resultQuantity_ == ResultQuantity::Pressure;
         velocityButton_.selected =
             resultQuantity_ == ResultQuantity::Velocity;
+        const std::vector<std::string>& available =
+            activeFrame_ ? activeFrame_->scalarNames : emptyScalarNames();
+        fieldButton_.enabled = !available.empty();
+        fieldButton_.selected = resultQuantity_ == ResultQuantity::Scalar;
+        fieldButton_.label =
+            available.empty()
+                ? "Field: none"
+                : "Field: " + (activeScalarName_.empty() ? available.front()
+                                                         : activeScalarName_);
         vectorButton_.label =
             showVelocityVectors_ ? "Vectors: On" : "Vectors: Off";
         vectorButton_.selected = showVelocityVectors_;
@@ -2463,6 +2640,26 @@ private:
             resultTextureCacheValid_ = false;
             return;
         }
+        if (fieldButton_.hit(position) && fieldButton_.enabled) {
+            const std::vector<std::string>& names = activeFrame_->scalarNames;
+            std::size_t next = 0;
+            if (resultQuantity_ == ResultQuantity::Scalar) {
+                for (std::size_t index = 0; index < names.size(); ++index)
+                    if (names[index] == activeScalarName_)
+                        next = index + 1;
+            }
+            if (next >= names.size()) {
+                // Round the list and back to pressure, so the button is a way
+                // out of the extra fields as well as a way in.
+                resultQuantity_ = ResultQuantity::Pressure;
+                activeScalarName_.clear();
+            } else {
+                resultQuantity_ = ResultQuantity::Scalar;
+                activeScalarName_ = names[next];
+            }
+            resultTextureCacheValid_ = false;
+            return;
+        }
         if (vectorButton_.hit(position)) {
             showVelocityVectors_ = !showVelocityVectors_;
             status_ = showVelocityVectors_
@@ -2675,8 +2872,13 @@ private:
         }
 
         editingSlider_ = index;
+        const Slider& editingRow = sliders_[index];
         sliderEditText_ =
-            editableNumber(sliders_[index].value, sliders_[index].integer);
+            editingRow.kind == ControlKind::Text
+                ? editingRow.text
+                : editingRow.kind == ControlKind::Choice
+                      ? editingRow.choice()
+                      : editableNumber(editingRow.value, editingRow.integer);
         lastValueClickSlider_.reset();
         status_ =
             "Editing " + sliders_[index].label +
@@ -3142,36 +3344,6 @@ private:
         return parameters;
     }
 
-    // One line for every body the mask found, all of them given the same
-    // setting: the solver numbers them 1..n in grid scan order and the UI has
-    // no per-body editor yet. Empty when nothing is asked for, which is what
-    // static no-slip walls are.
-    std::string composeWallMotion() const {
-        const bool slip = sliders_[WallSlip].value >= 0.5;
-        const double rot = sliders_[WallRotation].value;
-        const double slideX = sliders_[WallSlideX].value;
-        const double slideY = sliders_[WallSlideY].value;
-        if (!slip && rot == 0.0 && slideX == 0.0 && slideY == 0.0) {
-            return {};
-        }
-        const std::size_t bodies = std::max<std::size_t>(solidBodyCount_, 1u);
-        std::ostringstream out;
-        out << std::setprecision(std::numeric_limits<double>::max_digits10);
-        for (std::size_t body = 1; body <= bodies; ++body) {
-            if (body > 1) {
-                out << ';';
-            }
-            out << body << ':';
-            if (slip) {
-                out << "slip=1";
-            } else {
-                out << "rot=" << rot << ",slideX=" << slideX
-                    << ",slideY=" << slideY;
-            }
-        }
-        return out.str();
-    }
-
     FluidSolverRunConfig fluidSolverRunConfig() const {
         FluidSolverRunConfig config;
         const MaskParameters parameters = sectionParameters();
@@ -3222,7 +3394,31 @@ private:
         config.gravityAngle = sliders_[GravityAngle].value;
 
         config.supportsWallMotion = solverInfo_.supportsWallMotion;
-        config.wallMotion = composeWallMotion();
+        config.wallMotion = sliders_[WallMotionLine].text;
+
+        config.supportsProfiles = solverInfo_.supportsProfiles;
+        config.profiles = sliders_[Profiles].text;
+        config.supportsExtraFields = solverInfo_.supportsExtraFields;
+        config.extraFields = sliders_[ExtraFields].text;
+
+        config.supportsSchemes = solverInfo_.supportsSchemes;
+        config.convection = sliders_[Convection].choice();
+        config.limiter = sliders_[Limiter].choice();
+        config.timeScheme = sliders_[TimeSchemeKind].choice();
+        config.gravityMode = sliders_[GravityMode].choice();
+
+        config.supportsBoundaries = solverInfo_.supportsBoundaries;
+        static constexpr ParameterIndex kSideKind[4] = {
+            BcLeft, BcRight, BcBottom, BcTop};
+        static constexpr ParameterIndex kSideSpeed[4] = {
+            BcLeftSpeed, BcRightSpeed, BcBottomSpeed, BcTopSpeed};
+        for (int side = 0; side < 4; ++side) {
+            config.boundaryKind[side] = sliders_[kSideKind[side]].choice();
+            config.boundarySpeed[side] = sliders_[kSideSpeed[side]].value;
+        }
+        config.inletFrom = sliders_[InletFrom].value;
+        config.inletTo = sliders_[InletTo].value;
+        config.inletProfile = sliders_[InletProfileKind].choice();
         return config;
     }
 
@@ -3399,7 +3595,15 @@ private:
         output << std::setprecision(
             std::numeric_limits<double>::max_digits10);
         for (std::size_t index = 0; index < sliders_.size(); ++index) {
-            output << parameterKey(index) << '=' << sliders_[index].value << '\n';
+            const Slider& slider = sliders_[index];
+            output << parameterKey(index) << '=';
+            if (slider.kind == ControlKind::Text)
+                output << slider.text;
+            else if (slider.kind == ControlKind::Choice)
+                output << slider.choice();
+            else
+                output << slider.value;
+            output << '\n';
         }
         output.flush();
         if (!output) {
@@ -3438,10 +3642,21 @@ private:
             if (found == values.end()) {
                 continue;
             }
+            Slider& slider = sliders_[index];
+            if (slider.kind == ControlKind::Text) {
+                slider.text = found->second;
+                continue;
+            }
+            if (slider.kind == ControlKind::Choice) {
+                // A file written by a newer build can name an option this one
+                // does not have. Keeping the default beats refusing the file.
+                slider.setChoice(found->second);
+                continue;
+            }
             try {
                 const double parsed = std::stod(found->second);
                 if (std::isfinite(parsed)) {
-                    sliders_[index].value = parsed;
+                    slider.value = parsed;
                 }
             } catch (const std::exception&) {
                 error = "Invalid value for " +
@@ -3520,6 +3735,7 @@ private:
     void resetDefaults() {
         for (Slider& slider : sliders_) {
             slider.value = slider.defaultValue;
+            slider.text = slider.defaultText;
         }
         if (!solverInfo_.cudaCapable) {
             sliders_[UseCuda].value = 0.0;
@@ -3743,12 +3959,9 @@ private:
             reducedToLargestContour = true;
         }
 
-        // Now that the mask is settled, wallMotion can name every body in it
-        // rather than guessing at one.
         solidBodyCount_ = std::max<std::size_t>(
             countSolidBodies(mask.cells, requestedConfig.nx, requestedConfig.ny),
             1u);
-        requestedConfig.wallMotion = composeWallMotion();
 
         const std::filesystem::path runDirectory =
             createRunDirectory(outputRoot_, error);
@@ -3948,12 +4161,12 @@ private:
         config.restartFile = frame.sourcePath;
         config.totalTime = target;
         config.addTime = addTime;
-        // The frame carries its own wallMotion and not the number of bodies it
-        // was written for, so an untouched wall panel says nothing rather than
-        // overwriting it with an empty line.
-        if (config.wallMotion.empty()) {
+        // The frame carries its own wallMotion, so an empty wall line says
+        // nothing rather than overwriting it.
+        if (config.wallMotion.empty())
             config.supportsWallMotion = false;
-        }
+        if (config.profiles.empty())
+            config.supportsProfiles = false;
 
         std::string error;
         if (!validateFluidSolverRunConfig(config, error)) {
@@ -5331,6 +5544,7 @@ private:
     void drawResults() {
         pressureButton_.draw(*window_, font_);
         velocityButton_.draw(*window_, font_);
+        fieldButton_.draw(*window_, font_);
         vectorButton_.draw(*window_, font_);
         rangeButton_.draw(*window_, font_);
         playbackButton_.draw(*window_, font_);
@@ -5366,9 +5580,29 @@ private:
     // from mapping everything else onto three shades. Trimmed series is the
     // default because that is the view that is readable without being asked
     // for.
+    static const std::vector<std::string>& emptyScalarNames() {
+        static const std::vector<std::string> none;
+        return none;
+    }
+
     DataRange resultDisplayRange() const {
         if (!activeFrame_) {
             return {};
+        }
+        if (resultQuantity_ == ResultQuantity::Scalar) {
+            // An extra field has no series range: the run may not have carried
+            // it in every frame, and stretching one frame's scale over a field
+            // that was not there is worse than scaling each frame on its own.
+            const auto trimmed =
+                activeFrame_->scalarTrimmedRanges.find(activeScalarName_);
+            if (trimmedRange_ &&
+                trimmed != activeFrame_->scalarTrimmedRanges.end() &&
+                trimmed->second.available)
+                return trimmed->second;
+            const auto full =
+                activeFrame_->scalarRanges.find(activeScalarName_);
+            return full == activeFrame_->scalarRanges.end() ? DataRange{}
+                                                            : full->second;
         }
         const bool pressure = resultQuantity_ == ResultQuantity::Pressure;
         DataRange range;
@@ -5451,12 +5685,26 @@ private:
             std::uint8_t* const pixelData = resultPixels_.data();
             const bool showPressure =
                 resultQuantity_ == ResultQuantity::Pressure;
-            const float* const values = showPressure
-                ? frame.pressure.data()
-                : frame.velocityMagnitude.data();
-            const std::uint8_t* const finiteMask = showPressure
-                ? frame.pressureFinite.data()
-                : frame.velocityFinite.data();
+            const std::vector<float>* scalarValues = nullptr;
+            if (resultQuantity_ == ResultQuantity::Scalar) {
+                const auto found = frame.scalars.find(activeScalarName_);
+                if (found != frame.scalars.end())
+                    scalarValues = &found->second;
+            }
+            if (scalarValues) {
+                scalarFinite_.assign(scalarValues->size(), 1);
+                for (std::size_t id = 0; id < scalarValues->size(); ++id)
+                    scalarFinite_[id] =
+                        std::isfinite((*scalarValues)[id]) ? 1 : 0;
+            }
+            const float* const values =
+                scalarValues ? scalarValues->data()
+                             : showPressure ? frame.pressure.data()
+                                            : frame.velocityMagnitude.data();
+            const std::uint8_t* const finiteMask =
+                scalarValues ? scalarFinite_.data()
+                             : showPressure ? frame.pressureFinite.data()
+                                            : frame.velocityFinite.data();
             const std::uint8_t* const solidMask = frame.solid.data();
             const std::size_t nx = frame.nx;
             const std::size_t ny = frame.ny;
@@ -5724,12 +5972,16 @@ private:
         }
 
         const std::string unit =
-            resultQuantity_ == ResultQuantity::Pressure ? "Pa" : "m/s";
+            resultQuantity_ == ResultQuantity::Scalar
+                ? std::string()
+                : resultQuantity_ == ResultQuantity::Pressure ? "Pa" : "m/s";
         window_->draw(makeText(
             font_,
-            resultQuantity_ == ResultQuantity::Pressure
-                ? "Pressure"
-                : "Velocity",
+            resultQuantity_ == ResultQuantity::Scalar
+                ? activeScalarName_
+                : resultQuantity_ == ResultQuantity::Pressure
+                      ? "Pressure"
+                      : "Velocity",
             14,
             {legendBounds_.position.x - 18.0f,
              legendBounds_.position.y - 28.0f}));
@@ -5993,6 +6245,11 @@ private:
 
     DisplayMode mode_ = DisplayMode::Setup;
     ResultQuantity resultQuantity_ = ResultQuantity::Pressure;
+    // Whatever else the frames turned out to carry. The view knows the names
+    // only because the frames named them, so a field the solver learns to
+    // write later shows up here without this file changing again.
+    std::string activeScalarName_;
+    std::vector<std::uint8_t> scalarFinite_;
     Button setupTab_{"Setup"};
     Button resultsTab_{"Results"};
     Button openVtkButton_{"Open frames"};
@@ -6008,6 +6265,7 @@ private:
     Button pressureButton_{"Pressure"};
     Button velocityButton_{"Velocity"};
     Button continueRunButton_{"Continue run"};
+    Button fieldButton_{"Field"};
     Button vectorButton_{"Vectors: Off"};
     Button rangeButton_{"Range: Series"};
     Button playbackButton_{"Play"};
