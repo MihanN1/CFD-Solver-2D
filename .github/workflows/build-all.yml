@@ -67,10 +67,28 @@ jobs:
           echo "value=$v" >> "$GITHUB_OUTPUT"
           echo "Building version $v"
 
+  # The solver's own test suite, on the one row that needs no special hardware.
+  # A release that does not compute correctly is worse than no release, and
+  # before this job existed the matrix only ever checked that it linked.
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build and run the tests
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-tests \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DCFD_ENABLE_CUDA=OFF \
+            -DCFD_STATIC=OFF
+          cmake --build build-tests --parallel
+          ctest --test-dir build-tests --output-on-failure
+
   # An image old enough that the binaries also start on distributions older
   # than the runner, with nvcc already in it. No GPU is needed to compile CUDA.
   linux:
-    needs: version
+    needs: [version, tests]
     runs-on: ubuntu-latest
     container:
       image: nvidia/cuda:12.6.3-devel-ubuntu20.04
@@ -114,7 +132,7 @@ jobs:
           if-no-files-found: ignore
 
   windows:
-    needs: version
+    needs: [version, tests]
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -154,7 +172,7 @@ jobs:
           if-no-files-found: ignore
 
   macos-arm64:
-    needs: version
+    needs: [version, tests]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
@@ -181,7 +199,7 @@ jobs:
           if-no-files-found: ignore
 
   macos-intel:
-    needs: version
+    needs: [version, tests]
     runs-on: macos-15-intel
     steps:
       - uses: actions/checkout@v4

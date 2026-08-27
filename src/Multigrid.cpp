@@ -79,6 +79,10 @@ void Multigrid::buildHierarchy() {
         grid.diag.assign(padded, 0.0f);
         grid.invDiag.assign(padded, 0.0f);
         grid.solid.assign(static_cast<size_t>(grid.cellCount), 0);
+        grid.faceX.assign(
+            static_cast<size_t>(grid.nx + 1) * grid.ny, 1.0f);
+        grid.faceY.assign(
+            static_cast<size_t>(grid.nx) * (grid.ny + 1), 1.0f);
         gridLevels.push_back(std::move(grid));
 
         // Semi-coarsening: a point smoother only damps the error along the axis
@@ -202,16 +206,31 @@ void Multigrid::buildCoefficients(Level& grid) {
             }
             // A link is only opened towards a fluid neighbour, so the solid
             // walls are baked into the stencil instead of patched afterwards
-            const float coefW = (i > 0      && !grid.solid[id - 1])  ? invDx2 : 0.0f;
-            const float coefE = (i < nx - 1 && !grid.solid[id + 1])  ? invDx2 : 0.0f;
-            const float coefS = (j > 0      && !grid.solid[id - nx]) ? invDy2 : 0.0f;
-            const float coefN = (j < ny - 1 && !grid.solid[id + nx]) ? invDy2 : 0.0f;
+            const int faceRowX = j * (nx + 1);
+            const int faceRowY = j * nx;
+            const float wW = grid.faceX[faceRowX + i];
+            const float wE = grid.faceX[faceRowX + i + 1];
+            const float wS = grid.faceY[faceRowY + i];
+            const float wN = grid.faceY[faceRowY + nx + i];
+
+            const float coefW = (i > 0      && !grid.solid[id - 1])  ? wW * invDx2 : 0.0f;
+            const float coefE = (i < nx - 1 && !grid.solid[id + 1])  ? wE * invDx2 : 0.0f;
+            const float coefS = (j > 0      && !grid.solid[id - nx]) ? wS * invDy2 : 0.0f;
+            const float coefN = (j < ny - 1 && !grid.solid[id + nx]) ? wN * invDy2 : 0.0f;
 
             float diag = coefW + coefE + coefS + coefN;
 
-            // Outlet: p = 0 half a cell outside, hence the extra 2/dx^2
-            if (i == nx - 1)
-                diag += 2.0f * invDx2;
+            // A side that fixes the pressure sits half a cell outside, hence
+            // the extra 2/d^2 on the diagonal; a side that only reflects it
+            // adds nothing and the missing link is the zero gradient.
+            if (i == 0 && pressureBC.left == PressureSideBC::Dirichlet)
+                diag += 2.0f * wW * invDx2;
+            if (i == nx - 1 && pressureBC.right == PressureSideBC::Dirichlet)
+                diag += 2.0f * wE * invDx2;
+            if (j == 0 && pressureBC.bottom == PressureSideBC::Dirichlet)
+                diag += 2.0f * wS * invDy2;
+            if (j == ny - 1 && pressureBC.top == PressureSideBC::Dirichlet)
+                diag += 2.0f * wN * invDy2;
 
             grid.coefW[id] = coefW;
             grid.coefE[id] = coefE;
@@ -260,6 +279,8 @@ void Multigrid::setGeometry(const std::vector<uint8_t>& solid) {
         }
     }
 
+    coarsenFaceWeights();
+
     for (int l = 0; l < levels; ++l)
         buildCoefficients(gridLevels[l]);
 
@@ -273,6 +294,134 @@ void Multigrid::setGeometry(const std::vector<uint8_t>& solid) {
     if (useCuda)
         setGeometryCuda();
 #endif
+}
+
+void Multigrid::setPressureBC(const MultigridBC& bc) {
+    pressureBC = bc;
+    pressureSingular =
+        bc.left != PressureSideBC::Dirichlet &&
+        bc.right != PressureSideBC::Dirichlet &&
+        bc.bottom != PressureSideBC::Dirichlet &&
+        bc.top != PressureSideBC::Dirichlet;
+    if (geometryReady)
+        rebuildCoefficients();
+}
+
+void Multigrid::setCoefficients(const std::vector<float>& faceX,
+                                const std::vector<float>& faceY) {
+    if (gridLevels.empty())
+        buildHierarchy();
+
+    const size_t wantX = static_cast<size_t>(nx + 1) * ny;
+    const size_t wantY = static_cast<size_t>(nx) * (ny + 1);
+    const bool uniform = faceX.size() < wantX || faceY.size() < wantY;
+
+    if (uniform) {
+        if (coefficientsUniform)
+            return;
+        std::fill(gridLevels[0].faceX.begin(), gridLevels[0].faceX.end(), 1.0f);
+        std::fill(gridLevels[0].faceY.begin(), gridLevels[0].faceY.end(), 1.0f);
+        coefficientsUniform = true;
+    } else {
+        std::copy(faceX.begin(), faceX.begin() + wantX,
+                  gridLevels[0].faceX.begin());
+        std::copy(faceY.begin(), faceY.begin() + wantY,
+                  gridLevels[0].faceY.begin());
+        coefficientsUniform = false;
+    }
+
+    if (geometryReady)
+        rebuildCoefficients();
+}
+
+void Multigrid::rebuildCoefficients() {
+    coarsenFaceWeights();
+    for (int l = 0; l < levels; ++l)
+        buildCoefficients(gridLevels[l]);
+
+#ifdef USE_CUDA
+    if (useCuda && deviceReady)
+        uploadCoefficientsCuda();
+#endif
+}
+
+// A coarse face covers a column of fine faces at the same position, and those
+// sit side by side rather than one behind the other, so they add like parallel
+// links and the mean is the plain one. Turning a cell value into a face value
+// is the series case and belongs to whoever fills the finest level.
+void Multigrid::coarsenFaceWeights() {
+    if (coefficientsUniform) {
+        for (int l = 1; l < levels; ++l) {
+            std::fill(gridLevels[l].faceX.begin(),
+                      gridLevels[l].faceX.end(), 1.0f);
+            std::fill(gridLevels[l].faceY.begin(),
+                      gridLevels[l].faceY.end(), 1.0f);
+        }
+        return;
+    }
+
+    for (int l = 1; l < levels; ++l) {
+        const Level& fine = gridLevels[l - 1];
+        Level& coarse = gridLevels[l];
+        const int rx = fine.refineX;
+        const int ry = fine.refineY;
+
+        for (int j = 0; j < coarse.ny; ++j) {
+            for (int i = 0; i <= coarse.nx; ++i) {
+                const int fi = std::min(i * rx, fine.nx);
+                float total = 0.0f;
+                int count = 0;
+                for (int jj = j * ry;
+                     jj < std::min((j + 1) * ry, fine.ny);
+                     ++jj) {
+                    total += fine.faceX[jj * (fine.nx + 1) + fi];
+                    ++count;
+                }
+                coarse.faceX[j * (coarse.nx + 1) + i] =
+                    count ? total / static_cast<float>(count) : 1.0f;
+            }
+        }
+
+        for (int j = 0; j <= coarse.ny; ++j) {
+            const int fj = std::min(j * ry, fine.ny);
+            for (int i = 0; i < coarse.nx; ++i) {
+                float total = 0.0f;
+                int count = 0;
+                for (int ii = i * rx;
+                     ii < std::min((i + 1) * rx, fine.nx);
+                     ++ii) {
+                    total += fine.faceY[fj * fine.nx + ii];
+                    ++count;
+                }
+                coarse.faceY[j * coarse.nx + i] =
+                    count ? total / static_cast<float>(count) : 1.0f;
+            }
+        }
+    }
+}
+
+// With no side fixing the level, the constants solve the homogeneous problem
+// and the iteration drifts along them instead of converging. Taking the mean
+// off the fluid cells is what keeps the answer in the space the operator can
+// actually reach.
+void Multigrid::removeNullSpace(float* values, const Level& grid) const {
+    if (!pressureSingular)
+        return;
+
+    double total = 0.0;
+    int count = 0;
+    for (int id = 0; id < grid.cellCount; ++id) {
+        if (grid.solid[id])
+            continue;
+        total += static_cast<double>(values[id]);
+        ++count;
+    }
+    if (count < 1)
+        return;
+
+    const float mean = static_cast<float>(total / count);
+    for (int id = 0; id < grid.cellCount; ++id)
+        values[id] = grid.solid[id] ? 0.0f : values[id] - mean;
 }
 
 void Multigrid::setUseCuda(bool enable) {
@@ -725,7 +874,14 @@ float Multigrid::solve(
         finestRhs[id] = active ? rhs[id] : 0.0f;
     }
 
-    const float rhsNorm = (rhsScale > 0.0f) ? rhsScale : computeVectorNorm(finestRhs, cellCount);
+    // A closed box has no side to carry the imbalance away, so the right hand
+    // side has to sum to zero before the solve rather than after it, and the
+    // level of the answer is pinned the same way at the end of every cycle.
+    removeNullSpace(finestRhs, finest);
+
+    const float rhsNorm = (rhsScale > 0.0f && !pressureSingular)
+                              ? rhsScale
+                              : computeVectorNorm(finestRhs, cellCount);
     const float scale = (rhsNorm > 1e-20f) ? rhsNorm : 1.0f;
 
     if (firstSolve) {
@@ -750,6 +906,7 @@ float Multigrid::solve(
                 break;
         }
         vCycle(0, smootherOmega, coarseOmega);
+        removeNullSpace(finestPressure, finest);
         ++lastCycles;
     }
 

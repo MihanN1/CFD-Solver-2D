@@ -50,10 +50,6 @@ static void printUsage(const char* exe) {
         "settings.ini, which --settings writes):\n"
         "      avx2=0|1 openmp=0|1 useCuda=0|1 threads=N tray=0|1\n"
         "\n"
-        "Acceleration, for this run only (the remembered defaults come from\n"
-        "settings.ini, which --settings writes):\n"
-        "      avx2=0|1 openmp=0|1 useCuda=0|1 threads=N tray=0|1\n"
-        "\n"
         "Example:\n"
         "  " << exe << " nx=256 ny=128 Lx=2 Ly=1 U0=1 nu=0.002 "
                        "totalTime=2 saveInterval=25\n"
@@ -120,6 +116,19 @@ namespace {
 const char* const kBuildMarkers[] = {CFD_VERSION_MARKER, CFD_FEATURES_MARKER};
 const char* const* const kBuildMarkersKeepAlive = kBuildMarkers;
 }   // namespace
+
+// Second order convection with a one stage time scheme is only conditionally
+// stable, and the condition is not the CFL number anybody is thinking about
+// when they set it. Saying so beats letting it blow up on step one.
+static void warnAboutScheme(const Config& cfg) {
+    if (cfg.convection == ConvectionScheme::Upwind ||
+        cfg.timeScheme != TimeScheme::Euler)
+        return;
+    std::cout << "\n!!! convection is second order while timeScheme is euler. "
+                 "That pair is only\n    conditionally stable and usually is "
+                 "not: use timeScheme=rk2 or rk3, or\n    drop back to "
+                 "convection=upwind.\n\n";
+}
 
 int main(int argc, char** argv) {
     (void)kBuildMarkersKeepAlive;
@@ -229,6 +238,7 @@ int main(int argc, char** argv) {
         runtime::apply();
         update::runStartupCheck(false);
         std::cout << "Acceleration:\n" << runtime::summary();
+        warnAboutScheme(cfg);
         cfg.print();
     } else {
         runtime::apply();
@@ -247,6 +257,7 @@ int main(int argc, char** argv) {
         std::cout << "\n";
 
         cfg.readFromConsole();
+        warnAboutScheme(cfg);
 
         if (!cfg.restart) {
             while (!cfg.confirm()) {
@@ -370,6 +381,11 @@ int main(int argc, char** argv) {
     }
 
     Mesh mesh(cfg, cfg.restart ? &restart.solid : nullptr);
+    if (!mesh.valid()) {
+        std::cerr << "\n!!! " << mesh.error() << "\n\nNothing has been "
+                     "started.\n";
+        return 1;
+    }
     mesh.printInfo();
 
     Solver solver(cfg, mesh);

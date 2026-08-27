@@ -37,10 +37,14 @@ const char* const kKeys[] = {
     "CFL", "totalTime", "dtUpdateInterval", "dtSafety",
     "omega", "smootherOmega",
     "mgIterations", "mgTolerance", "mgMinCoarseSize",
-    "useCuda", "saveInterval", "outputDir",
+    "useCuda", "saveInterval", "outputDir", "extraFields",
     "geometryFile", "sliceAngleX", "sliceAngleZ", "sliceRotation",
-    "invertSection", "wallMotion",
+    "invertSection", "wallMotion", "profiles",
     "restart", "restartFile", "addTime",
+    "gravityMode", "convection", "limiter", "timeScheme",
+    "bcLeft", "bcRight", "bcBottom", "bcTop",
+    "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed",
+    "inletFrom", "inletTo", "inletProfile",
 };
 
 std::string trimSpace(const std::string& s) {
@@ -191,6 +195,200 @@ int editDistance(const std::string& a, const std::string& b) {
     }
     return prev[b.size()];
 }
+}
+
+namespace {
+
+struct EnumEntry {
+    const char* name;
+    int value;
+};
+
+bool assignEnumValue(int& target,
+                     const std::string& key,
+                     const std::string& value,
+                     const std::vector<EnumEntry>& entries,
+                     std::string& error) {
+    std::string wanted = trimSpace(cleanValue(value));
+    for (char& c : wanted)
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+    for (const EnumEntry& entry : entries) {
+        std::string name = entry.name;
+        for (char& c : name)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (name == wanted) {
+            target = entry.value;
+            return true;
+        }
+    }
+
+    std::string list;
+    for (size_t i = 0; i < entries.size(); ++i) {
+        if (i)
+            list += (i + 1 == entries.size()) ? " or " : ", ";
+        list += entries[i].name;
+    }
+    error = badValue(key, cleanValue(value),
+                     "this one takes a name, not a number: " + list);
+    return false;
+}
+
+const char* enumName(int value, const std::vector<EnumEntry>& entries) {
+    for (const EnumEntry& entry : entries)
+        if (entry.value == value)
+            return entry.name;
+    return "?";
+}
+
+const std::vector<EnumEntry> kGravityModes{
+    {"reduced", static_cast<int>(GravityMode::Reduced)},
+    {"body", static_cast<int>(GravityMode::Body)}};
+
+const std::vector<EnumEntry> kConvectionSchemes{
+    {"upwind", static_cast<int>(ConvectionScheme::Upwind)},
+    {"central", static_cast<int>(ConvectionScheme::Central)},
+    {"muscl", static_cast<int>(ConvectionScheme::Muscl)}};
+
+const std::vector<EnumEntry> kLimiters{
+    {"minmod", static_cast<int>(LimiterKind::Minmod)},
+    {"vanleer", static_cast<int>(LimiterKind::VanLeer)},
+    {"superbee", static_cast<int>(LimiterKind::Superbee)}};
+
+const std::vector<EnumEntry> kTimeSchemes{
+    {"euler", static_cast<int>(TimeScheme::Euler)},
+    {"rk2", static_cast<int>(TimeScheme::RK2)},
+    {"rk3", static_cast<int>(TimeScheme::RK3)}};
+
+bool assignSideKind(BoundarySpec& spec,
+                    const std::string& key,
+                    const std::string& value,
+                    std::string& error) {
+    std::string why;
+    BoundaryKind kind = spec.kind;
+    if (!parseBoundaryKind(trimSpace(cleanValue(value)), kind, why)) {
+        error = badValue(key, cleanValue(value), why);
+        return false;
+    }
+    spec.kind = kind;
+    return true;
+}
+
+}   // namespace
+
+std::string profilesHelp() {
+    return
+        "\n--- How to write profiles ----------------------------------------\n"
+        "  profiles=<file>@<setting>=<value>,<setting>=<value>;<next file>@...\n"
+        "\n"
+        "  The separator between the file and its settings is '@' and not ':',\n"
+        "  because a Windows path already owns the colon.\n"
+        "\n"
+        "  Settings, all optional:\n"
+        "    x, y     where the centre of this model lands, in metres\n"
+        "    size     the larger side of its section, in metres\n"
+        "    rot      turn it in the plane, degrees\n"
+        "    ax, az   slice angles for this model alone, degrees\n"
+        "    invert   1 mirrors it, same as invertSection but per model\n"
+        "\n"
+        "  A file with no '@' keeps the old behaviour: centred in the domain\n"
+        "  at a fifth of its smaller side. Anything landing on or outside the\n"
+        "  domain edge is refused with the number it missed by, because a body\n"
+        "  touching the border is a wall, not an obstacle.\n"
+        "\n"
+        "    profiles=\"wing.stl@x=0.6,y=0.5,size=0.3;ball.obj@x=1.6,y=0.5\"\n"
+        "------------------------------------------------------------------\n";
+}
+
+bool parseProfiles(const std::string& text,
+                   std::vector<Profile>& out,
+                   std::string& error) {
+    out.clear();
+    error.clear();
+    const std::string body = trimSpace(text);
+    if (body.empty())
+        return true;
+
+    size_t pos = 0;
+    while (pos <= body.size()) {
+        const size_t end = body.find(';', pos);
+        const std::string token =
+            trimSpace(body.substr(pos, end == std::string::npos
+                                           ? std::string::npos
+                                           : end - pos));
+        pos = (end == std::string::npos) ? body.size() + 1 : end + 1;
+        if (token.empty())
+            continue;
+
+        Profile profile;
+        const size_t at = token.find('@');
+        profile.file = trimSpace(token.substr(0, at));
+        if (profile.file.empty()) {
+            error = badValue("profiles", token,
+                             "there is no file name in front of the '@'");
+            return false;
+        }
+
+        if (at != std::string::npos) {
+            std::string settings = token.substr(at + 1);
+            size_t sub = 0;
+            while (sub <= settings.size()) {
+                const size_t comma = settings.find(',', sub);
+                const std::string pair =
+                    trimSpace(settings.substr(sub, comma == std::string::npos
+                                                       ? std::string::npos
+                                                       : comma - sub));
+                sub = (comma == std::string::npos) ? settings.size() + 1
+                                                   : comma + 1;
+                if (pair.empty())
+                    continue;
+
+                const size_t eq = pair.find('=');
+                if (eq == std::string::npos || eq == 0) {
+                    error = badValue("profiles", pair,
+                                     "every setting is name=value, e.g. x=1.5");
+                    return false;
+                }
+                std::string name = trimSpace(pair.substr(0, eq));
+                for (char& c : name)
+                    c = static_cast<char>(
+                        std::tolower(static_cast<unsigned char>(c)));
+                const std::string raw = trimSpace(pair.substr(eq + 1));
+
+                double number = 0.0;
+                std::string why;
+                if (!parseNumber("profiles", raw, false, number, why)) {
+                    error = badValue("profiles", pair, why);
+                    return false;
+                }
+
+                if (name == "x")           { profile.x = float(number); profile.placed = true; }
+                else if (name == "y")      { profile.y = float(number); profile.placed = true; }
+                else if (name == "size")   { profile.size = float(number); }
+                else if (name == "rot")    { profile.rotation = float(number); }
+                else if (name == "ax")     { profile.angleX = float(number); profile.angleSet = true; }
+                else if (name == "az")     { profile.angleZ = float(number); profile.angleSet = true; }
+                else if (name == "invert") { profile.invert = number != 0.0; profile.invertSet = true; }
+                else {
+                    error = badValue("profiles", pair,
+                                     "'" + name +
+                                         "' is not a profile setting. Use x, y,"
+                                         " size, rot, ax, az or invert");
+                    return false;
+                }
+            }
+        }
+
+        if (profile.size < 0.0f) {
+            error = badValue("profiles", token,
+                             "size is a length in metres, it cannot be "
+                             "negative");
+            return false;
+        }
+        out.push_back(std::move(profile));
+    }
+
+    return true;
 }
 
 std::string wallMotionHelp() {
@@ -475,6 +673,8 @@ bool Config::ask(const std::string& key, const std::string& prompt) {
     // confirmation menu shows the same block.
     if (name == "wallMotion")
         std::cout << wallMotionHelp();
+    if (name == "profiles")
+        std::cout << profilesHelp();
 
     for (;;) {
         std::cout << prompt;
@@ -546,6 +746,34 @@ void Config::readFromConsole() {
         std::cout << "Note: at constant density gravity only adds hydrostatic"
                      " pressure, the velocity field is unchanged.\n";
     }
+    if (gravityEnabled) {
+        if (!ask("gravityMode",
+                 "How gravity is applied: reduced (exact at one density, the "
+                 "head is added on output) or body (real force in the solve)"))
+            return;
+    }
+    std::cout << boundaryHelp();
+    if (!ask("bcLeft", "Left boundary")) return;
+    if (boundaries[BoundarySide::Left].kind == BoundaryKind::MovingWall)
+        if (!ask("bcLeftSpeed", "Speed the left wall slides at (m/s)")) return;
+    if (!ask("bcRight", "Right boundary")) return;
+    if (boundaries[BoundarySide::Right].kind == BoundaryKind::MovingWall)
+        if (!ask("bcRightSpeed", "Speed the right wall slides at (m/s)")) return;
+    if (!ask("bcBottom", "Bottom boundary")) return;
+    if (boundaries[BoundarySide::Bottom].kind == BoundaryKind::MovingWall)
+        if (!ask("bcBottomSpeed", "Speed the bottom wall slides at (m/s)")) return;
+    if (!ask("bcTop", "Top boundary")) return;
+    if (boundaries[BoundarySide::Top].kind == BoundaryKind::MovingWall)
+        if (!ask("bcTopSpeed", "Speed the top wall slides at (m/s)")) return;
+    if (!ask("convection",
+             "Convective scheme: upwind (first order, what this solver has "
+             "always used), muscl or central")) return;
+    if (convection == ConvectionScheme::Muscl)
+        if (!ask("limiter", "Limiter for muscl: minmod, vanLeer or superbee"))
+            return;
+    if (!ask("timeScheme",
+             "Time scheme: euler, rk2 or rk3. Anything but upwind wants rk2 or "
+             "rk3, euler alone is only conditionally stable there")) return;
     if (!ask("CFL", "Enter CFL number (recommended 0.3-0.5)")) return;
     if (!ask("totalTime", "Enter total simulation time (seconds)")) return;
     if (!ask("dtUpdateInterval",
@@ -575,6 +803,14 @@ void Config::readFromConsole() {
     if (!ask("sliceRotation",
              "Enter rotation in the simulation plane (degrees)")) return;
     if (!ask("invertSection", "Mirror the section? (0 = no, 1 = yes)")) return;
+    if (!ask("extraFields",
+             "Extra fields to write into every frame, comma separated, empty "
+             "for none (vorticity, divergence, speed, objectId)"))
+        return;
+    if (!ask("profiles",
+             "Extra models and where they sit, empty for just geometryFile "
+             "(the rules are above)"))
+        return;
     if (!ask("wallMotion",
              "Wall behaviour (Enter leaves every wall stationary and no-slip)"))
         return;
@@ -603,7 +839,27 @@ void Config::print() const {
         std::cout << "  gravityAccel     = " << gravityAccel << " m/s^2\n";
         std::cout << "  gravityAngle     = " << gravityAngle
                   << " deg (clockwise, 0 = down)\n";
+        std::cout << "  gravityMode      = "
+                  << enumName(static_cast<int>(gravityMode), kGravityModes)
+                  << (gravityMode == GravityMode::Reduced
+                          ? " (head added on output only)"
+                          : " (body force, p is the total pressure)")
+                  << "\n";
     }
+    std::cout << "  convection       = "
+              << enumName(static_cast<int>(convection), kConvectionSchemes);
+    if (convection == ConvectionScheme::Muscl)
+        std::cout << " (" << enumName(static_cast<int>(limiter), kLimiters)
+                  << ")";
+    std::cout << "\n";
+    std::cout << "  timeScheme       = "
+              << enumName(static_cast<int>(timeScheme), kTimeSchemes) << "\n";
+    std::cout << "  boundaries       = "
+              << boundaryKindName(boundaries[BoundarySide::Left].kind) << " | "
+              << boundaryKindName(boundaries[BoundarySide::Right].kind) << " | "
+              << boundaryKindName(boundaries[BoundarySide::Bottom].kind) << " | "
+              << boundaryKindName(boundaries[BoundarySide::Top].kind)
+              << "   (left | right | bottom | top)\n";
     std::cout << "  CFL              = " << CFL << "\n";
     std::cout << "  totalTime        = " << totalTime << " s\n";
     std::cout << "  dtUpdateInterval = " << dtUpdateInterval << " steps\n";
@@ -613,6 +869,8 @@ void Config::print() const {
     std::cout << "  mgTolerance      = " << mgTolerance << " (relative)\n";
     std::cout << "  mgMinCoarseSize  = " << mgMinCoarseSize << " cells/axis\n";
     std::cout << "  saveInterval     = " << saveInterval << " steps\n";
+    std::cout << "  extraFields      = "
+              << (extraFields.empty() ? "none" : extraFields) << "\n";
     std::cout << "  outputDir        = " << outputDir << "\n";
     std::cout << "  geometryFile     = " << geometryFile << "\n";
     std::cout << "  sliceAngleX      = " << sliceAngleX << " deg\n";
@@ -621,8 +879,44 @@ void Config::print() const {
     std::cout << "  sliceRotation    = " << sliceRotation << " deg\n";
     std::cout << "  wallMotion       = "
               << (wallMotion.empty() ? "none" : wallMotion) << "\n";
+    std::cout << "  profiles         = "
+              << (profiles.empty() ? "none (geometryFile only)" : profiles)
+              << "\n";
     std::cout << " CUDA? Yes/No:       " << (useCuda ? "Yes" : "No") << "\n";
     std::cout << "--------------------------------\n";
+}
+
+std::vector<Profile> Config::resolvedProfiles() const {
+    std::vector<Profile> list;
+    std::string ignored;
+    if (!profiles.empty())
+        parseProfiles(profiles, list, ignored);
+
+    if (list.empty()) {
+        std::string name = geometryFile;
+        std::string lowered = name;
+        for (char& c : lowered)
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (name.empty() || lowered == "none")
+            return list;
+        Profile only;
+        only.file = std::move(name);
+        list.push_back(std::move(only));
+    }
+
+    // A profile that says nothing about its slice takes the one the whole run
+    // was configured with, so a single model behaves exactly as it always did.
+    for (Profile& profile : list) {
+        if (!profile.angleSet) {
+            profile.angleX = sliceAngleX;
+            profile.angleZ = sliceAngleZ;
+        }
+        if (!profile.invertSet)
+            profile.invert = invertSection;
+        if (profile.rotation == 0.0f)
+            profile.rotation = sliceRotation;
+    }
+    return list;
 }
 
 std::string Config::serialize() const {
@@ -642,6 +936,37 @@ std::string Config::serialize() const {
         << "gravityEnabled=" << (gravityEnabled ? 1 : 0) << "\n"
         << "gravityAccel=" << gravityAccel << "\n"
         << "gravityAngle=" << gravityAngle << "\n"
+        << "gravityMode="
+        << enumName(static_cast<int>(gravityMode), kGravityModes) << "\n"
+        << "convection="
+        << enumName(static_cast<int>(convection), kConvectionSchemes) << "\n"
+        << "limiter="
+        << enumName(static_cast<int>(limiter), kLimiters) << "\n"
+        << "timeScheme="
+        << enumName(static_cast<int>(timeScheme), kTimeSchemes) << "\n"
+        << "bcLeft=" << boundaryKindName(boundaries[BoundarySide::Left].kind) << "\n"
+        << "bcRight=" << boundaryKindName(boundaries[BoundarySide::Right].kind) << "\n"
+        << "bcBottom=" << boundaryKindName(boundaries[BoundarySide::Bottom].kind) << "\n"
+        << "bcTop=" << boundaryKindName(boundaries[BoundarySide::Top].kind) << "\n"
+        << "inletFrom=" << boundaries[BoundarySide::Left].from << "\n"
+        << "inletTo=" << boundaries[BoundarySide::Left].to << "\n"
+        << "inletProfile="
+        << inletProfileName(boundaries[BoundarySide::Left].profile) << "\n";
+
+    // Only the sides somebody actually named a speed for. Writing them all
+    // would put "bcLeftSpeed=0" in every frame, and reading that back sets the
+    // flag that says "0 was asked for", which is how an inlet at U0 turned
+    // into an inlet at a standstill on the first continuation.
+    for (int side = 0; side < 4; ++side) {
+        const BoundarySpec& spec = boundaries.side[side];
+        if (!spec.speedSet)
+            continue;
+        static const char* const kNames[4] = {
+            "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed"};
+        out << kNames[side] << "=" << spec.speed << "\n";
+    }
+
+    out
         << "CFL=" << CFL << "\n"
         << "dtUpdateInterval=" << dtUpdateInterval << "\n"
         << "dtSafety=" << dtSafety << "\n"
@@ -662,7 +987,9 @@ std::string Config::serialize() const {
 
     out << "outputDir=" << outputDir << "\n"
         << "geometryFile=" << geometryFile << "\n"
-        << "wallMotion=" << wallMotion << "\n";
+        << "wallMotion=" << wallMotion << "\n"
+        << "profiles=" << profiles << "\n"
+        << "extraFields=" << extraFields << "\n";
 
     return out.str();
 }
@@ -715,6 +1042,59 @@ bool Config::setParam(const std::string& key,
              "other way use gravityAngle=180", error);
     else if (k == "gravityAngle") ok = assignFloat(gravityAngle, k, value, -kHuge, kHuge,
              "the angle must be a finite number of degrees", error);
+    else if (k == "gravityMode") {
+        int mode = static_cast<int>(gravityMode);
+        ok = assignEnumValue(mode, k, value, kGravityModes, error);
+        if (ok) gravityMode = static_cast<GravityMode>(mode);
+    }
+    else if (k == "convection") {
+        int scheme = static_cast<int>(convection);
+        ok = assignEnumValue(scheme, k, value, kConvectionSchemes, error);
+        if (ok) convection = static_cast<ConvectionScheme>(scheme);
+    }
+    else if (k == "limiter") {
+        int kind = static_cast<int>(limiter);
+        ok = assignEnumValue(kind, k, value, kLimiters, error);
+        if (ok) limiter = static_cast<LimiterKind>(kind);
+    }
+    else if (k == "timeScheme") {
+        int scheme = static_cast<int>(timeScheme);
+        ok = assignEnumValue(scheme, k, value, kTimeSchemes, error);
+        if (ok) timeScheme = static_cast<TimeScheme>(scheme);
+    }
+    else if (k == "bcLeft")   ok = assignSideKind(boundaries[BoundarySide::Left], k, value, error);
+    else if (k == "bcRight")  ok = assignSideKind(boundaries[BoundarySide::Right], k, value, error);
+    else if (k == "bcBottom") ok = assignSideKind(boundaries[BoundarySide::Bottom], k, value, error);
+    else if (k == "bcTop")    ok = assignSideKind(boundaries[BoundarySide::Top], k, value, error);
+    else if (k == "bcLeftSpeed" || k == "bcRightSpeed" ||
+             k == "bcBottomSpeed" || k == "bcTopSpeed") {
+        BoundarySide side = BoundarySide::Left;
+        if (k == "bcRightSpeed")       side = BoundarySide::Right;
+        else if (k == "bcBottomSpeed") side = BoundarySide::Bottom;
+        else if (k == "bcTopSpeed")    side = BoundarySide::Top;
+        ok = assignFloat(boundaries[side].speed, k, value, -kHuge, kHuge,
+             "the speed this side imposes must be a finite number of m/s", error);
+        if (ok) boundaries[side].speedSet = true;
+    }
+    else if (k == "inletFrom" || k == "inletTo") {
+        float target = 0.0f;
+        ok = assignFloat(target, k, value, 0.0, 1.0,
+             "this is a fraction of the side measured from its low end, so it "
+             "lives between 0 and 1", error);
+        if (ok)
+            for (int side = 0; side < 4; ++side) {
+                if (k == "inletFrom") boundaries.side[side].from = target;
+                else                  boundaries.side[side].to = target;
+            }
+    }
+    else if (k == "inletProfile") {
+        InletProfile profile = InletProfile::Uniform;
+        std::string why;
+        ok = parseInletProfile(trimSpace(cleanValue(value)), profile, why);
+        if (!ok) error = badValue(k, cleanValue(value), why);
+        else for (int side = 0; side < 4; ++side)
+            boundaries.side[side].profile = profile;
+    }
     else if (k == "CFL") ok = assignFloat(CFL, k, value, kTiny, kHuge,
              "the CFL number must be positive (0.3-0.5 is the usual range)", error);
     else if (k == "totalTime") ok = assignDouble(totalTime, k, value, kTiny, kHuge,
@@ -747,6 +1127,44 @@ bool Config::setParam(const std::string& key,
     else if (k == "sliceRotation") ok = assignFloat(sliceRotation, k, value, -kHuge, kHuge,
              "the angle must be a finite number of degrees", error);
     else if (k == "invertSection") ok = assignBool(invertSection, k, value, error);
+    else if (k == "extraFields") {
+        const std::string wanted = trimSpace(cleanValue(value));
+        std::string bad;
+        size_t pos = 0;
+        while (pos <= wanted.size() && bad.empty()) {
+            const size_t comma = wanted.find(',', pos);
+            std::string name = trimSpace(
+                wanted.substr(pos, comma == std::string::npos
+                                       ? std::string::npos
+                                       : comma - pos));
+            pos = (comma == std::string::npos) ? wanted.size() + 1 : comma + 1;
+            if (name.empty())
+                continue;
+            for (char& c : name)
+                c = static_cast<char>(
+                    std::tolower(static_cast<unsigned char>(c)));
+            if (name != "vorticity" && name != "divergence" &&
+                name != "objectid" && name != "speed")
+                bad = name;
+        }
+        if (!bad.empty()) {
+            error = badValue(k, cleanValue(value),
+                             "'" + bad +
+                                 "' is not a field this build can write. Use "
+                                 "vorticity, divergence, speed or objectId, "
+                                 "comma separated");
+            ok = false;
+        } else {
+            extraFields = wanted;
+            ok = true;
+        }
+    }
+    else if (k == "profiles") {
+        std::vector<Profile> parsed;
+        ok = parseProfiles(cleanValue(value), parsed, error);
+        if (ok)
+            profiles = cleanValue(value);
+    }
     else if (k == "wallMotion") {
         std::vector<WallMotion> parsed;
         ok = parseWallMotion(value, parsed, error);

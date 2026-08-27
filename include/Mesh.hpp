@@ -52,7 +52,13 @@ public:
     bool loadGeometry(const std::string& filename);
     bool loadOBJ(const std::string& filename);
     bool loadSTL(const std::string& filename);
-    void buildSection();
+    void buildSection(const Profile& profile);
+
+    // A profile that lands on or outside the domain edge is refused rather
+    // than clipped: a body touching the border is a wall, and a wall through
+    // the middle of a case nobody asked for is worse than a message.
+    bool valid() const { return placementError.empty(); }
+    const std::string& error() const { return placementError; }
     void rasterizeSection();
     void buildSolid();
 
@@ -62,7 +68,11 @@ public:
     // grid, so the same mask always produces the same numbers.
     void labelObjects();
 
+    void checkPlacement(const Profile& profile);
+
     void printInfo() const;
+
+    std::string placementError;
 
 private:
     struct SectionPoint {
