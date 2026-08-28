@@ -145,6 +145,75 @@ int checkSingularCase() {
     return 0;
 }
 
+// Water against air is a jump of eight hundred to one in the coefficient, and
+// a plain V-cycle hierarchy stops being a solver at that ratio: the coarse
+// grids no longer represent the fine problem, the correction that comes back
+// is longer than the error it was asked to remove, and the residual grows by a
+// factor of four every cycle until the field is NaN. This is that case, and it
+// is the one thing standing between a two phase run and a wall of nonsense.
+int checkJumpCoefficients() {
+    const int nx = 96, ny = 64;
+    const float dx = 0.6f / nx, dy = 0.4f / ny;
+    const size_t cells = static_cast<size_t>(nx) * ny;
+
+    Multigrid multigrid(nx, ny, dx, dy, 8);
+    MultigridBC bc;
+    bc.left = bc.right = bc.bottom = PressureSideBC::Neumann;
+    bc.top = PressureSideBC::Dirichlet;
+    multigrid.setPressureBC(bc);
+    multigrid.setGeometry(std::vector<uint8_t>(cells, 0));
+
+    std::vector<float> density(cells, 1.225f);
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i)
+            if ((j + 0.5f) * dy < 0.3f && (i + 0.5f) * dx < 0.15f)
+                density[j * nx + i] = 1000.0f;
+
+    std::vector<float> faceX(static_cast<size_t>(nx + 1) * ny, 1.0f);
+    std::vector<float> faceY(static_cast<size_t>(nx) * (ny + 1), 1.0f);
+    for (int j = 0; j < ny; ++j) {
+        for (int i = 1; i < nx; ++i)
+            faceX[j * (nx + 1) + i] =
+                0.5f * (1.0f / density[j * nx + i - 1] +
+                        1.0f / density[j * nx + i]);
+        faceX[j * (nx + 1)] = 1.0f / density[j * nx];
+        faceX[j * (nx + 1) + nx] = 1.0f / density[j * nx + nx - 1];
+    }
+    for (int j = 1; j < ny; ++j)
+        for (int i = 0; i < nx; ++i)
+            faceY[j * nx + i] =
+                0.5f * (1.0f / density[(j - 1) * nx + i] +
+                        1.0f / density[j * nx + i]);
+    for (int i = 0; i < nx; ++i) {
+        faceY[i] = 1.0f / density[i];
+        faceY[ny * nx + i] = 1.0f / density[(ny - 1) * nx + i];
+    }
+    multigrid.setCoefficients(faceX, faceY);
+
+    std::vector<float> pressure(cells, 0.0f);
+    std::vector<float> rhs(cells, 0.0f);
+    for (size_t id = 0; id < cells; ++id)
+        rhs[id] = -9.81f / density[id];
+
+    double norm = 0.0;
+    for (float value : rhs)
+        norm += static_cast<double>(value) * value;
+    const float scale = static_cast<float>(std::sqrt(norm));
+
+    const float residual =
+        multigrid.solve(pressure, rhs, 1.15f, 1.85f, 60, 1e-6f, scale);
+    testing::report("816:1 jump: residual " + std::to_string(residual) +
+                    " after " + std::to_string(multigrid.cyclesUsed()) +
+                    " cycles");
+    if (!testing::allFinite(pressure))
+        return testing::fail("the jump solve produced non-numbers");
+    if (!(residual < 1e-4f))
+        return testing::fail("the solve across a density jump did not "
+                             "converge, which is a two phase run producing "
+                             "nothing but noise");
+    return 0;
+}
+
 }   // namespace
 
 int main() {
@@ -164,6 +233,8 @@ int main() {
         return testing::fail("the Poisson solve is not second order any more");
 
     if (int rc = checkCoefficientScaling())
+        return rc;
+    if (int rc = checkJumpCoefficients())
         return rc;
     if (int rc = checkSingularCase())
         return rc;

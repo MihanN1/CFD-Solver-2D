@@ -121,6 +121,12 @@ private:
         // Sum of the prolongation weights that land on fluid cells, used to
         // normalise both the prolongation and the restriction
         std::vector<float> prolongWeight;
+
+        // Only allocated when the face weights stop being one: the pressure
+        // and the residual as they were before a coarse grid correction, which
+        // is what the line search below needs to judge it by.
+        std::vector<float> savedPressure;
+        std::vector<float> savedResidual;
     };
 
     int nx;
@@ -164,6 +170,40 @@ private:
         int sweeps);
 
     void computeResidual(int level);
+
+    // Takes the correction the coarse grid just handed up and scales it by
+    // however much of it actually reduces the residual. Bilinear interpolation
+    // assumes the solution is smooth across a coarse cell, and at a density
+    // jump it is not: the correction comes back pointing the right way and far
+    // too long, and a V-cycle that keeps applying it in full grows instead of
+    // converging. One extra operator application per level says how long the
+    // step should have been. Skipped entirely while the coefficients are
+    // uniform, where the answer is one and always was.
+    void dampCorrection(int level);
+
+    // out = A x, with A the same five point operator the smoother inverts.
+    void applyOperator(int level, const float* x, float* out) const;
+
+    // Conjugate gradients with one V-cycle as the preconditioner, used when
+    // the face weights are not all one. Plain V-cycles are enough for a
+    // constant coefficient Laplacian and are what every single phase run still
+    // gets, bit for bit. Across a density jump they are not: the coarse grids
+    // stop representing the fine problem, the convergence rate goes from 0.1
+    // per cycle to 0.9 and then past 1, and no amount of cycles gets there.
+    // The Krylov iteration outside them does not care how good the
+    // preconditioner is - it only needs it to point roughly the right way, and
+    // it gets the length right by construction.
+    float solvePCG(std::vector<float>& pressure,
+                   const std::vector<float>& rhs,
+                   float smootherOmega,
+                   float coarseOmega,
+                   int maxCycles,
+                   float tolerance,
+                   float rhsScale);
+
+    Field cgX, cgR, cgZ, cgD, cgQ;
+    std::vector<float> cgPrevR;
+    bool cudaFallbackReported = false;
     float computeResidualNorm(int level) const;
     static float computeVectorNorm(const float* values, int count);
 

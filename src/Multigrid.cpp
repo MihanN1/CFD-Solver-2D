@@ -1,4 +1,5 @@
 #include "Multigrid.hpp"
+#include <cstdlib>
 #include "Runtime.hpp"
 #include <cmath>
 #include <cstdio>
@@ -349,6 +350,16 @@ void Multigrid::rebuildCoefficients() {
 // sit side by side rather than one behind the other, so they add like parallel
 // links and the mean is the plain one. Turning a cell value into a face value
 // is the series case and belongs to whoever fills the finest level.
+//
+// The obvious next idea is to average the other way as well - the coarse link
+// crosses the fine faces inside the coarse cell in series, so harmonically -
+// and it was tried and is measurably worse: on a water against air jump it
+// slows the solve down by a factor of five and leaves the answer somewhere
+// else entirely. A coarse operator that reproduces the fine one across a jump
+// this size needs the interpolation to know about the coefficients too, and
+// that is a rewrite of the transfer operators rather than a different mean.
+// What actually fixes it is the Krylov iteration in solvePCG, which does not
+// need the coarse grids to be right, only to point roughly the right way.
 void Multigrid::coarsenFaceWeights() {
     if (coefficientsUniform) {
         for (int l = 1; l < levels; ++l) {
@@ -598,6 +609,229 @@ void Multigrid::computeResidual(int level) {
     }
 }
 
+void Multigrid::applyOperator(int level, const float* x, float* out) const {
+    const Level& grid = gridLevels[level];
+    const int nx = grid.nx;
+    const int ny = grid.ny;
+    const float* const coefW = grid.coefW.data();
+    const float* const coefE = grid.coefE.data();
+    const float* const coefS = grid.coefS.data();
+    const float* const coefN = grid.coefN.data();
+    const float* const diag = grid.diag.data();
+
+    #pragma omp parallel for schedule(static) if (ny >= PARALLEL_ROWS_MIN)
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        int i = 0;
+#ifdef __AVX2__
+        for (; runtime::avx2 && i + 8 <= nx; i += 8) {
+            const int id = row + i;
+            __m256 sum = _mm256_mul_ps(_mm256_loadu_ps(coefW + id),
+                                       _mm256_loadu_ps(x + id - 1));
+            sum = _mm256_add_ps(sum,
+                _mm256_mul_ps(_mm256_loadu_ps(coefE + id),
+                              _mm256_loadu_ps(x + id + 1)));
+            sum = _mm256_add_ps(sum,
+                _mm256_mul_ps(_mm256_loadu_ps(coefS + id),
+                              _mm256_loadu_ps(x + id - nx)));
+            sum = _mm256_add_ps(sum,
+                _mm256_mul_ps(_mm256_loadu_ps(coefN + id),
+                              _mm256_loadu_ps(x + id + nx)));
+            _mm256_storeu_ps(
+                out + id,
+                _mm256_sub_ps(_mm256_mul_ps(_mm256_loadu_ps(diag + id),
+                                            _mm256_loadu_ps(x + id)),
+                              sum));
+        }
+#endif
+        for (; i < nx; ++i) {
+            const int id = row + i;
+            out[id] = diag[id] * x[id] -
+                      (coefW[id] * x[id - 1] + coefE[id] * x[id + 1] +
+                       coefS[id] * x[id - nx] + coefN[id] * x[id + nx]);
+        }
+    }
+}
+
+namespace {
+double dotProduct(const float* a, const float* b, int count) {
+    double total = 0.0;
+    #pragma omp parallel for schedule(static) reduction(+ : total) \
+        if (count >= 4096)
+    for (int id = 0; id < count; ++id)
+        total += static_cast<double>(a[id]) * b[id];
+    return total;
+}
+}   // namespace
+
+float Multigrid::solvePCG(std::vector<float>& pressure,
+                          const std::vector<float>& rhs,
+                          float smootherOmega,
+                          float coarseOmega,
+                          int maxCycles,
+                          float tolerance,
+                          float rhsScale) {
+    Level& finest = gridLevels[0];
+    const int count = finest.cellCount;
+    const int halo = finest.nx + 8;
+
+    if (static_cast<int>(cgPrevR.size()) != count) {
+        cgX.init(count, halo);
+        cgR.init(count, halo);
+        cgZ.init(count, halo);
+        cgD.init(count, halo);
+        cgQ.init(count, halo);
+        cgPrevR.assign(count, 0.0f);
+    }
+
+    float* const x = cgX.data();
+    float* const r = cgR.data();
+    float* const z = cgZ.data();
+    float* const d = cgD.data();
+    float* const q = cgQ.data();
+    float* const previous = cgPrevR.data();
+    float* const levelPressure = finest.pressure.data();
+    float* const levelRhs = finest.rhs.data();
+
+    #pragma omp parallel for schedule(static)
+    for (int id = 0; id < count; ++id) {
+        const bool active = finest.diag[id] > 0.0f;
+        x[id] = active ? pressure[id] : 0.0f;
+        levelRhs[id] = active ? rhs[id] : 0.0f;
+    }
+    removeNullSpace(levelRhs, finest);
+
+    // The stored right hand side is the negative of the one the operator
+    // above works with: the smoother solves diag*p = sum - rhs, which is
+    // A p = -rhs. Everything below is in terms of A and b = -rhs.
+    std::vector<float> b(count);
+    for (int id = 0; id < count; ++id)
+        b[id] = -levelRhs[id];
+
+    const float norm = (rhsScale > 0.0f && !pressureSingular)
+                           ? rhsScale
+                           : computeVectorNorm(levelRhs, count);
+    const float scale = (norm > 1e-20f) ? norm : 1.0f;
+
+    if (firstSolve) {
+        std::copy(x, x + count, levelPressure);
+        fullMultigrid(smootherOmega, coarseOmega);
+        std::copy(levelPressure, levelPressure + count, x);
+        firstSolve = false;
+    }
+
+    applyOperator(0, x, q);
+    #pragma omp parallel for schedule(static)
+    for (int id = 0; id < count; ++id)
+        r[id] = (finest.diag[id] > 0.0f) ? b[id] - q[id] : 0.0f;
+    removeNullSpace(r, finest);
+
+    lastCycles = 0;
+    float relative = computeVectorNorm(r, count) / scale;
+    double rzOld = 0.0;
+
+    for (int cycle = 0; cycle < maxCycles && relative >= tolerance; ++cycle) {
+        // One V-cycle on A z = r. The hierarchy solves A p = -rhs, so the
+        // right hand side it is handed is -r.
+        #pragma omp parallel for schedule(static)
+        for (int id = 0; id < count; ++id)
+            levelRhs[id] = -r[id];
+        finest.pressure.zero();
+        vCycle(0, smootherOmega, coarseOmega);
+        removeNullSpace(levelPressure, finest);
+        std::copy(levelPressure, levelPressure + count, z);
+
+        const double rz = dotProduct(r, z, count);
+        if (cycle == 0) {
+            std::copy(z, z + count, d);
+        } else {
+            // Polak-Ribiere rather than Fletcher-Reeves, because the
+            // preconditioner is not the same linear operator every time: the
+            // coarse grid correction is scaled by whatever the line search
+            // says, and a fixed formula would be reading a number that is no
+            // longer true.
+            double numerator = 0.0;
+            #pragma omp parallel for schedule(static) reduction(+ : numerator) \
+                if (count >= 4096)
+            for (int id = 0; id < count; ++id)
+                numerator += static_cast<double>(r[id] - previous[id]) * z[id];
+            const double beta =
+                (std::fabs(rzOld) > 1e-300) ? std::max(0.0, numerator / rzOld)
+                                            : 0.0;
+            #pragma omp parallel for schedule(static)
+            for (int id = 0; id < count; ++id)
+                d[id] = z[id] + static_cast<float>(beta) * d[id];
+        }
+
+        applyOperator(0, d, q);
+        const double dq = dotProduct(d, q, count);
+        if (!(std::fabs(dq) > 1e-300))
+            break;
+        const float alpha = static_cast<float>(rz / dq);
+        if (!std::isfinite(alpha))
+            break;
+
+        std::copy(r, r + count, previous);
+        #pragma omp parallel for schedule(static)
+        for (int id = 0; id < count; ++id) {
+            x[id] += alpha * d[id];
+            r[id] -= alpha * q[id];
+        }
+        removeNullSpace(r, finest);
+        rzOld = rz;
+        ++lastCycles;
+        relative = computeVectorNorm(r, count) / scale;
+    }
+
+    removeNullSpace(x, finest);
+    #pragma omp parallel for schedule(static)
+    for (int id = 0; id < count; ++id) {
+        pressure[id] = x[id];
+        levelPressure[id] = x[id];
+    }
+    return relative;
+}
+
+void Multigrid::dampCorrection(int level) {
+    Level& grid = gridLevels[level];
+    const int count = grid.cellCount;
+    float* const pressure = grid.pressure.data();
+    const float* const saved = grid.savedPressure.data();
+    const float* const before = grid.savedResidual.data();
+
+    // r0 - r1 is A applied to the correction, without an operator of its own:
+    // the residual is rhs - A p, so the difference of two of them is A times
+    // the difference of the pressures.
+    computeResidual(level);
+    const float* const after = grid.residual.data();
+
+    double numerator = 0.0;
+    double denominator = 0.0;
+    #pragma omp parallel for schedule(static) \
+        reduction(+ : numerator, denominator) if (count >= 4096)
+    for (int id = 0; id < count; ++id) {
+        const double applied = static_cast<double>(before[id]) - after[id];
+        numerator += static_cast<double>(before[id]) * applied;
+        denominator += applied * applied;
+    }
+
+    // A correction that changes nothing, or one whose optimal length is not a
+    // number, is left exactly as it came up rather than thrown away.
+    float alpha = 1.0f;
+    if (denominator > 1e-30) {
+        alpha = static_cast<float>(numerator / denominator);
+        if (!std::isfinite(alpha))
+            alpha = 1.0f;
+        alpha = std::min(2.0f, std::max(0.0f, alpha));
+    }
+    if (alpha == 1.0f)
+        return;
+
+    #pragma omp parallel for schedule(static) if (count >= 4096)
+    for (int id = 0; id < count; ++id)
+        pressure[id] = saved[id] + alpha * (pressure[id] - saved[id]);
+}
+
 float Multigrid::computeVectorNorm(const float* values, int count) {
     double total = 0.0;
     int start = 0;
@@ -810,7 +1044,22 @@ void Multigrid::vCycle(
     computeResidual(level);
     restrictResidual(level);
     vCycle(level + 1, smootherOmega, coarseOmega);
-    prolongateCorrection(level + 1);
+    if (coefficientsUniform) {
+        prolongateCorrection(level + 1);
+    } else {
+        Level& grid = gridLevels[level];
+        const int count = grid.cellCount;
+        if (static_cast<int>(grid.savedPressure.size()) != count) {
+            grid.savedPressure.assign(count, 0.0f);
+            grid.savedResidual.assign(count, 0.0f);
+        }
+        std::copy(grid.pressure.data(), grid.pressure.data() + count,
+                  grid.savedPressure.begin());
+        std::copy(grid.residual.data(), grid.residual.data() + count,
+                  grid.savedResidual.begin());
+        prolongateCorrection(level + 1);
+        dampCorrection(level);
+    }
     smoothSOR(level, smootherOmega, POST_SMOOTH_SWEEPS);
 }
 
@@ -849,7 +1098,13 @@ float Multigrid::solve(
     }
 
 #ifdef USE_CUDA
-    if (useCuda)
+    // The device hierarchy runs plain V-cycles, and plain V-cycles are what
+    // stops working across a density jump. Rather than let a two phase run on
+    // a GPU produce a field the CPU would have refused, the solve comes back
+    // here and says so once. Everything else about the run still uses the
+    // card - this is the pressure solve only, and it is one pass over a grid
+    // that already lives in host memory between steps.
+    if (useCuda && coefficientsUniform)
         return solveCuda(
             pressure,
             rhs,
@@ -858,7 +1113,20 @@ float Multigrid::solve(
             maxCycles,
             tolerance,
             rhsScale);
+    if (useCuda && !coefficientsUniform && !cudaFallbackReported) {
+        cudaFallbackReported = true;
+        std::fprintf(stderr,
+                     "  note: the pressure solve runs on the CPU while the "
+                     "densities differ.\n  A V-cycle hierarchy stops "
+                     "converging across a jump this size and the GPU path\n"
+                     "  has no Krylov iteration around it yet; the CPU one "
+                     "does.\n");
+    }
 #endif
+
+    if (!coefficientsUniform)
+        return solvePCG(pressure, rhs, smootherOmega, coarseOmega,
+                        maxCycles, tolerance, rhsScale);
 
     Level& finest = gridLevels[0];
     const int cellCount = finest.cellCount;

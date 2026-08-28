@@ -23,7 +23,6 @@ Possible future extensions include:
 - Turbulence models
 - Compressible flow solver
 - Moving objects (NO idea how to do it for now, but ill figure that out)
-- Multiphase(multiple liquids/gases)(painting with them too and making profile OPTIONAL)
 - Surface tension
 - MAY add several other solvers(deforming solver + electronic solver + thermal solver) and merge all of them into one
 - MAY make a full on website where u would download it all, but only if the previous point is done
@@ -224,6 +223,8 @@ CFD-Solver-2D/
 │   ├── ChannelTests.cpp            <- Poiseuille against the exact parabola
 │   ├── CavityTests.cpp             <- the lid driven cavity against Ghia 1982
 │   ├── InletTests.cpp              <- inlet bands, profiles and mass balance
+│   ├── MultiphaseTests.cpp         <- volume kept, a still layer staying still,
+│   │                                  and a dam break against its energy bound
 │   ├── ConservationTests.cpp       <- divergence, mass balance, hydrostatics
 │   ├── ConvectionTests.cpp         <- the schemes against each other
 │   ├── RestartTests.cpp            <- a continuation against a straight run
@@ -232,6 +233,7 @@ CFD-Solver-2D/
 │   ├── main.cpp
 │   ├── AppPaths.cpp                <- resolves paths against the executable
 │   ├── Boundary.cpp                <- what each side of the domain does
+│   ├── Phase.cpp                   <- the volume fraction and how it is carried
 │   ├── Config.cpp
 │   ├── Mesh.cpp
 │   ├── Restart.cpp
@@ -422,6 +424,14 @@ above 0.1, `nu=0`.
 | `bcLeftSpeed` … `bcTopSpeed` | float, m/s | unset | what a `movingWall` slides at, or an inlet speed other than `U0` |
 | `inletFrom` `inletTo` | float | 0 / 1 | fraction of the side the inlet occupies |
 | `inletProfile` | name | `uniform` | `uniform` / `parabolic` |
+| `phases` | int | 1 | 1 or 2. At 2, `ro` and `nu` are ignored |
+| `rho1` `rho2` | float, kg/m^3 | 1000 / 1.225 | the two fluids; 1 is what the start shape is made of |
+| `nu1` `nu2` | float, m^2/s | 1e-6 / 1.5e-5 | their kinematic viscosities |
+| `phaseInit` | name | `layer` | `layer` / `drop` / `column` / `file` |
+| `phaseLevel` `phaseX` `phaseY` | float | 0.5 | fractions of the domain: height, width or centre |
+| `initialPhaseFile` | path | empty | one fraction per cell, row 0 first, `nx*ny` of them |
+| `vofScheme` | name | `hric` | `upwind` / `hric` / `cicsam` |
+| `sources` | list | empty | `x=0.5,y=0.2,r=0.05,rate=2,angle=90,phase=1;...` |
 | `caseType` | name | `channel` | `channel` / `cavity`, a preset that writes all four sides at once |
 | `lidSpeed` | float, m/s | 1.0 | how fast the cavity lid slides |
 | `steadyTolerance` | float | 0 | stop early once the field stops changing; 0 runs the whole of `totalTime` |
@@ -436,7 +446,7 @@ above 0.1, `nu=0`.
 | `mgMinCoarseSize` | int, cells/axis | 8 | >= 2 |
 | `useCuda` | switch | 1 | 1 / 0, ignored on a CPU-only build |
 | `saveInterval` | int, steps | 20 | >= 1 |
-| `extraFields` | list | empty | `vorticity`, `divergence`, `speed`, `objectId`, comma separated |
+| `extraFields` | list | empty | `vorticity`, `divergence`, `speed`, `objectId`, `density`, `source`, comma separated |
 | `outputDir` | path | `output` | created on the first frame, empty = current directory |
 | `geometryFile` | path, `none` or `empty` | `none` | `none` is the verification circle, `empty` is nothing at all |
 | `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
@@ -623,6 +633,139 @@ against the driving speed, under the steadyTolerance of 1e-05.
 The last frame is written either way, so a run that stops early is continued
 exactly like one that ran out of time. Zero, the default, turns the whole thing
 off and nothing about a normal run changes.
+
+## Two fluids
+
+    "Fluid Solver.exe" phases=2 rho1=1000 nu1=1e-6 rho2=1.225 nu2=1.5e-5 \
+                       gravityEnabled=1 phaseInit=column phaseX=0.25 phaseLevel=0.75 \
+                       bcLeft=wall bcRight=wall bcBottom=wall bcTop=outlet \
+                       geometryFile=empty Lx=0.6 Ly=0.4 nx=96 ny=64
+
+That is a dam break: a column of water three quarters of the way up a quarter
+of the domain, air above it, one wall taken away at t = 0. `phases=1` is every
+run written before this and none of the code below executes at all.
+
+The domain carries a volume fraction per cell - 1 is fluid 1, 0 is fluid 2, and
+in between is a cell the interface passes through. `rho` and `nu` come out of
+that fraction per cell, so `ro` and `nu` stop being read the moment there are
+two of everything.
+
+### What the interface is carried by
+
+    vofScheme=upwind|hric|cicsam
+
+All three are algebraic: they choose a value for the fraction at each face and
+carry it with the flow the projection just produced. None of them reconstruct
+the interface as a line the way PLIC does, which is a large fraction of the cost
+and most of the complexity.
+
+`upwind` is what a plain convection scheme does to it, which is smear it over
+ten cells inside a second - it is here to be compared against. `hric` and
+`cicsam` both steer the face value downwind where the donor cell is half full,
+which pushes the interface back together as fast as diffusion pulls it apart.
+Both fade that back out where the interface lies along the flow rather than
+across it (compressing it there tears a smooth surface into flotsam) and again
+as the Courant number climbs, because neither is stable once the interface
+crosses a whole cell in a step.
+
+The step size is limited for that on its own, separately from the CFL number:
+half a cell per step for the interface, whatever the momentum equation would
+have allowed.
+
+### What had to change underneath
+
+Three things, and all three are the reason this branch is where it is in the
+order rather than earlier.
+
+**The projection stops being a constant coefficient problem.** It was
+`grad^2 p = div(u*)/dt` and it is now `div((1/rho) grad p) = div(u*)/dt`, with
+1/rho on every face, rebuilt every step. The multigrid has carried per-face
+coefficients since the fundamentals branch for exactly this. The density on a
+face is the harmonic mean of the two cells rather than the plain one: at a
+thousand to one the plain mean of water and air is half of water, so a face
+with air on one side of it would carry the pressure gradient of something five
+hundred times denser than the air actually there.
+
+**p stops being the kinematic pressure.** With 1/rho inside the operator, what
+comes out is pascals, and the frame writes it as it is rather than multiplying
+by `ro`. A continuation reads it back the same way, which is why the frame
+carries `phases` in its header.
+
+**Gravity has to be in the solve.** `gravityMode=reduced` adds the hydrostatic
+head on output and never touches the velocity field, which is exact at one
+density and is what the README has said since gravity went in. At two densities
+it is not an approximation, it is the wrong answer: the difference in weight
+between the two fluids is the only thing that moves either of them, and in
+reduced mode it never enters. `phases=2` moves the mode to `body` on its own and
+refuses to be moved back.
+
+### What a run says about itself
+
+```
+Two fluids: 1 is rho 1000 kg/m^3, nu 1e-06 m^2/s; 2 is rho 1.225 kg/m^3, nu 1.5e-05 m^2/s.
+  Density ratio 816.327:1, interface carried by hric, pressure solved with 1/rho on every face.
+  note: past a hundred to one the pressure solve needs more V-cycles than a single fluid does.
+```
+
+and, if gravity was left off, that two fluids with nothing pulling on them are
+two dyes rather than two phases.
+
+### The pressure solve, and why it grew a Krylov iteration
+
+A plain V-cycle hierarchy is a fine solver for a constant coefficient Laplacian
+and a bad one across a jump of eight hundred to one. The coarse grids stop
+representing the fine problem, the correction that comes back up is longer than
+the error it was asked to remove, and the residual grows by a factor of four
+every cycle until the field is NaN. That is not a tuning problem; it is what
+bilinear interpolation across a discontinuity does.
+
+Two things went in, both only when the face weights are not all one, so every
+single phase run takes the path it always took and produces the same bits:
+
+- the coarse grid correction is scaled by however much of it actually reduces
+  the residual, which costs one extra operator application per level and turns
+  divergence into convergence;
+- the whole V-cycle became the preconditioner of a conjugate gradient
+  iteration, which does not need the coarse grids to be right - only to point
+  roughly the right way - and gets the length right by construction.
+
+`PoissonTests` solves an 816:1 jump to 1e-6 in 27 iterations and fails if it
+does not. Before this it did not converge at all.
+
+The CUDA backend runs plain V-cycles and has no Krylov iteration around them
+yet, so while the densities differ the pressure solve falls back to the CPU and
+says so once. Everything else about the run still uses the card.
+
+### Sources
+
+    sources="x=0.5,y=0.2,r=0.05,rate=2,angle=90,phase=1"
+
+A disc inside the domain that pushes fluid out of itself, for the cases where
+the flow does not come in through a side. `rate` is the speed it leaves at,
+`angle` is where it is aimed, `phase` is which fluid comes out. The divergence
+the projection has to produce in those cells is the rate itself, so the
+pressure carries the flow away in every direction and the momentum aims it.
+
+What a source adds has to leave somewhere, exactly as an inlet's does, so a
+case with one and no outlet is refused before the run starts. The `div` column
+in the step lines takes the intended part out, so what it reports is still the
+part the projection failed to produce.
+
+### Checked against
+
+`MultiphaseTests` runs three cases:
+
+    stirred drop   started 0.125664 m^2, ended 0.125796, drift 0.105%
+    still layer    spurious 2.7810e-02 m/s against 2.215 m/s if it fell (1.26%)
+    dam break      |u|max 2.403 m/s against sqrt(2gh) = 2.426, front at 0.84 of the floor
+                   volume 0.044898 m^2 from 0.045000, drift 0.226%
+
+The first is the thing an algebraic VOF scheme actually loses, and it loses it
+quietly - the interface just gets thinner every step until it is gone. The
+second is the spurious current every two phase solver has, measured against the
+speed the fluid would reach if it did fall. The third is the one number in a
+dam break that needs no table: nothing in a collapsing column can be going
+faster than something dropped from the top of it, and it gets to 99% of that.
 
 ## Several models at once
 
@@ -1148,6 +1291,7 @@ executable and the tests link the same objects, so what is tested is what runs.
 | `ChannelTests` | the developed profile between two no-slip walls against the exact parabola, and the same channel with free-slip walls to prove the number came from the wall and not the inlet |
 | `CavityTests` | the lid driven cavity at Re 100 against the Ghia, Ghia and Shin tables - the first numbers in this project that were not produced by this project |
 | `InletTests` | an inlet cut down to a band of its side: where the open faces actually are, that a parabolic band carries the same flow rate as a flat one, and that what goes in comes back out |
+| `MultiphaseTests` | the volume of fluid 1 after three seconds of being stirred, a layer under gravity that is supposed to be sitting still, and a collapsing column against the speed a free fall from its own height would reach |
 | `ConservationTests` | divergence left after the projection, inflow against outflow, and a fluid at rest under real gravity staying at rest |
 | `ConvectionTests` | every scheme run on the same case, and the ordering of how much of the field each one throws away |
 | `RestartTests` | a run cut in half and continued reproducing the run that was never cut |

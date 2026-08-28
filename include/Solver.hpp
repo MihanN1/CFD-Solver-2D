@@ -3,6 +3,7 @@
 #include "Config.hpp"
 #include "Mesh.hpp"
 #include "Multigrid.hpp"
+#include "Phase.hpp"
 #include "Restart.hpp"
 #include <vector>
 #include <string>
@@ -131,6 +132,26 @@ private:
     void resolveBoundaries();
     void applyOutletFaces();
 
+    // Two fluids, or one. Everything below is dead weight at one phase: the
+    // field is never allocated, the coefficients are never uploaded, and the
+    // kernels take the branch they always took.
+    PhaseField phase;
+    bool multiphase = false;
+    std::vector<float> coeffX, coeffY;
+    void refreshPhaseCoefficients();
+    void advectPhase();
+
+    // Regions pushing fluid in from inside the domain. cellRate is the volume
+    // added per unit volume per second in each cell, which is exactly the
+    // divergence the projection has to produce there.
+    std::vector<float> sourceRate;
+    std::vector<float> sourcePhase;
+    std::vector<float> sourceU, sourceV;
+    bool hasSources = false;
+    double sourceInflow = 0.0;
+    void buildSources();
+    void applySources();
+
     float dx = 0.0f, dy = 0.0f;
     float invDx = 0.0f, invDy = 0.0f;
     float invDx2 = 0.0f, invDy2 = 0.0f;
@@ -144,7 +165,9 @@ private:
     void computeDt();
 
     void predictor();
-    template <int Phi> void predictorImpl();
+    template <bool TwoPhase> void predictorByScheme();
+    template <int Phi, bool TwoPhase> void predictorImpl();
+    template <bool TwoPhase> void correctorImpl();
 
     // One whole forward Euler step of the projection method. The Runge-Kutta
     // schemes are convex combinations of these, which is what keeps the result
@@ -185,6 +208,12 @@ private:
 
     float maxDivergence() const;
     float maxVelocity() const;
+
+    // What the pressure array has to be multiplied by to be pascals. At one
+    // phase p is the kinematic pressure and this is the density; at two the
+    // projection already carries 1/rho on every face, so p is in pascals and
+    // this is one.
+    float pressureScale() const { return multiphase ? 1.0f : cfg.ro; }
 
     void saveVTK(int stepNum) const;
 
@@ -242,6 +271,13 @@ private:
         }
         return 0.0f;
     }
+
+    // The pressure the outside of an open side is held at, in whatever units
+    // p is carrying. At one density that is the kinematic head and this is
+    // phiFace unchanged; at two, p is in pascals, so the head is weighed by the
+    // density actually sitting against that face - the light fluid does not
+    // hold up the same column the heavy one does.
+    float phiOutside(BoundarySide side, int k) const;
 
     // Inline index helpers (for readability)
     inline int idxP(int i, int j) const { return j * cfg.nx + i; }

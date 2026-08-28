@@ -25,6 +25,9 @@ struct RestartData {
     std::vector<float> u;          // (nx + 1) * ny, face values
     std::vector<float> v;          // nx * (ny + 1), face values
     std::vector<float> p;          // nx * ny, kinematic (no ro scaling)
+    // Volume fraction of fluid 1, nx * ny. Empty for every frame a single
+    // phase run wrote, which is what tells the solver to start its own.
+    std::vector<float> phase;
 
     bool exactState = false;       // false when u/v were rebuilt from cell data
     bool hasConfigText = false;    // false for frames of an older format

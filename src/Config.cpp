@@ -46,6 +46,9 @@ const char* const kKeys[] = {
     "bcLeft", "bcRight", "bcBottom", "bcTop",
     "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed",
     "inletFrom", "inletTo", "inletProfile",
+    "phases", "rho1", "rho2", "nu1", "nu2",
+    "phaseInit", "phaseLevel", "phaseX", "phaseY",
+    "initialPhaseFile", "vofScheme", "sources",
 };
 
 std::string trimSpace(const std::string& s) {
@@ -256,6 +259,17 @@ const std::vector<EnumEntry> kLimiters{
     {"vanleer", static_cast<int>(LimiterKind::VanLeer)},
     {"superbee", static_cast<int>(LimiterKind::Superbee)}};
 
+const std::vector<EnumEntry> kVofSchemes{
+    {"upwind", static_cast<int>(VofScheme::Upwind)},
+    {"hric", static_cast<int>(VofScheme::Hric)},
+    {"cicsam", static_cast<int>(VofScheme::Cicsam)}};
+
+const std::vector<EnumEntry> kPhaseInits{
+    {"layer", static_cast<int>(PhaseInit::Layer)},
+    {"drop", static_cast<int>(PhaseInit::Drop)},
+    {"column", static_cast<int>(PhaseInit::Column)},
+    {"file", static_cast<int>(PhaseInit::File)}};
+
 const std::vector<EnumEntry> kTimeSchemes{
     {"euler", static_cast<int>(TimeScheme::Euler)},
     {"rk2", static_cast<int>(TimeScheme::RK2)},
@@ -276,6 +290,144 @@ bool assignSideKind(BoundarySpec& spec,
 }
 
 }   // namespace
+
+bool parseVofScheme(const std::string& text, VofScheme& out,
+                    std::string& error) {
+    const std::string key = toLower(trimSpace(text));
+    if (key == "upwind") { out = VofScheme::Upwind; return true; }
+    if (key == "hric")   { out = VofScheme::Hric;   return true; }
+    if (key == "cicsam") { out = VofScheme::Cicsam; return true; }
+    error = "'" + text + "' is not a VOF scheme. Use upwind, hric or cicsam.";
+    return false;
+}
+
+bool parsePhaseInit(const std::string& text, PhaseInit& out,
+                    std::string& error) {
+    const std::string key = toLower(trimSpace(text));
+    if (key == "layer")  { out = PhaseInit::Layer;  return true; }
+    if (key == "drop")   { out = PhaseInit::Drop;   return true; }
+    if (key == "column") { out = PhaseInit::Column; return true; }
+    if (key == "file")   { out = PhaseInit::File;   return true; }
+    error = "'" + text +
+            "' is not an initial shape. Use layer, drop, column or file.";
+    return false;
+}
+
+const char* vofSchemeName(VofScheme scheme) {
+    switch (scheme) {
+    case VofScheme::Upwind: return "upwind";
+    case VofScheme::Cicsam: return "cicsam";
+    default:                return "hric";
+    }
+}
+
+const char* phaseInitName(PhaseInit init) {
+    switch (init) {
+    case PhaseInit::Drop:   return "drop";
+    case PhaseInit::Column: return "column";
+    case PhaseInit::File:   return "file";
+    default:                return "layer";
+    }
+}
+
+std::string sourcesHelp() {
+    return
+        "\n--- How to write sources -----------------------------------------\n"
+        "  sources=x=<m>,y=<m>,r=<m>,rate=<m/s>[,angle=<deg>][,phase=<0..1>];...\n"
+        "\n"
+        "  A source is a disc inside the domain that pushes fluid out of itself.\n"
+        "  Unlike an inlet it is not on a side, so it needs a direction:\n"
+        "    x, y     centre, in metres\n"
+        "    r        radius, in metres. Under one cell nothing comes out.\n"
+        "    rate     speed the fluid leaves at, m/s. Negative drains instead.\n"
+        "    angle    degrees, 0 is +x and it turns counter-clockwise\n"
+        "    phase    which fluid comes out, 1 or 0. Ignored at one phase.\n"
+        "\n"
+        "  Everything a source adds has to leave somewhere, so a case with one\n"
+        "  needs an outlet exactly as an inlet does, and is refused without one.\n"
+        "\n"
+        "    sources=\"x=0.5,y=0.2,r=0.05,rate=2,angle=90,phase=1\"\n"
+        "------------------------------------------------------------------\n";
+}
+
+bool parseSources(const std::string& text,
+                  std::vector<FlowSource>& out,
+                  std::string& error) {
+    out.clear();
+    const std::string body = trimSpace(text);
+    if (body.empty() || toLower(body) == "none")
+        return true;
+
+    size_t start = 0;
+    while (start <= body.size()) {
+        const size_t end = body.find(';', start);
+        const std::string token =
+            trimSpace(body.substr(start, end == std::string::npos
+                                             ? std::string::npos
+                                             : end - start));
+        start = (end == std::string::npos) ? body.size() + 1 : end + 1;
+        if (token.empty())
+            continue;
+
+        FlowSource source;
+        bool sawRate = false;
+        size_t at = 0;
+        while (at <= token.size()) {
+            const size_t comma = token.find(',', at);
+            const std::string piece =
+                trimSpace(token.substr(at, comma == std::string::npos
+                                               ? std::string::npos
+                                               : comma - at));
+            at = (comma == std::string::npos) ? token.size() + 1 : comma + 1;
+            if (piece.empty())
+                continue;
+
+            const size_t equals = piece.find('=');
+            if (equals == std::string::npos) {
+                error = "'" + piece +
+                        "' has no '=' in it. Every setting of a source is "
+                        "<name>=<number>.";
+                return false;
+            }
+            const std::string name = toLower(trimSpace(piece.substr(0, equals)));
+            const std::string valueText = trimSpace(piece.substr(equals + 1));
+            double value = 0.0;
+            std::string why;
+            if (!parseNumber(name, valueText, false, value, why)) {
+                error = why;
+                return false;
+            }
+            if (name == "x") source.x = static_cast<float>(value);
+            else if (name == "y") source.y = static_cast<float>(value);
+            else if (name == "r" || name == "radius")
+                source.radius = static_cast<float>(value);
+            else if (name == "rate" || name == "speed") {
+                source.rate = static_cast<float>(value);
+                sawRate = true;
+            }
+            else if (name == "angle") source.angle = static_cast<float>(value);
+            else if (name == "phase")
+                source.phase = static_cast<float>(std::min(1.0, std::max(0.0, value)));
+            else {
+                error = "'" + name +
+                        "' is not a setting of a source. Use x, y, r, rate, "
+                        "angle or phase.";
+                return false;
+            }
+        }
+
+        if (!(source.radius > 0.0f)) {
+            error = "a source needs a radius: r=<metres>.";
+            return false;
+        }
+        if (!sawRate) {
+            error = "a source with no rate= does nothing at all.";
+            return false;
+        }
+        out.push_back(source);
+    }
+    return true;
+}
 
 std::string profilesHelp() {
     return
@@ -731,10 +883,49 @@ void Config::readFromConsole() {
     if (!ask("nx", "Enter number of cells in x-direction nx")) return;
     if (!ask("ny", "Enter number of cells in y-direction ny")) return;
     if (!ask("U0", "Enter inlet velocity U0 (m/s)")) return;
-    if (!ask("nu", "Enter kinematic viscosity nu (m^2/s)")) return;
-    if (!ask("ro", "Enter density ro. Make sure that the gas/liquid is "
-                   "incompressible (meaning for air speed its less than 0.3M) "
-                   "(kg/m^3)")) return;
+    if (!ask("phases", "How many fluids share the domain (1 or 2)")) return;
+    if (phases > 1) {
+        std::cout << "  Two fluids: nu and ro are ignored and each fluid gets "
+                     "its own.\n  Fluid 1 is what the initial shape is made "
+                     "of, fluid 2 fills the rest.\n";
+        if (!ask("rho1", "Density of fluid 1 (kg/m^3, water is 1000)")) return;
+        if (!ask("nu1", "Kinematic viscosity of fluid 1 (m^2/s, water is 1e-6)"))
+            return;
+        if (!ask("rho2", "Density of fluid 2 (kg/m^3, air is 1.225)")) return;
+        if (!ask("nu2", "Kinematic viscosity of fluid 2 (m^2/s, air is 1.5e-5)"))
+            return;
+        if (!ask("phaseInit",
+                 "What is in the domain at the start: layer, drop, column or "
+                 "file"))
+            return;
+        if (phaseInit == PhaseInit::File) {
+            if (!ask("initialPhaseFile",
+                     "File holding one fraction per cell, row 0 first"))
+                return;
+        } else {
+            if (!ask("phaseLevel",
+                     phaseInit == PhaseInit::Drop
+                         ? "Drop diameter as a fraction of the smaller side"
+                         : "Height of fluid 1 as a fraction of Ly"))
+                return;
+            if (phaseInit != PhaseInit::Layer)
+                if (!ask("phaseX",
+                         phaseInit == PhaseInit::Column
+                             ? "Width of the column as a fraction of Lx"
+                             : "Drop centre x as a fraction of Lx"))
+                    return;
+            if (phaseInit == PhaseInit::Drop)
+                if (!ask("phaseY", "Drop centre y as a fraction of Ly")) return;
+        }
+        if (!ask("vofScheme",
+                 "How the interface is carried: hric, cicsam or upwind"))
+            return;
+    } else {
+        if (!ask("nu", "Enter kinematic viscosity nu (m^2/s)")) return;
+        if (!ask("ro", "Enter density ro. Make sure that the gas/liquid is "
+                       "incompressible (meaning for air speed its less than "
+                       "0.3M) (kg/m^3)")) return;
+    }
     if (!ask("gravityEnabled", "Enable gravity? (0 = no, 1 = yes)")) return;
     if (gravityEnabled) {
         if (!ask("gravityAccel",
@@ -744,10 +935,16 @@ void Config::readFromConsole() {
                  "Enter gravity direction (degrees clockwise from straight "
                  "down: 0 = down, 90 = towards the inlet, 180 = up)"))
             return;
-        std::cout << "Note: at constant density gravity only adds hydrostatic"
-                     " pressure, the velocity field is unchanged.\n";
+        if (phases > 1)
+            std::cout << "Note: with two fluids the weight difference is what "
+                         "moves them, so the force goes\n  into the solve and "
+                         "gravityMode is body whether it is asked for or not.\n";
+        else
+            std::cout << "Note: at constant density gravity only adds "
+                         "hydrostatic pressure, the velocity field is "
+                         "unchanged.\n";
     }
-    if (gravityEnabled) {
+    if (gravityEnabled && phases == 1) {
         if (!ask("gravityMode",
                  "How gravity is applied: reduced (exact at one density, the "
                  "head is added on output) or body (real force in the solve)"))
@@ -815,7 +1012,7 @@ void Config::readFromConsole() {
     if (!ask("invertSection", "Mirror the section? (0 = no, 1 = yes)")) return;
     if (!ask("extraFields",
              "Extra fields to write into every frame, comma separated, empty "
-             "for none (vorticity, divergence, speed, objectId)"))
+             "for none (vorticity, divergence, speed, objectId, density, source)"))
         return;
     if (!ask("profiles",
              "Extra models and where they sit, empty for just geometryFile "
@@ -842,8 +1039,27 @@ void Config::print() const {
     std::cout << "  nx               = " << nx << "\n";
     std::cout << "  ny               = " << ny << "\n";
     std::cout << "  U0               = " << U0 << " m/s\n";
-    std::cout << "  nu               = " << nu << " m^2/s\n";
-    std::cout << "  ro               = " << ro << " kg/m^3\n";
+    if (phases > 1) {
+        std::cout << "  phases           = 2\n";
+        std::cout << "  fluid 1          = rho " << rho1 << " kg/m^3, nu "
+                  << nu1 << " m^2/s\n";
+        std::cout << "  fluid 2          = rho " << rho2 << " kg/m^3, nu "
+                  << nu2 << " m^2/s\n";
+        std::cout << "  phaseInit        = " << phaseInitName(phaseInit);
+        if (phaseInit == PhaseInit::File)
+            std::cout << " (" << initialPhaseFile << ")";
+        else
+            std::cout << ", level " << phaseLevel << ", at (" << phaseX << ", "
+                      << phaseY << ")";
+        std::cout << "\n";
+        std::cout << "  vofScheme        = " << vofSchemeName(vofScheme) << "\n";
+    } else {
+        std::cout << "  nu               = " << nu << " m^2/s\n";
+        std::cout << "  ro               = " << ro << " kg/m^3\n";
+    }
+    if (!sources.empty())
+        std::cout << "  sources          = " << resolvedSources().size()
+                  << " (" << sources << ")\n";
     std::cout << "  gravity          = " << (gravityEnabled ? "ON" : "OFF") << "\n";
     if (gravityEnabled) {
         std::cout << "  gravityAccel     = " << gravityAccel << " m/s^2\n";
@@ -963,6 +1179,14 @@ std::vector<Profile> Config::resolvedProfiles() const {
     return list;
 }
 
+std::vector<FlowSource> Config::resolvedSources() const {
+    std::vector<FlowSource> list;
+    std::string ignored;
+    if (!sources.empty())
+        parseSources(sources, list, ignored);
+    return list;
+}
+
 std::string Config::serialize() const {
     std::ostringstream out;
 
@@ -974,6 +1198,19 @@ std::string Config::serialize() const {
         << "U0=" << U0 << "\n"
         << "nu=" << nu << "\n"
         << "ro=" << ro << "\n"
+        // Frames written before phases existed have none of these, and a
+        // continuation of one is a single phase run exactly as it was.
+        << "phases=" << phases << "\n"
+        << "rho1=" << rho1 << "\n"
+        << "rho2=" << rho2 << "\n"
+        << "nu1=" << nu1 << "\n"
+        << "nu2=" << nu2 << "\n"
+        << "vofScheme=" << vofSchemeName(vofScheme) << "\n"
+        << "phaseInit=" << phaseInitName(phaseInit) << "\n"
+        << "phaseLevel=" << phaseLevel << "\n"
+        << "phaseX=" << phaseX << "\n"
+        << "phaseY=" << phaseY << "\n"
+        << "initialPhaseFile=" << initialPhaseFile << "\n"
         // Frames written before gravity existed simply do not carry these keys,
         // and setParam is never called for them, so the defaults leave gravity
         // off. Old frames stay loadable, new frames stay readable by old builds.
@@ -1035,6 +1272,7 @@ std::string Config::serialize() const {
     out << "outputDir=" << outputDir << "\n"
         << "geometryFile=" << geometryFile << "\n"
         << "wallMotion=" << wallMotion << "\n"
+        << "sources=" << sources << "\n"
         << "profiles=" << profiles << "\n"
         << "extraFields=" << extraFields << "\n";
 
@@ -1092,6 +1330,18 @@ bool Config::setParam(const std::string& key,
     else if (k == "gravityMode") {
         int mode = static_cast<int>(gravityMode);
         ok = assignEnumValue(mode, k, value, kGravityModes, error);
+        if (ok && phases > 1 && static_cast<GravityMode>(mode) ==
+                                    GravityMode::Reduced) {
+            // The reduced form adds one hydrostatic field on output, and there
+            // is no single one when the domain holds two densities. It is not
+            // an approximation there, it is the wrong answer: the buoyancy that
+            // drives the whole case never enters the solve.
+            error = badValue(k, cleanValue(value),
+                             "at two phases the weight of the fluid is what "
+                             "moves it, so it has to be inside the solve. "
+                             "gravityMode=body is the only one that is");
+            ok = false;
+        }
         if (ok) gravityMode = static_cast<GravityMode>(mode);
     }
     else if (k == "convection") {
@@ -1108,6 +1358,49 @@ bool Config::setParam(const std::string& key,
         int scheme = static_cast<int>(timeScheme);
         ok = assignEnumValue(scheme, k, value, kTimeSchemes, error);
         if (ok) timeScheme = static_cast<TimeScheme>(scheme);
+    }
+    else if (k == "phases") {
+        ok = assignInt(phases, k, value, 1, 2,
+                       "this solver carries one phase field, so it does one or "
+                       "two fluids. Three would need a second field and a rule "
+                       "for what happens where all three meet", error);
+        // Two densities make the reduced pressure trick wrong rather than
+        // merely inexact, so the mode moves with the key instead of waiting to
+        // be noticed. Saying gravityMode=reduced afterwards is refused below.
+        if (ok && phases > 1)
+            gravityMode = GravityMode::Body;
+    }
+    else if (k == "rho1") ok = assignFloat(rho1, k, value, 1e-9, kHuge,
+             "a density has to be positive", error);
+    else if (k == "rho2") ok = assignFloat(rho2, k, value, 1e-9, kHuge,
+             "a density has to be positive", error);
+    else if (k == "nu1") ok = assignFloat(nu1, k, value, 0.0, kHuge,
+             "viscosity cannot be negative", error);
+    else if (k == "nu2") ok = assignFloat(nu2, k, value, 0.0, kHuge,
+             "viscosity cannot be negative", error);
+    else if (k == "phaseLevel") ok = assignFloat(phaseLevel, k, value, 0.0, 1.0,
+             "this is a fraction of the domain, so it lives between 0 and 1", error);
+    else if (k == "phaseX") ok = assignFloat(phaseX, k, value, 0.0, 1.0,
+             "this is a fraction of Lx, so it lives between 0 and 1", error);
+    else if (k == "phaseY") ok = assignFloat(phaseY, k, value, 0.0, 1.0,
+             "this is a fraction of Ly, so it lives between 0 and 1", error);
+    else if (k == "initialPhaseFile") { initialPhaseFile = cleanValue(value); ok = true; }
+    else if (k == "sources") {
+        std::vector<FlowSource> parsed;
+        std::string why;
+        ok = parseSources(cleanValue(value), parsed, why);
+        if (!ok) error = badValue(k, cleanValue(value), why);
+        else sources = cleanValue(value);
+    }
+    else if (k == "vofScheme") {
+        int scheme = static_cast<int>(vofScheme);
+        ok = assignEnumValue(scheme, k, value, kVofSchemes, error);
+        if (ok) vofScheme = static_cast<VofScheme>(scheme);
+    }
+    else if (k == "phaseInit") {
+        int init = static_cast<int>(phaseInit);
+        ok = assignEnumValue(init, k, value, kPhaseInits, error);
+        if (ok) phaseInit = static_cast<PhaseInit>(init);
     }
     else if (k == "caseType") {
         CaseType type = caseType;
@@ -1220,14 +1513,15 @@ bool Config::setParam(const std::string& key,
                 c = static_cast<char>(
                     std::tolower(static_cast<unsigned char>(c)));
             if (name != "vorticity" && name != "divergence" &&
-                name != "objectid" && name != "speed")
+                name != "objectid" && name != "speed" &&
+                name != "density" && name != "source")
                 bad = name;
         }
         if (!bad.empty()) {
             error = badValue(k, cleanValue(value),
                              "'" + bad +
                                  "' is not a field this build can write. Use "
-                                 "vorticity, divergence, speed or objectId, "
+                                 "vorticity, divergence, speed, objectId, density or source, "
                                  "comma separated");
             ok = false;
         } else {

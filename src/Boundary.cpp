@@ -149,7 +149,8 @@ bool checkBoundaryMassBalance(const BoundarySet& sides,
                               float defaultSpeed,
                               const DomainExtent& domain,
                               const std::vector<int>& solid,
-                              std::string& error) {
+                              std::string& error,
+                              double extraInflow) {
     const int nx = domain.nx;
     const int ny = domain.ny;
     if (nx < 1 || ny < 1 ||
@@ -195,6 +196,9 @@ bool checkBoundaryMassBalance(const BoundarySet& sides,
         }
     };
 
+    net += extraInflow;
+    gross += std::fabs(extraInflow);
+
     walk(BoundarySide::Left, ny, dy, 0, nx);
     walk(BoundarySide::Right, ny, dy, nx - 1, nx);
     walk(BoundarySide::Bottom, nx, dx, 0, 1);
@@ -229,8 +233,9 @@ bool checkBoundaryMassBalance(const BoundarySet& sides,
     if (gross <= 0.0 || std::fabs(net) <= 1e-4 * gross || outletArea > 0.0)
         return true;
 
-    error = "the inlets push " + std::to_string(std::fabs(net)) +
-            " m^2/s of fluid in and ";
+    error = (extraInflow != 0.0 ? std::string("the sources and inlets push ")
+                                : std::string("the inlets push ")) +
+            std::to_string(std::fabs(net)) + " m^2/s of fluid in and ";
     error += anyOutlet ? "every outlet face is buried in solid, so none of it "
                          "has anywhere to go."
                        : "no side lets any of it out.";

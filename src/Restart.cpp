@@ -577,6 +577,9 @@ bool loadRestart(const std::filesystem::path& file,
             } else if (name == "pressure" && width == 4) {
                 if (!readFloats(fin, cellPressure, count))
                     return fail(error, "Truncated pressure array");
+            } else if (name == "phase" && width == 4) {
+                if (!readFloats(fin, out.phase, count))
+                    return fail(error, "Truncated phase array");
             } else if (!skipBytes(fin,
                                   static_cast<std::streamoff>(count * width))) {
                 return fail(error, "Truncated SCALARS " + name);
@@ -735,8 +738,12 @@ bool loadRestart(const std::filesystem::path& file,
                          "projected once.\n";
     }
 
+    // A two-phase frame carries the real pressure rather than the kinematic
+    // one, because the projection there already divides by the density on
+    // every face. Scaling it back by ro would be dividing by a density that is
+    // not in the problem any more.
     if (out.p.empty() && cellPressure.size() == cells && out.cfg.ro > 0.0f) {
-        const float invRo = 1.0f / out.cfg.ro;
+        const float invRo = out.cfg.multiphase() ? 1.0f : 1.0f / out.cfg.ro;
         out.p.assign(cells, 0.0f);
         for (size_t id = 0; id < cells; ++id)
             out.p[id] = cellPressure[id] * invRo;
