@@ -23,7 +23,6 @@ Possible future extensions include:
 - Turbulence models
 - Compressible flow solver
 - Moving objects (NO idea how to do it for now, but ill figure that out)
-- Surface tension
 - MAY add several other solvers(deforming solver + electronic solver + thermal solver) and merge all of them into one
 - MAY make a full on website where u would download it all, but only if the previous point is done
 
@@ -51,6 +50,10 @@ Possible future extensions include:
 - ✅ A pressure problem with no open side at all, solved up to the constant it
   is defined up to
 - ✅ Variable per-face weights in the pressure operator
+- ✅ Two fluids with an interface: volume fraction, compressive transport,
+  variable density in the momentum equation and in the pressure solve
+- ✅ Surface tension by height-function curvature, with a contact angle at walls
+- ✅ Two fluids that mix instead, spreading by Fickian diffusion
 - ✅ Moving walls: rotation and sliding, set per object
 - ✅ Free-slip walls, set per object
 - ✅ Several models at once, each placed where you put it
@@ -223,6 +226,7 @@ CFD-Solver-2D/
 │   ├── ChannelTests.cpp            <- Poiseuille against the exact parabola
 │   ├── CavityTests.cpp             <- the lid driven cavity against Ghia 1982
 │   ├── InletTests.cpp              <- inlet bands, profiles and mass balance
+│   ├── SurfaceTensionTests.cpp     <- Laplace jump, spurious currents, rounding
 │   ├── MultiphaseTests.cpp         <- volume kept, a still layer staying still,
 │   │                                  and a dam break against its energy bound
 │   ├── ConservationTests.cpp       <- divergence, mass balance, hydrostatics
@@ -430,7 +434,11 @@ above 0.1, `nu=0`.
 | `phaseInit` | name | `layer` | `layer` / `drop` / `column` / `file` |
 | `phaseLevel` `phaseX` `phaseY` | float | 0.5 | fractions of the domain: height, width or centre |
 | `initialPhaseFile` | path | empty | one fraction per cell, row 0 first, `nx*ny` of them |
-| `vofScheme` | name | `hric` | `upwind` / `hric` / `cicsam` |
+| `vofScheme` | name | `hric` | `upwind` / `hric` / `cicsam`, only read when they do not mix |
+| `mixing` | name | `immiscible` | `immiscible` / `miscible` |
+| `diffusivity` | float, m^2/s | 1e-6 | how fast one spreads through the other, only read when they mix |
+| `surfaceTension` | float, N/m | 0 | 0 is off and the whole curvature pass is skipped |
+| `contactAngle` | float, deg | 90 | measured inside fluid 1 at a wall; < 90 means fluid 1 wets it |
 | `sources` | list | empty | `x=0.5,y=0.2,r=0.05,rate=2,angle=90,phase=1;...` |
 | `caseType` | name | `channel` | `channel` / `cavity`, a preset that writes all four sides at once |
 | `lidSpeed` | float, m/s | 1.0 | how fast the cavity lid slides |
@@ -732,9 +740,10 @@ single phase run takes the path it always took and produces the same bits:
 `PoissonTests` solves an 816:1 jump to 1e-6 in 27 iterations and fails if it
 does not. Before this it did not converge at all.
 
-The CUDA backend runs plain V-cycles and has no Krylov iteration around them
-yet, so while the densities differ the pressure solve falls back to the CPU and
-says so once. Everything else about the run still uses the card.
+The CUDA backend has both: a damped coarse correction and the same flexible CG
+around the device V-cycle, so a two-fluid pressure solve stays on the card
+instead of coming back to the host. Uniform coefficients still take the plain
+V-cycle path they always did.
 
 ### Sources
 
@@ -766,6 +775,118 @@ second is the spurious current every two phase solver has, measured against the
 speed the fluid would reach if it did fall. The third is the one number in a
 dam break that needs no table: nothing in a collapsing column can be going
 faster than something dropped from the top of it, and it gets to 99% of that.
+
+## Surface tension
+
+    "Fluid Solver.exe" phases=2 surfaceTension=0.072 contactAngle=60 \
+                       rho1=1000 nu1=1e-6 rho2=100 nu2=1e-5 \
+                       gravityEnabled=1 phaseInit=drop phaseLevel=0.3 \
+                       geometryFile=empty Lx=0.02 Ly=0.02 nx=64 ny=64
+
+`surfaceTension=0` is every run before this one and the whole path below is
+skipped for it: no curvature pass, no extra force, no extra limit on dt.
+
+The force is the CSF one, `f = sigma * kappa * grad c`, added to the predictor
+in the same place gravity's body force already was, on the faces, so it is
+differenced by exactly the discretisation the pressure gradient is - which is
+what stops a drop sitting still from developing a circulation out of nothing.
+
+### The curvature is a height function
+
+The amount of fluid in a column of cells is a height, and the second derivative
+of that height along the interface is the curvature. The column starts at seven
+cells and grows until it brackets the surface at both ends, because a fixed
+stack does not bracket an interface lying at 45 degrees and gives a curvature
+that is somewhere between wrong and enormous.
+
+Taking the curvature from a smoothed gradient instead is the version that is
+half the code, and it is a factor of ten worse: a drop that should sit still
+boils on the spot. There is no simple version of this worth writing first,
+which is why there is only one here.
+
+Two things it needs and did not have:
+
+- **The initial drop is supersampled.** A one-cell linear ramp around the
+  circle is fine for advection and far too crude for a second difference. The
+  perimeter ring is filled at 64x64 samples per cell, the interior and the
+  outside by inspection, so the cost is a ring rather than a domain.
+- **The gate is the gradient, not the fraction.** Cells strictly between 0 and
+  1 are what an interface passes through - unless it was painted or started as
+  a block, where it never is, and the whole force was silently zero. Gating on
+  `|grad c|` instead found the block, took the Laplace error from 2.5% to
+  0.18%, and cut the spurious current by about 350x on the 1000:1 case.
+
+### The contact angle
+
+`contactAngle` is measured inside fluid 1, at a solid wall. 90 is a wall
+neither fluid prefers; below 90 fluid 1 wets it and climbs, above 90 it beads
+off. It is applied by rotating the interface normal in the cells against the
+wall before the curvature is taken, which is the cheapest thing that is still
+the right boundary condition.
+
+### The step size
+
+Surface tension puts a wave on the interface, and the shortest one the grid can
+hold has to be resolved in time or it grows:
+
+    dt < sqrt((rho1 + rho2) * d^3 / (4 pi sigma))
+
+with `d` the smaller of dx and dy. It is a separate limit from the CFL number
+and from the interface Courant number, and it is usually the one that binds -
+on a millimetre of water against air it is microseconds. The solver says so at
+the start rather than leaving you to wonder why it is slow:
+
+```
+  Surface tension 0.072 N/m, contact angle 60 deg. A drop a tenth of the domain
+  across holds 36 Pa more inside than out.
+  Shortest capillary wave the grid holds: 0.000192619 s per step.
+  ...
+  note: surface tension sets the step size here, not the flow and not the viscosity.
+  The shortest capillary wave this grid can hold crosses a cell in 0.000192619 s,
+  and that limit falls as dx^1.5: halving the cell size costs about three times
+  the steps. It is not the solver hanging.
+```
+
+### Checked against
+
+`SurfaceTensionTests` runs three cases:
+
+    laplace     jump 14.4262 Pa against sigma/R = 14.4000 (0.18% off)
+    spurious    1.314e-05 m/s against 0.1200 m/s of capillary wave (0.0001 of it)
+    rounding    interface 0.01741 m -> 0.01610 m (7.5% less)
+
+The first is the only closed-form answer two dimensions give you: the pressure
+inside a circle is `sigma/R` above the outside, and nothing else. The second is
+the failure mode of every CSF implementation - a drop that should be at rest
+circulating because the force and the pressure gradient are differenced
+differently - measured against the capillary wave speed rather than against
+zero, because zero is not achievable and a ratio says how badly. The third is
+the physics rather than the arithmetic: a square blob of water has no business
+staying square.
+
+## Fluids that mix
+
+    "Fluid Solver.exe" phases=2 mixing=miscible diffusivity=1e-4 ...
+
+Oil and water have a surface. Ink and water do not: there is nothing to
+compress, nothing for tension to pull on, and the composition spreads instead
+of staying sharp. `mixing=miscible` says so, and then:
+
+- the compressive VOF scheme is not read at all - the composition is carried by
+  the same limited MUSCL convection the momentum is, which is second order
+  where it is smooth and does not invent a front;
+- a Fickian term `D * grad^2 c` is added, explicitly, from the field as it was
+  at the start of the step;
+- `surfaceTension` is refused rather than ignored, because a surface tension on
+  fluids that have no surface is a number that would quietly do nothing;
+- `dt` picks up the diffusive limit `d^2 / (4 D)` alongside the others.
+
+The check is the one closed-form answer diffusion gives: a step in composition
+left alone spreads as an error function, and the slope at its middle is
+`1/sqrt(4 pi D t)` whatever else is going on.
+
+    mixing      steepest 28.015 /m against 1/sqrt(4 pi D t) = 28.209 (0.7% off)
+                composition 0.020000 m^2 from 0.020000
 
 ## Several models at once
 
@@ -1291,7 +1412,8 @@ executable and the tests link the same objects, so what is tested is what runs.
 | `ChannelTests` | the developed profile between two no-slip walls against the exact parabola, and the same channel with free-slip walls to prove the number came from the wall and not the inlet |
 | `CavityTests` | the lid driven cavity at Re 100 against the Ghia, Ghia and Shin tables - the first numbers in this project that were not produced by this project |
 | `InletTests` | an inlet cut down to a band of its side: where the open faces actually are, that a parabolic band carries the same flow rate as a flat one, and that what goes in comes back out |
-| `MultiphaseTests` | the volume of fluid 1 after three seconds of being stirred, a layer under gravity that is supposed to be sitting still, and a collapsing column against the speed a free fall from its own height would reach |
+| `MultiphaseTests` | the volume of fluid 1 after three seconds of being stirred, a layer under gravity that is supposed to be sitting still, a collapsing column against the speed a free fall from its own height would reach, and a step in composition spreading at the rate an error function says it should |
+| `SurfaceTensionTests` | the pressure inside a drop against `sigma/R`, the spurious current a drop that should be at rest develops anyway, and a square blob of water refusing to stay square |
 | `ConservationTests` | divergence left after the projection, inflow against outflow, and a fluid at rest under real gravity staying at rest |
 | `ConvectionTests` | every scheme run on the same case, and the ordering of how much of the field each one throws away |
 | `RestartTests` | a run cut in half and continued reproducing the run that was never cut |
@@ -1315,6 +1437,43 @@ Performance improvements include:
 - optimized memory access patterns;
 - accelerated pressure solver;
 - optimized boundary-condition processing.
+
+0.6 went back over everything the previous three branches added rather than
+only writing the new feature. Best of three runs, same machine, AVX2 and
+OpenMP on:
+
+| case | 0.5 | 0.6 | |
+|---|---|---|---|
+| single phase, 256x128, muscl + rk2 | 1.832 s | 1.614 s | 12% |
+| dam break, two fluids, 128x96 | 1.673 s | 1.474 s | 12% |
+| lid driven cavity, 128x128 | 4.113 s | 3.443 s | 16% |
+| the same single phase run writing 3 extra fields every 2 steps | 1.339 s | 1.178 s | 12% |
+
+Where it came from, in rough order of size:
+
+- **The transfer operators stopped recomputing their own stencils.** Which two
+  coarse cells a fine cell interpolates from is a function of the level, not of
+  the step, and it was being worked out per cell per level per cycle. It is a
+  table now, built when the hierarchy is. That alone is most of the 43% of
+  executed instructions the multigrid lost.
+- **The reciprocal is taken once per cell instead of four times per face.**
+  Every face wants 1/rho of both cells it sits between, and every cell has four
+  faces.
+- **`maxDivergence` and the null-space removal are vectorised**, with the
+  divergence sum kept scalar and in order so the answer does not move.
+- **`saveVTK` byte-swaps a whole field at a time** with a shuffle, rather than a
+  word at a time through a branch on the buffer being full, and the restart
+  block is written through a pointer instead of a capacity check per byte.
+- **OpenMP reaches the coefficient rebuild and the face coarsening**, which
+  moved from setup to the inner loop the moment the density stopped being one
+  number.
+
+The single phase path is still bit-for-bit what it was: 88 frames across ten
+configurations compare to a relative difference of exactly zero against the
+frames 0.2 wrote. Twice during this pass it did not, and both times the change
+was reverted rather than the golden master updated - `* invNorm` for `/ norm`
+is not the same float, and a fast path that skips a loop when nothing in it is
+solid does not sum in the same order.
 
 ---
 

@@ -6,8 +6,6 @@ using namespace testing;
 
 namespace {
 
-// Everything that goes in has to come out. On a channel that is the inlet
-// against the outlet; the walls above and below carry nothing through them.
 int checkMassBalance(const RestartData& frame, const char* label) {
     const int nx = frame.nx, ny = frame.ny;
     double inflow = 0.0, outflow = 0.0;
@@ -47,7 +45,7 @@ int checkCase(Config cfg, const char* label, float divergenceLimit) {
     return checkMassBalance(frame, label);
 }
 
-}   // namespace
+}
 
 int main() {
     const std::filesystem::path root = scratchDir("conservation");
@@ -75,8 +73,6 @@ int main() {
         rc |= checkCase(cfg, "no-slip walls", 1e-3f);
     }
     {
-        // Gravity as a real force has to leave a fluid at rest at rest: the
-        // pressure it produces must cancel it exactly, everywhere.
         Config cfg = baseConfig(root / "hydrostatic");
         cfg.Lx = 1.0f;
         cfg.Ly = 1.0f;

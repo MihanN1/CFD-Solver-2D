@@ -49,6 +49,7 @@ const char* const kKeys[] = {
     "phases", "rho1", "rho2", "nu1", "nu2",
     "phaseInit", "phaseLevel", "phaseX", "phaseY",
     "initialPhaseFile", "vofScheme", "sources",
+    "mixing", "diffusivity", "surfaceTension", "contactAngle",
 };
 
 std::string trimSpace(const std::string& s) {
@@ -259,6 +260,10 @@ const std::vector<EnumEntry> kLimiters{
     {"vanleer", static_cast<int>(LimiterKind::VanLeer)},
     {"superbee", static_cast<int>(LimiterKind::Superbee)}};
 
+const std::vector<EnumEntry> kMixingKinds{
+    {"immiscible", static_cast<int>(MixingKind::Immiscible)},
+    {"miscible", static_cast<int>(MixingKind::Miscible)}};
+
 const std::vector<EnumEntry> kVofSchemes{
     {"upwind", static_cast<int>(VofScheme::Upwind)},
     {"hric", static_cast<int>(VofScheme::Hric)},
@@ -289,7 +294,24 @@ bool assignSideKind(BoundarySpec& spec,
     return true;
 }
 
-}   // namespace
+}
+
+bool parseMixingKind(const std::string& text, MixingKind& out,
+                     std::string& error) {
+    const std::string key = toLower(trimSpace(text));
+    if (key == "immiscible" || key == "sharp")
+        { out = MixingKind::Immiscible; return true; }
+    if (key == "miscible" || key == "mixing" || key == "mixed")
+        { out = MixingKind::Miscible; return true; }
+    error = "'" + text +
+            "' is not a mixing kind. Use immiscible (oil and water, with a "
+            "surface) or miscible (ink and water, with none).";
+    return false;
+}
+
+const char* mixingKindName(MixingKind kind) {
+    return kind == MixingKind::Miscible ? "miscible" : "immiscible";
+}
 
 bool parseVofScheme(const std::string& text, VofScheme& out,
                     std::string& error) {
@@ -917,9 +939,29 @@ void Config::readFromConsole() {
             if (phaseInit == PhaseInit::Drop)
                 if (!ask("phaseY", "Drop centre y as a fraction of Ly")) return;
         }
-        if (!ask("vofScheme",
-                 "How the interface is carried: hric, cicsam or upwind"))
+        if (!ask("mixing",
+                 "Do the two mix? immiscible (oil and water, a surface "
+                 "between them) or miscible (ink and water, no surface)"))
             return;
+        if (mixing == MixingKind::Miscible) {
+            if (!ask("diffusivity",
+                     "How fast one spreads through the other (m^2/s; salt in "
+                     "water is about 1.5e-9, ink about 1e-9)"))
+                return;
+        } else {
+            if (!ask("vofScheme",
+                     "How the interface is carried: hric, cicsam or upwind"))
+                return;
+            if (!ask("surfaceTension",
+                     "Surface tension (N/m; water against air is 0.072, 0 "
+                     "turns it off)"))
+                return;
+            if (surfaceTension > 0.0f)
+                if (!ask("contactAngle",
+                         "Angle the interface meets a wall at, measured inside "
+                         "fluid 1 (degrees; 90 is neutral)"))
+                    return;
+        }
     } else {
         if (!ask("nu", "Enter kinematic viscosity nu (m^2/s)")) return;
         if (!ask("ro", "Enter density ro. Make sure that the gas/liquid is "
@@ -1012,7 +1054,7 @@ void Config::readFromConsole() {
     if (!ask("invertSection", "Mirror the section? (0 = no, 1 = yes)")) return;
     if (!ask("extraFields",
              "Extra fields to write into every frame, comma separated, empty "
-             "for none (vorticity, divergence, speed, objectId, density, source)"))
+             "for none (vorticity, divergence, speed, objectId, density, source, curvature)"))
         return;
     if (!ask("profiles",
              "Extra models and where they sit, empty for just geometryFile "
@@ -1052,7 +1094,18 @@ void Config::print() const {
             std::cout << ", level " << phaseLevel << ", at (" << phaseX << ", "
                       << phaseY << ")";
         std::cout << "\n";
-        std::cout << "  vofScheme        = " << vofSchemeName(vofScheme) << "\n";
+        std::cout << "  mixing           = " << mixingKindName(mixing);
+        if (mixing == MixingKind::Miscible)
+            std::cout << ", diffusivity " << diffusivity << " m^2/s";
+        std::cout << "\n";
+        if (mixing == MixingKind::Immiscible) {
+            std::cout << "  vofScheme        = " << vofSchemeName(vofScheme)
+                      << "\n";
+            std::cout << "  surfaceTension   = " << surfaceTension << " N/m";
+            if (surfaceTension > 0.0f)
+                std::cout << ", contact angle " << contactAngle << " deg";
+            std::cout << "\n";
+        }
     } else {
         std::cout << "  nu               = " << nu << " m^2/s\n";
         std::cout << "  ro               = " << ro << " kg/m^3\n";
@@ -1164,8 +1217,6 @@ std::vector<Profile> Config::resolvedProfiles() const {
         list.push_back(std::move(only));
     }
 
-    // A profile that says nothing about its slice takes the one the whole run
-    // was configured with, so a single model behaves exactly as it always did.
     for (Profile& profile : list) {
         if (!profile.angleSet) {
             profile.angleX = sliceAngleX;
@@ -1198,14 +1249,17 @@ std::string Config::serialize() const {
         << "U0=" << U0 << "\n"
         << "nu=" << nu << "\n"
         << "ro=" << ro << "\n"
-        // Frames written before phases existed have none of these, and a
-        // continuation of one is a single phase run exactly as it was.
+
         << "phases=" << phases << "\n"
         << "rho1=" << rho1 << "\n"
         << "rho2=" << rho2 << "\n"
         << "nu1=" << nu1 << "\n"
         << "nu2=" << nu2 << "\n"
         << "vofScheme=" << vofSchemeName(vofScheme) << "\n"
+        << "mixing=" << mixingKindName(mixing) << "\n"
+        << "diffusivity=" << diffusivity << "\n"
+        << "surfaceTension=" << surfaceTension << "\n"
+        << "contactAngle=" << contactAngle << "\n"
         << "phaseInit=" << phaseInitName(phaseInit) << "\n"
         << "phaseLevel=" << phaseLevel << "\n"
         << "phaseX=" << phaseX << "\n"
@@ -1237,10 +1291,6 @@ std::string Config::serialize() const {
         << "inletProfile="
         << inletProfileName(boundaries[BoundarySide::Left].profile) << "\n";
 
-    // Only the sides somebody actually named a speed for. Writing them all
-    // would put "bcLeftSpeed=0" in every frame, and reading that back sets the
-    // flag that says "0 was asked for", which is how an inlet at U0 turned
-    // into an inlet at a standstill on the first continuation.
     for (int side = 0; side < 4; ++side) {
         const BoundarySpec& spec = boundaries.side[side];
         if (!spec.speedSet)
@@ -1332,10 +1382,6 @@ bool Config::setParam(const std::string& key,
         ok = assignEnumValue(mode, k, value, kGravityModes, error);
         if (ok && phases > 1 && static_cast<GravityMode>(mode) ==
                                     GravityMode::Reduced) {
-            // The reduced form adds one hydrostatic field on output, and there
-            // is no single one when the domain holds two densities. It is not
-            // an approximation there, it is the wrong answer: the buoyancy that
-            // drives the whole case never enters the solve.
             error = badValue(k, cleanValue(value),
                              "at two phases the weight of the fluid is what "
                              "moves it, so it has to be inside the solve. "
@@ -1364,9 +1410,7 @@ bool Config::setParam(const std::string& key,
                        "this solver carries one phase field, so it does one or "
                        "two fluids. Three would need a second field and a rule "
                        "for what happens where all three meet", error);
-        // Two densities make the reduced pressure trick wrong rather than
-        // merely inexact, so the mode moves with the key instead of waiting to
-        // be noticed. Saying gravityMode=reduced afterwards is refused below.
+
         if (ok && phases > 1)
             gravityMode = GravityMode::Body;
     }
@@ -1392,6 +1436,40 @@ bool Config::setParam(const std::string& key,
         if (!ok) error = badValue(k, cleanValue(value), why);
         else sources = cleanValue(value);
     }
+    else if (k == "mixing") {
+        int kind = static_cast<int>(mixing);
+        ok = assignEnumValue(kind, k, value, kMixingKinds, error);
+        if (ok) {
+            mixing = static_cast<MixingKind>(kind);
+
+            if (mixing == MixingKind::Miscible && surfaceTension > 0.0f) {
+                surfaceTension = 0.0f;
+                if (warning)
+                    *warning = "fluids that mix have no interface, so "
+                               "surfaceTension has been set back to 0";
+            }
+        }
+    }
+    else if (k == "diffusivity") ok = assignFloat(diffusivity, k, value, 0.0, kHuge,
+             "a diffusivity cannot be negative; zero means the two only mix "
+             "by being stirred together", error);
+    else if (k == "surfaceTension") {
+        ok = assignFloat(surfaceTension, k, value, 0.0, kHuge,
+                         "surface tension is a magnitude in N/m and cannot be "
+                         "negative - a negative one would make the interface "
+                         "grow instead of shrink, which is not a fluid", error);
+        if (ok && surfaceTension > 0.0f && mixing == MixingKind::Miscible) {
+            error = badValue(k, cleanValue(value),
+                             "these two fluids mix, so there is no interface "
+                             "for tension to pull on. Set mixing=immiscible "
+                             "first");
+            ok = false;
+        }
+    }
+    else if (k == "contactAngle") ok = assignFloat(contactAngle, k, value, 0.0, 180.0,
+             "a contact angle is between 0 and 180 degrees, measured inside "
+             "fluid 1: under 90 it wets the wall, over 90 the other one does",
+             error);
     else if (k == "vofScheme") {
         int scheme = static_cast<int>(vofScheme);
         ok = assignEnumValue(scheme, k, value, kVofSchemes, error);
@@ -1413,9 +1491,7 @@ bool Config::setParam(const std::string& key,
             boundaries = (type == CaseType::Cavity)
                              ? cavityBoundaries(lidSpeed)
                              : defaultChannelBoundaries();
-            // A cavity is an empty box unless somebody puts something in it.
-            // Leaving the default in place would drop the verification circle
-            // into the middle of the one case whose answer is tabulated.
+
             if (type == CaseType::Cavity && geometryFile == "none")
                 geometryFile = "empty";
         }
@@ -1514,14 +1590,16 @@ bool Config::setParam(const std::string& key,
                     std::tolower(static_cast<unsigned char>(c)));
             if (name != "vorticity" && name != "divergence" &&
                 name != "objectid" && name != "speed" &&
-                name != "density" && name != "source")
+                name != "density" && name != "source" &&
+                name != "curvature")
                 bad = name;
         }
         if (!bad.empty()) {
             error = badValue(k, cleanValue(value),
                              "'" + bad +
                                  "' is not a field this build can write. Use "
-                                 "vorticity, divergence, speed, objectId, density or source, "
+                                 "vorticity, divergence, speed, objectId, density, source or "
+                                 "curvature, "
                                  "comma separated");
             ok = false;
         } else {

@@ -9,11 +9,6 @@ namespace {
 
 constexpr double PI = 3.14159265358979323846;
 
-// p = cos(pi x / 2Lx) * cos(pi y / Ly) satisfies exactly the boundary
-// conditions the operator carries by default: zero gradient on the left, the
-// bottom and the top, and zero on the right, where the multigrid pins the
-// level half a cell outside. Its Laplacian is -lambda p, so the right hand
-// side is known everywhere and so is the answer.
 double exactPressure(double x, double y, double Lx, double Ly) {
     return std::cos(PI * x / (2.0 * Lx)) * std::cos(PI * y / Ly);
 }
@@ -56,10 +51,6 @@ double solveAndMeasure(int n) {
     return worst;
 }
 
-// Doubling every face weight halves the pressure the same right hand side
-// produces, because the operator is linear in them. That is the whole contract
-// setCoefficients has to keep, and it is what the variable density projection
-// will lean on.
 int checkCoefficientScaling() {
     const int n = 32;
     const float d = 1.0f / n;
@@ -102,9 +93,6 @@ int checkCoefficientScaling() {
     return 0;
 }
 
-// With every side closed the operator has the constants in its null space.
-// The answer is then only defined up to one, so what has to hold is that the
-// residual goes down and the mean is taken off rather than left to drift.
 int checkSingularCase() {
     const int n = 32;
     const float d = 1.0f / n;
@@ -145,12 +133,6 @@ int checkSingularCase() {
     return 0;
 }
 
-// Water against air is a jump of eight hundred to one in the coefficient, and
-// a plain V-cycle hierarchy stops being a solver at that ratio: the coarse
-// grids no longer represent the fine problem, the correction that comes back
-// is longer than the error it was asked to remove, and the residual grows by a
-// factor of four every cycle until the field is NaN. This is that case, and it
-// is the one thing standing between a two phase run and a wall of nonsense.
 int checkJumpCoefficients() {
     const int nx = 96, ny = 64;
     const float dx = 0.6f / nx, dy = 0.4f / ny;
@@ -214,7 +196,7 @@ int checkJumpCoefficients() {
     return 0;
 }
 
-}   // namespace
+}
 
 int main() {
     const double e32 = solveAndMeasure(32);

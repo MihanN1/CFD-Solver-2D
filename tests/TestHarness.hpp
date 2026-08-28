@@ -25,9 +25,6 @@ inline void report(const std::string& message) {
     std::cout << "  " << message << "\n";
 }
 
-// The solver talks a lot and a test that prints a whole run is a test nobody
-// reads. Everything it says goes into a string that is only printed when
-// something fails.
 class Quiet {
 public:
     Quiet() : previous(std::cout.rdbuf(captured.rdbuf())) {}
@@ -55,8 +52,6 @@ inline void removeDir(const std::filesystem::path& path) {
     std::filesystem::remove_all(path, ec);
 }
 
-// A configuration that runs in a fraction of a second and has nothing in it
-// that a test did not ask for.
 inline Config baseConfig(const std::filesystem::path& out) {
     Config cfg;
     cfg.Lx = 2.0f;
@@ -73,9 +68,6 @@ inline Config baseConfig(const std::filesystem::path& out) {
     return cfg;
 }
 
-// Runs a whole simulation and hands back the last frame it wrote. Every test
-// below works from that rather than reaching inside the solver, so what is
-// checked is what a user would actually get.
 inline bool runCase(Config cfg,
                     RestartData& out,
                     std::string& error,
@@ -175,4 +167,4 @@ inline float magnitude(const std::vector<float>& values) {
     return worst > 0.0f ? worst : 1.0f;
 }
 
-}   // namespace testing
+}

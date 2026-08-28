@@ -6,12 +6,6 @@ using namespace testing;
 
 namespace {
 
-// Ghia, Ghia and Shin, "High-Re solutions for incompressible flow using the
-// Navier-Stokes equations and a multigrid method", J. Comput. Phys. 48 (1982),
-// Tables I and II. u along the vertical centreline and v along the horizontal
-// one, for the lid driven cavity at Re = 100. Forty years of solvers have been
-// checked against these seventeen numbers each; this is the first thing in this
-// project with an answer that was not produced by this project.
 constexpr int kPoints = 17;
 
 constexpr double kY[kPoints] = {
@@ -32,11 +26,6 @@ constexpr double kV100[kPoints] = {
     -0.24533, 0.05454, 0.17527, 0.17507, 0.16077, 0.12317, 0.10890, 0.10091,
     0.09233, 0.00000};
 
-// The frame holds cell centred velocities, so a point between two rows is the
-// two of them mixed. The first and last entry of each table sit on the walls
-// themselves, half a cell outside anything this grid holds, and are reported
-// but not judged: what they measure is where the samples are, not what the
-// solver computed.
 double sampleU(const RestartData& frame, double y, int column) {
     const double t = y * frame.ny - 0.5;
     const int j = std::max(0, std::min(frame.ny - 2, static_cast<int>(t)));
@@ -59,7 +48,7 @@ double sampleV(const RestartData& frame, double x, int row) {
     return cell(i) * (1.0 - w) + cell(i + 1) * w;
 }
 
-}   // namespace
+}
 
 int main() {
     const std::filesystem::path root = scratchDir("cavity");
@@ -71,7 +60,7 @@ int main() {
     cfg.nx = 64;
     cfg.ny = 64;
     cfg.U0 = 0.0f;
-    cfg.nu = 0.01f;                 // Re = lidSpeed * L / nu = 100
+    cfg.nu = 0.01f;
     cfg.caseType = CaseType::Cavity;
     cfg.lidSpeed = 1.0f;
     cfg.boundaries = cavityBoundaries(cfg.lidSpeed);
@@ -81,10 +70,6 @@ int main() {
     cfg.mgIterations = 20;
     cfg.mgTolerance = 1e-6f;
 
-    // First order upwind would put roughly as much numerical viscosity in as
-    // the fluid has at this cell Reynolds number, and the profile would come
-    // out closer to Re 60 than Re 100. The whole reason the scheme went in
-    // before this test did.
     cfg.convection = ConvectionScheme::Muscl;
     cfg.limiter = LimiterKind::VanLeer;
     cfg.timeScheme = TimeScheme::RK2;
@@ -96,8 +81,6 @@ int main() {
     if (!allFinite(frame.u) || !allFinite(frame.v))
         return fail("the cavity run stopped being a number");
 
-    // Stopping early is the run saying it settled. Running the whole 200 s
-    // means it never did, and then none of the numbers below mean anything.
     if (!(frame.currentTime < cfg.totalTime - 1.0))
         return fail("the cavity never reached a steady state, so there is "
                     "nothing to compare against Ghia");

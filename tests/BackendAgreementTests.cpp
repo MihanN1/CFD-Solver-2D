@@ -6,10 +6,6 @@ using namespace testing;
 
 namespace {
 
-// Everything the accelerators do is meant to be invisible in the answer. Every
-// row of the release matrix is the same program built with a different subset
-// of them, so anything that stops agreeing here ships as several solvers that
-// quietly disagree with each other.
 bool runWith(const Config& cfg,
              bool avx2,
              bool openMp,
@@ -44,7 +40,7 @@ int compare(const RestartData& a,
     return 0;
 }
 
-}   // namespace
+}
 
 int main() {
     const std::filesystem::path root = scratchDir("backend");
@@ -70,13 +66,8 @@ int main() {
     if (!runWith(cfg, true, false, 1, oneThread, error))
         return fail("single thread: " + error);
 
-    // The vector and scalar kernels sum in a different order and the pressure
-    // lands on a slightly different multigrid iterate, so this is a tolerance
-    // rather than an equality. It is the same tolerance the separate AVX2 and
-    // non-AVX2 downloads have always agreed to.
     rc |= compare(both, noAvx, "avx2 on against off", 1e-3f);
-    // Threading changes no arithmetic at all, only how much of it happens at
-    // once, so this one is much tighter.
+
     rc |= compare(both, oneThread, "many threads against one", 1e-4f);
 
     removeDir(root);

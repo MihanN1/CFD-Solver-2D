@@ -29,12 +29,6 @@ enum PhiKind {
 
 constexpr float kLimiterFloor = 1e-20f;
 
-// The convective derivative as the upwind difference plus a fraction of the
-// way towards the central one. phi = 0 is the first order scheme this solver
-// has always used and comes out bit for bit the same; phi = 1 is central;
-// everything between is a limiter deciding how much of the second order term
-// survives where the field stops being smooth. Both differences come from the
-// three values the upwind stencil already loads, so nothing extra is read.
 template <int Phi>
 inline float phiOf(float r) {
     switch (Phi) {
@@ -200,10 +194,6 @@ bool Solver::setInitialState(RestartData&& state,
                     oldGy * ((j + 0.5f - 0.5f * cfg.ny) * dy);
     }
 
-    // The frame's own phase field, before initFields decides whether to make
-    // one. A frame written by a single phase run has none, and then a
-    // continuation that turns phases on starts the shape from scratch, which
-    // is the only thing it could sensibly do.
     if (cfg.multiphase() &&
         state.phase.size() == static_cast<size_t>(cfg.nx) * cfg.ny) {
         phase.resize(cfg.nx, cfg.ny);
@@ -231,9 +221,6 @@ void Solver::resolveBoundaries() {
         data.outlet = spec.kind == BoundaryKind::Outlet;
         data.inlet = spec.kind == BoundaryKind::Inlet;
 
-        // Zero gradient across an open or frictionless side, mirrored across a
-        // solid one so the velocity the stencil sees at the wall itself is the
-        // wall's own. That is the whole difference between slip and no-slip.
         switch (spec.kind) {
         case BoundaryKind::Wall:
             data.ghostSign = -1.0f;
@@ -340,21 +327,21 @@ void Solver::applyBoundaryVelocities(std::vector<float>& uf,
     }
 }
 
-// The pressure gradient across an open side, with the level fixed half a cell
-// outside it. Same expression on all four, only the sign of the outward normal
-// and which neighbour cell is read change.
 void Solver::applyOutletFaces() {
     const int nx = cfg.nx;
     const int ny = cfg.ny;
     const float factorX = 2.f * dt * invDx;
     const float factorY = 2.f * dt * invDy;
-    // The same weight the operator was built with, on the same face. One at a
-    // single density, so every expression below is what it always was.
-    const auto wX = [this](int i, int j) {
-        return multiphase ? phase.faceInvRhoX()[idxU(i, j)] : 1.0f;
+
+    const float* __restrict invRhoXPtr =
+        multiphase ? phase.faceInvRhoX().data() : nullptr;
+    const float* __restrict invRhoYPtr =
+        multiphase ? phase.faceInvRhoY().data() : nullptr;
+    const auto wX = [&](int i, int j) {
+        return invRhoXPtr ? invRhoXPtr[idxU(i, j)] : 1.0f;
     };
-    const auto wY = [this](int i, int j) {
-        return multiphase ? phase.faceInvRhoY()[idxV(i, j)] : 1.0f;
+    const auto wY = [&](int i, int j) {
+        return invRhoYPtr ? invRhoYPtr[idxV(i, j)] : 1.0f;
     };
 
     if (sideLeft.outlet)
@@ -398,6 +385,66 @@ void Solver::applyOutletFaces() {
                                phiOutside(BoundarySide::Top, i));
 }
 
+void Solver::refreshSurfaceTension() {
+    if (!hasTension)
+        return;
+
+    const int nx = cfg.nx, ny = cfg.ny;
+    phase.computeCurvature(solidMask, dx, dy, cfg.contactAngle);
+
+    const float* __restrict kappa = phase.curvature().data();
+    const float* __restrict weight = phase.gradientMagnitude().data();
+    const float* __restrict cPtr = phase.fraction().data();
+    const float* __restrict invRhoX = phase.faceInvRhoX().data();
+    const float* __restrict invRhoY = phase.faceInvRhoY().data();
+    float* __restrict tx = tensionX.data();
+    float* __restrict ty = tensionY.data();
+    const float sigma = cfg.surfaceTension;
+
+    #pragma omp parallel for schedule(static)
+    for (int j = 0; j < ny; ++j) {
+        const size_t rowC = static_cast<size_t>(j) * nx;
+        const size_t rowU = static_cast<size_t>(j) * (nx + 1);
+        tx[rowU] = 0.0f;
+        tx[rowU + nx] = 0.0f;
+        for (int i = 1; i < nx; ++i) {
+            const float wa = weight[rowC + i - 1];
+            const float wb = weight[rowC + i];
+            const float sum = wa + wb;
+            const float faceKappa =
+                (sum > 1e-12f)
+                    ? (wa * kappa[rowC + i - 1] + wb * kappa[rowC + i]) / sum
+                    : 0.0f;
+            tx[rowU + i] = sigma * faceKappa *
+                           (cPtr[rowC + i] - cPtr[rowC + i - 1]) * invDx *
+                           invRhoX[rowU + i];
+        }
+    }
+
+    #pragma omp parallel for schedule(static)
+    for (int j = 1; j < ny; ++j) {
+        const size_t rowC = static_cast<size_t>(j) * nx;
+        const size_t rowBelow = static_cast<size_t>(j - 1) * nx;
+        for (int i = 0; i < nx; ++i) {
+            const float wa = weight[rowBelow + i];
+            const float wb = weight[rowC + i];
+            const float sum = wa + wb;
+            const float faceKappa =
+                (sum > 1e-12f)
+                    ? (wa * kappa[rowBelow + i] + wb * kappa[rowC + i]) / sum
+                    : 0.0f;
+            ty[rowC + i] = sigma * faceKappa *
+                           (cPtr[rowC + i] - cPtr[rowBelow + i]) * invDy *
+                           invRhoY[rowC + i];
+        }
+    }
+    const size_t topRow = static_cast<size_t>(ny) * nx;
+    for (int i = 0; i < nx; ++i) {
+        ty[i] = 0.0f;
+        ty[topRow + i] = 0.0f;
+    }
+}
+
 void Solver::refreshPhaseCoefficients() {
     multigrid.setCoefficients(phase.faceInvRhoX(), phase.faceInvRhoY());
 }
@@ -405,27 +452,17 @@ void Solver::refreshPhaseCoefficients() {
 void Solver::advectPhase() {
     phase.advect(u, v, solidMask, dt, dx, dy);
     if (hasSources) {
-        // Whatever a source pushes out is made of the fluid the source is fed
-        // with, blended in at the rate it is arriving. Without this a jet of
-        // water into a tank of air stays air-coloured and only the velocity
-        // field says anything happened.
-        std::vector<float>& c = phase.fraction();
-        for (size_t id = 0; id < c.size(); ++id) {
-            const float rate = sourceRate[id];
-            if (rate <= 0.0f)
-                continue;
-            const float mix = std::min(1.0f, rate * dt);
+        float* __restrict c = phase.fraction().data();
+        for (int id : sourceCells) {
+            const float mix = std::min(1.0f, sourceRate[id] * dt);
             c[id] += mix * (sourcePhase[id] - c[id]);
         }
     }
     phase.refreshProperties(solidMask);
     refreshPhaseCoefficients();
+    refreshSurfaceTension();
 }
 
-// A source is a disc of cells that fluid appears in. The projection is what
-// makes it come out: the divergence it has to produce in those cells is the
-// rate itself, so the pressure field carries the flow away in every direction
-// and the momentum it was given aims it.
 void Solver::buildSources() {
     const int nx = cfg.nx, ny = cfg.ny;
     const std::vector<FlowSource> list = cfg.resolvedSources();
@@ -455,10 +492,7 @@ void Solver::buildSources() {
                     continue;
                 ++cells;
                 const int id = idxP(i, j);
-                // The rate is a speed, and what the projection wants is a
-                // volume per volume per second: a disc of radius r pushing
-                // fluid out at speed q over its rim carries 2*pi*r*q, spread
-                // over pi*r*r of area, which is 2q/r.
+
                 sourceRate[id] += 2.0f * source.rate / source.radius;
                 sourcePhase[id] = source.phase;
                 sourceU[id] += source.rate * std::cos(source.angle * degToRad);
@@ -477,38 +511,36 @@ void Solver::buildSources() {
                         3.14159265358979 * source.radius;
     }
 
+    sourceCells.clear();
+    for (int id = 0; id < nx * ny; ++id)
+        if (sourceRate[id] > 0.0f)
+            sourceCells.push_back(id);
+
     hasSources = totalCells > 0;
     if (hasSources)
         std::cout << "Sources: " << list.size() << " over " << totalCells
                   << " cells, " << sourceInflow << " m^2/s in total.\n";
 }
 
-// The momentum a source hands the fluid, before the projection sees it. The
-// divergence it also has to make goes into the right-hand side instead, which
-// is where the pressure can act on it.
 void Solver::applySources() {
     if (!hasSources)
         return;
-    const int nx = cfg.nx, ny = cfg.ny;
-    for (int j = 0; j < ny; ++j)
-        for (int i = 0; i < nx; ++i) {
-            const int id = idxP(i, j);
-            if (sourceRate[id] <= 0.0f)
-                continue;
-            const float blend = std::min(1.0f, sourceRate[id] * dt);
-            if (i > 0 && uFluidMaskF[idxU(i, j)] != 0.0f)
-                u_star[idxU(i, j)] +=
-                    blend * (sourceU[id] - u_star[idxU(i, j)]);
-            if (i < nx - 1 && uFluidMaskF[idxU(i + 1, j)] != 0.0f)
-                u_star[idxU(i + 1, j)] +=
-                    blend * (sourceU[id] - u_star[idxU(i + 1, j)]);
-            if (j > 0 && vFluidMaskF[idxV(i, j)] != 0.0f)
-                v_star[idxV(i, j)] +=
-                    blend * (sourceV[id] - v_star[idxV(i, j)]);
-            if (j < ny - 1 && vFluidMaskF[idxV(i, j + 1)] != 0.0f)
-                v_star[idxV(i, j + 1)] +=
-                    blend * (sourceV[id] - v_star[idxV(i, j + 1)]);
-        }
+    const int nx = cfg.nx;
+    for (int id : sourceCells) {
+        const int i = id % nx;
+        const int j = id / nx;
+        const float blend = std::min(1.0f, sourceRate[id] * dt);
+        if (i > 0 && uFluidMaskF[idxU(i, j)] != 0.0f)
+            u_star[idxU(i, j)] += blend * (sourceU[id] - u_star[idxU(i, j)]);
+        if (i < nx - 1 && uFluidMaskF[idxU(i + 1, j)] != 0.0f)
+            u_star[idxU(i + 1, j)] +=
+                blend * (sourceU[id] - u_star[idxU(i + 1, j)]);
+        if (j > 0 && vFluidMaskF[idxV(i, j)] != 0.0f)
+            v_star[idxV(i, j)] += blend * (sourceV[id] - v_star[idxV(i, j)]);
+        if (j < cfg.ny - 1 && vFluidMaskF[idxV(i, j + 1)] != 0.0f)
+            v_star[idxV(i, j + 1)] +=
+                blend * (sourceV[id] - v_star[idxV(i, j + 1)]);
+    }
 }
 
 float Solver::phiOutside(BoundarySide side, int k) const {
@@ -827,10 +859,14 @@ void Solver::initFields()
     }
 
     multiphase = cfg.multiphase();
+    hasTension = cfg.hasSurfaceTension();
+    if (multiphase) {
+        tensionX.assign(static_cast<size_t>(nx + 1) * ny, 0.0f);
+        tensionY.assign(static_cast<size_t>(nx) * (ny + 1), 0.0f);
+    }
     if (multiphase) {
         std::string warning;
-        // A restart already brought the field with it; re-initialising would
-        // put the dam back up under the water that already broke it.
+
         if (phase.fraction().size() != static_cast<size_t>(nx) * ny) {
             phase.initialise(cfg, mesh.solid, dx, dy, warning);
             if (!warning.empty())
@@ -897,6 +933,7 @@ void Solver::initFields()
     if (multiphase) {
         phase.refreshProperties(solidMask);
         refreshPhaseCoefficients();
+        refreshSurfaceTension();
     }
     buildSources();
 
@@ -920,11 +957,36 @@ void Solver::initFields()
                          "needs more V-cycles than a single fluid does.\n"
                          "  If the mg column climbs or the run says it ran out "
                          "of cycles, raise mgIterations.\n";
-        if (!cfg.gravityEnabled)
+        if (!cfg.gravityEnabled && !cfg.miscible() && !hasTension)
             std::cout << "  note: gravity is off, so the two fluids have no "
                          "reason to separate and nothing here will float.\n"
                          "  gravityEnabled=1 is what makes this a two-phase "
                          "case rather than two dyes.\n";
+        if (cfg.miscible()) {
+            std::cout << "  They mix: no interface, no surface tension, and "
+                         "the composition spreads at "
+                      << cfg.diffusivity << " m^2/s as well as being "
+                         "carried.\n";
+            const float across = std::min(cfg.Lx, cfg.Ly);
+            if (cfg.diffusivity > 0.0f)
+                std::cout << "  Diffusion alone would cross the domain in "
+                          << across * across / (4.0f * cfg.diffusivity)
+                          << " s, against a run of " << cfg.totalTime
+                          << " s.\n";
+        } else if (hasTension) {
+            const float smallest = std::min(dx, dy);
+            const float laplace = cfg.surfaceTension / (0.1f * cfg.Ly);
+            std::cout << "  Surface tension " << cfg.surfaceTension
+                      << " N/m, contact angle " << cfg.contactAngle
+                      << " deg. A drop a tenth of the domain across holds "
+                      << laplace << " Pa more inside than out.\n";
+            const float capillary =
+                std::sqrt((cfg.rho1 + cfg.rho2) * smallest * smallest *
+                          smallest /
+                          (4.0f * 3.14159265358979f * cfg.surfaceTension));
+            std::cout << "  Shortest capillary wave the grid holds: "
+                      << capillary << " s per step.\n";
+        }
     }
     if (!multiphase && cfg.U0 > 0.0f && cfg.nu > 0.0f) {
         const float nuNum = 0.5f * cfg.U0 * dx;   // upwind
@@ -1130,10 +1192,6 @@ void Solver::computeDt(){
         1e9f :
         cfg.CFL / maxCourant;
 
-    // The viscous limit is set by whichever fluid diffuses momentum fastest,
-    // which at water against air is the air by a factor of fifteen. Taking the
-    // heavy one because it is the interesting one is how a two-phase run goes
-    // unstable in the thin fluid nobody was watching.
     const float nuLimit =
         multiphase ? std::max(cfg.nu1, cfg.nu2) : cfg.nu;
     const float dtDiff =
@@ -1143,21 +1201,38 @@ void Solver::computeDt(){
 
     dt = cfg.dtSafety * std::min(dtAdv, dtDiff);
 
-    // The interface is carried explicitly and compressively, and both of those
-    // stop being true above a Courant number of about half however stable the
-    // momentum equation is. The velocity limit above allows CFL, which defaults
-    // to 0.5 and can be set higher, so this is its own limit and not a comment
-    // on that one.
     if (multiphase) {
         const float interfaceRate = phase.maxCourant(u, v, dx, dy);
         if (interfaceRate > 1e-12f)
             dt = std::min(dt, cfg.dtSafety * 0.5f / interfaceRate);
     }
 
-    // A field at rest under real gravity has no Courant number at all, so
-    // nothing above limits the step - and one step later it is moving at g*dt
-    // and has crossed the domain. The distance the force itself covers in a
-    // step is what bounds it: half g dt^2 under one cell.
+    if (hasTension) {
+        const float smallest = std::min(dx, dy);
+        const float mass = cfg.rho1 + cfg.rho2;
+        const float capillary =
+            std::sqrt(mass * smallest * smallest * smallest /
+                      (4.0f * 3.14159265358979f * cfg.surfaceTension));
+        if (capillary < dt) {
+            dt = cfg.dtSafety * capillary;
+            if (!capillaryReported) {
+                capillaryReported = true;
+                std::cout << "  note: surface tension sets the step size here, "
+                             "not the flow and not the viscosity.\n  The "
+                             "shortest capillary wave this grid can hold "
+                             "crosses a cell in " << capillary
+                          << " s, and that limit falls as dx^1.5:\n  halving "
+                             "the cell size costs about three times the steps. "
+                             "It is not the solver hanging.\n";
+            }
+        }
+    }
+
+    if (cfg.miscible() && cfg.diffusivity > 0.0f) {
+        dt = std::min(dt, cfg.dtSafety /
+                              (2.0f * cfg.diffusivity * (invDx2 + invDy2)));
+    }
+
     if (bodyGravity) {
         const float g = std::sqrt(gx * gx + gy * gy);
         if (g > 1e-12f)
@@ -1226,14 +1301,14 @@ void Solver::predictorImpl() {
     const int nx = cfg.nx, ny = cfg.ny;
     const float dtNu = dt * cfg.nu;
     const float dtConv = dt;
-    // Viscosity is per face rather than per run once two fluids share the
-    // domain. It is the kinematic one, mu/rho taken on the face itself, so the
-    // Laplacian keeps the shape it had and the vector kernel keeps its own -
-    // a broadcast constant becomes a load and nothing else about it changes.
+
     const float* __restrict nuFaceX =
         TwoPhase ? phase.faceNuX().data() : nullptr;
     const float* __restrict nuFaceY =
         TwoPhase ? phase.faceNuY().data() : nullptr;
+
+    const float* __restrict tensX = TwoPhase ? tensionX.data() : nullptr;
+    const float* __restrict tensY = TwoPhase ? tensionY.data() : nullptr;
     const float bodyGx = bodyGravity ? dt * gx : 0.0f;
     const float bodyGy = bodyGravity ? dt * gy : 0.0f;
     const float* __restrict uPtr = u.data();
@@ -1339,6 +1414,11 @@ void Solver::predictorImpl() {
             if constexpr (TwoPhase)
                 dtNuHere = _mm256_mul_ps(
                     dtVec, _mm256_loadu_ps(nuFaceX + rowU + i));
+            __m256 forceVec = bodyGxVec;
+            if constexpr (TwoPhase)
+                forceVec = _mm256_add_ps(
+                    forceVec,
+                    _mm256_mul_ps(dtVec, _mm256_loadu_ps(tensX + rowU + i)));
             const __m256 res =
                 _mm256_add_ps(
                     _mm256_add_ps(
@@ -1346,7 +1426,7 @@ void Solver::predictorImpl() {
                             uij,
                             _mm256_mul_ps(dtConvVec, conv)),
                         _mm256_mul_ps(dtNuHere, diff)),
-                    bodyGxVec);
+                    forceVec);
             _mm256_storeu_ps(
                 uStarRow + i,
                 _mm256_add_ps(
@@ -1390,7 +1470,7 @@ void Solver::predictorImpl() {
                 - dtConv * (u_ij*dudx + v_n*dudy)
                 + (TwoPhase ? dt * nuFaceX[rowU + i] : dtNu) *
                       (d2udx2 + d2udy2)
-                + bodyGx)
+                + bodyGx + (TwoPhase ? dt * tensX[rowU + i] : 0.0f))
                 + uWallRow[i];
         }
     }
@@ -1448,7 +1528,7 @@ void Solver::predictorImpl() {
                 - dtConv * (u_ij*dudx + v_n*dudy)
                 + (TwoPhase ? dt * nuFaceX[rowU + i] : dtNu) *
                       (d2udx2 + d2udy2)
-                + bodyGx)
+                + bodyGx + (TwoPhase ? dt * tensX[rowU + i] : 0.0f))
                 + uWallRow[i];
         }
     }
@@ -1534,6 +1614,11 @@ void Solver::predictorImpl() {
             if constexpr (TwoPhase)
                 dtNuHere = _mm256_mul_ps(
                     dtVec, _mm256_loadu_ps(nuFaceY + rowV + i));
+            __m256 forceVec = bodyGyVec;
+            if constexpr (TwoPhase)
+                forceVec = _mm256_add_ps(
+                    forceVec,
+                    _mm256_mul_ps(dtVec, _mm256_loadu_ps(tensY + rowV + i)));
             const __m256 res =
                 _mm256_add_ps(
                     _mm256_add_ps(
@@ -1541,7 +1626,7 @@ void Solver::predictorImpl() {
                             vij,
                             _mm256_mul_ps(dtConvVec, conv)),
                         _mm256_mul_ps(dtNuHere, diff)),
-                    bodyGyVec);
+                    forceVec);
             _mm256_storeu_ps(
                 vStarRow + i,
                 _mm256_add_ps(
@@ -1585,7 +1670,7 @@ void Solver::predictorImpl() {
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
                 + (TwoPhase ? dt * nuFaceY[rowV + i] : dtNu) *
                       (d2vdx2 + d2vdy2)
-                + bodyGy)
+                + bodyGy + (TwoPhase ? dt * tensY[rowV + i] : 0.0f))
                 + vWallRow[i];
         }
 
@@ -1632,7 +1717,7 @@ void Solver::predictorImpl() {
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
                 + (TwoPhase ? dt * nuFaceY[rowV + iCol] : dtNu) *
                       (d2vdx2 + d2vdy2)
-                + bodyGy)
+                + bodyGy + (TwoPhase ? dt * tensY[rowV + iCol] : 0.0f))
                 + vWallRow[iCol];
         }
     }
@@ -1670,9 +1755,6 @@ bool Solver::steadyReached() {
     for (size_t id = 0; id < v.size(); ++id)
         worst = std::max(worst, std::fabs(v[id] - vSteady[id]));
 
-    // Against whatever is actually driving the case: the inlet on a channel,
-    // the lid on a cavity. A rate measured against nothing is a rate that
-    // never converges on one case and converges instantly on the other.
     float driving = std::fabs(cfg.U0);
     for (int side = 0; side < 4; ++side) {
         const BoundarySpec& spec = cfg.boundaries.side[side];
@@ -1772,31 +1854,30 @@ void Solver::solvePoisson() {
         rhsSqSum += double(rowSum);
     }
 
-    // A source cell is not divergence free and is not supposed to be: what the
-    // projection has to produce there is exactly the rate the source adds. It
-    // goes in with the same sign as the divergence of u*, because the equation
-    // being solved is div(u) = q rather than div(u) = 0.
     if (hasSources) {
         const float* __restrict rate = sourceRate.data();
-        for (int id = 0; id < nx * ny; ++id)
-            rhsPtr[id] -= rate[id] * invDt * cellMask[id];
-        rhsSqSum = 0.0;
-        for (int id = 0; id < nx * ny; ++id)
-            rhsSqSum += static_cast<double>(rhsPtr[id]) * rhsPtr[id];
+
+        for (int id : sourceCells) {
+            const float before = rhsPtr[id];
+            const float after = before - rate[id] * invDt * cellMask[id];
+            rhsPtr[id] = after;
+            rhsSqSum += static_cast<double>(after) * after -
+                        static_cast<double>(before) * before;
+        }
     }
 
-    // The boundary term below is not small, and it lands after the sum above
-    // was taken, so the norm the tolerance is judged against has to be taken
-    // again. Without this the solve is measured against a right hand side that
-    // is nearly zero and stops far short of where it should.
     if (bodyGravity) {
         const float twoX = 2.f * invDx2;
         const float twoY = 2.f * invDy2;
-        const auto wX = [this](int i, int j) {
-            return multiphase ? phase.faceInvRhoX()[idxU(i, j)] : 1.0f;
+        const float* __restrict invRhoXPtr =
+            multiphase ? phase.faceInvRhoX().data() : nullptr;
+        const float* __restrict invRhoYPtr =
+            multiphase ? phase.faceInvRhoY().data() : nullptr;
+        const auto wX = [&](int i, int j) {
+            return invRhoXPtr ? invRhoXPtr[idxU(i, j)] : 1.0f;
         };
-        const auto wY = [this](int i, int j) {
-            return multiphase ? phase.faceInvRhoY()[idxV(i, j)] : 1.0f;
+        const auto wY = [&](int i, int j) {
+            return invRhoYPtr ? invRhoYPtr[idxV(i, j)] : 1.0f;
         };
         if (sideLeft.outlet)
             for (int j = 0; j < ny; ++j)
@@ -1872,11 +1953,6 @@ void Solver::corrector() {
         correctorImpl<false>();
 }
 
-// u = u* - dt (1/rho) grad p. At one density 1/rho is folded into p itself and
-// the factor is exactly dt, which is what every version before this did and
-// what the false instantiation still compiles to. At two it is the same 1/rho
-// the pressure operator was built from - the projection is only divergence
-// free while those two agree, and they agree because they are the same array.
 template <bool TwoPhase>
 void Solver::correctorImpl() {
     const int nx = cfg.nx, ny = cfg.ny;
@@ -1994,29 +2070,77 @@ void Solver::applyBC() {
 
 float Solver::maxDivergence() const {
     const int nx = cfg.nx, ny = cfg.ny;
+
+    const float* __restrict rate = hasSources ? sourceRate.data() : nullptr;
+    const float* __restrict mask = fluidCellMaskF.data();
+    const float* __restrict uPtr = u.data();
+    const float* __restrict vPtr = v.data();
     float worst = 0.0f;
-    for (int j = 0; j < ny; ++j) {
-        const int rowP = j * nx;
-        const int rowU = j * (nx + 1);
-        const int rowV = j * nx;
-        const int rowVTop = (j + 1) * nx;
-        for (int i = 0; i < nx; ++i) {
-            if (solidMask[rowP + i])
-                continue;
-            // A source cell is meant to have a divergence, and it is meant to
-            // be exactly the rate the source adds. What is worth reporting is
-            // the part the projection failed to produce, so the intended part
-            // comes off here rather than being read as a solver that cannot
-            // converge.
-            const float div =
-                (u[rowU + i + 1] - u[rowU + i]) * invDx +
-                (v[rowVTop + i] - v[rowV + i]) * invDy -
-                (hasSources ? sourceRate[rowP + i] : 0.0f);
-            if (!std::isfinite(div))
-                return std::numeric_limits<float>::quiet_NaN();
-            worst = std::max(worst, std::fabs(div));
+    int bad = 0;
+
+    #pragma omp parallel reduction(+ : bad) if (nx * ny >= 8192)
+    {
+        float local = 0.0f;
+        int localBad = 0;
+#ifdef __AVX2__
+        __m256 localVec = _mm256_setzero_ps();
+        __m256 badVec = _mm256_setzero_ps();
+        const __m256 invDxVec = _mm256_set1_ps(invDx);
+        const __m256 invDyVec = _mm256_set1_ps(invDy);
+        const __m256 signMask = absMask();
+#endif
+        #pragma omp for schedule(static) nowait
+        for (int j = 0; j < ny; ++j) {
+            const int rowP = j * nx;
+            const int rowU = j * (nx + 1);
+            const int rowVTop = (j + 1) * nx;
+            int i = 0;
+#ifdef __AVX2__
+            for (; runtime::avx2 && i + 8 <= nx; i += 8) {
+                __m256 div = _mm256_add_ps(
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(_mm256_loadu_ps(uPtr + rowU + i + 1),
+                                      _mm256_loadu_ps(uPtr + rowU + i)),
+                        invDxVec),
+                    _mm256_mul_ps(
+                        _mm256_sub_ps(_mm256_loadu_ps(vPtr + rowVTop + i),
+                                      _mm256_loadu_ps(vPtr + rowP + i)),
+                        invDyVec));
+                if (rate)
+                    div = _mm256_sub_ps(div, _mm256_loadu_ps(rate + rowP + i));
+                badVec = _mm256_or_ps(
+                    badVec, _mm256_cmp_ps(div, div, _CMP_UNORD_Q));
+
+                localVec = _mm256_max_ps(
+                    localVec,
+                    _mm256_mul_ps(_mm256_and_ps(signMask, div),
+                                  _mm256_loadu_ps(mask + rowP + i)));
+            }
+#endif
+            for (; i < nx; ++i) {
+                if (solidMask[rowP + i])
+                    continue;
+                const float div =
+                    (uPtr[rowU + i + 1] - uPtr[rowU + i]) * invDx +
+                    (vPtr[rowVTop + i] - vPtr[rowP + i]) * invDy -
+                    (rate ? rate[rowP + i] : 0.0f);
+                if (!std::isfinite(div))
+                    ++localBad;
+                local = std::max(local, std::fabs(div));
+            }
         }
+#ifdef __AVX2__
+        local = std::max(local, horizontalMax(localVec));
+        if (_mm256_movemask_ps(badVec) != 0)
+            ++localBad;
+#endif
+        bad += localBad;
+        #pragma omp critical
+        worst = std::max(worst, local);
     }
+
+    if (bad != 0)
+        return std::numeric_limits<float>::quiet_NaN();
     return worst;
 }
 
@@ -2151,11 +2275,7 @@ void Solver::run() {
     }
 
     const int saveInterval = std::max(1, cfg.saveInterval);
-    // A field being accelerated by a real force is a different velocity every
-    // step, and dtUpdateInterval was written for a run that starts at U0 and
-    // stays near it. Under body gravity the field goes from rest to g*dt in one
-    // step and to five times that before the interval is up, which is a Courant
-    // number of five nobody asked for. The pass costs one sweep of the grid.
+
     const int dtUpdateInterval =
         bodyGravity ? 1 : std::max(1, cfg.dtUpdateInterval);
     if (bodyGravity && cfg.dtUpdateInterval > 1)
@@ -2224,9 +2344,6 @@ void Solver::run() {
         const float savedDt = dt;
         dt = stepDt;
 
-        // Forward Euler is one of these. The two SSP schemes are convex
-        // combinations of several, and because each one ends in a projection
-        // the combination is divergence free as well.
         switch (cfg.timeScheme) {
         case TimeScheme::RK2:
             uPrev = u;
@@ -2249,12 +2366,6 @@ void Solver::run() {
             break;
         }
 
-        // The interface moves once per step and not once per stage: it is
-        // carried by the velocity field the step ended with, which is the one
-        // that is actually divergence free. Carrying it inside the stages
-        // would have the density change under a projection that was built from
-        // the old one, and the two would disagree by exactly the amount that
-        // makes a two-phase run drift.
         if (multiphase)
             advectPhase();
 
@@ -2294,8 +2405,7 @@ void Solver::run() {
                       << " (" << multigrid.cyclesUsed() << " cycles)"
                       << std::endl;
         }
-        // Checked on the same beat as the step lines, so the number that ends
-        // the run is one that was printed on the way there.
+
         if (step % 10 == 0 && steadyReached()) {
             std::cout << "Step " << step << ", t = " << currentTime
                       << " s: the field is changing at " << steadyRate
@@ -2401,6 +2511,10 @@ std::vector<Solver::ExtraField> Solver::buildExtraFields(
                 field.values = phase.density();
             else
                 std::fill(field.values.begin(), field.values.end(), cfg.ro);
+        } else if (key == "curvature") {
+            field.name = "curvature";
+            if (phase.curvature().size() == cells)
+                field.values = phase.curvature();
         } else if (key == "source") {
             field.name = "source";
             if (hasSources)
@@ -2421,7 +2535,6 @@ void Solver::saveVTK(int stepNum) const {
     const int nx = cfg.nx, ny = cfg.ny;
     constexpr size_t BUFFER_WORDS = 4096;
     std::array<uint32_t, BUFFER_WORDS> buffer;
-    size_t bufferPos = 0;
     std::filesystem::path filename = outputPath;
     filename /= framePrefix + "_" + std::to_string(stepNum) + ".vtk";
 
@@ -2445,29 +2558,42 @@ void Solver::saveVTK(int stepNum) const {
         << "CELL_DATA "
         << nx * ny << "\n";
 
-    auto flushFloatBuffer = [&](){
-        if (bufferPos == 0)
-            return;
-        fout.write(
-            reinterpret_cast<const char*>(buffer.data()),
-            static_cast<std::streamsize>(bufferPos * sizeof(uint32_t)));
-        bufferPos = 0;
+    auto writeArray = [&](const float* values, size_t count){
+        size_t done = 0;
+        while (done < count) {
+            const size_t take = std::min(BUFFER_WORDS, count - done);
+            const float* src = values + done;
+            uint32_t* dst = buffer.data();
+            size_t k = 0;
+#ifdef __AVX2__
+            const __m256i order = _mm256_setr_epi8(
+                3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12,
+                3, 2, 1, 0, 7, 6, 5, 4, 11, 10, 9, 8, 15, 14, 13, 12);
+            for (; k + 8 <= take; k += 8) {
+                const __m256i word =
+                    _mm256_loadu_si256(reinterpret_cast<const __m256i*>(src + k));
+                _mm256_storeu_si256(reinterpret_cast<__m256i*>(dst + k),
+                                    _mm256_shuffle_epi8(word, order));
+            }
+#endif
+            for (; k < take; ++k) {
+                uint32_t x;
+                std::memcpy(&x, src + k, sizeof(float));
+                dst[k] =
+                    ((x & 0x000000FFu) << 24) |
+                    ((x & 0x0000FF00u) << 8 ) |
+                    ((x & 0x00FF0000u) >> 8 ) |
+                    ((x & 0xFF000000u) >> 24);
+            }
+            fout.write(reinterpret_cast<const char*>(dst),
+                       static_cast<std::streamsize>(take * sizeof(uint32_t)));
+            done += take;
+        }
     };
-    // Legacy VTK binary data is big endian, so every word is byte-swapped
-    auto writeWord = [&](uint32_t x){
-        buffer[bufferPos++] =
-            ((x & 0x000000FFu) << 24) |
-            ((x & 0x0000FF00u) << 8 ) |
-            ((x & 0x00FF0000u) >> 8 ) |
-            ((x & 0xFF000000u) >> 24);
-        if (bufferPos == BUFFER_WORDS)
-            flushFloatBuffer();
-    };
-    auto writeFloat = [&](float value){
-        uint32_t x;
-        std::memcpy(&x, &value, sizeof(float));
-        writeWord(x);
-    };
+
+    const size_t cellCount = static_cast<size_t>(nx) * ny;
+    std::vector<float> scratch(cellCount);
+
     fout << "SCALARS pressure float 1\n" << "LOOKUP_TABLE default\n";
     for (int j = 0; j < ny; ++j){
         const int row = j * nx;
@@ -2477,33 +2603,25 @@ void Solver::saveVTK(int stepNum) const {
             // back here and nowhere else. Solid cells have a zero diagonal and
             // never take part in the solve, so they keep the hydrostatic value
             // alone instead of punching a hole through the pressure map.
-            // At one density p is the kinematic pressure and the head is
-            // added here; at two it is already pascals and the weight of the
-            // column is inside it, so the only thing left to make up is what a
-            // solid cell shows, which is the head of whatever is against it.
+
             if (multiphase) {
-                writeFloat(solidMask[row + i]
-                               ? headCell(i, j) * phase.density()[row + i]
-                               : p[row + i]);
+                scratch[row + i] = solidMask[row + i]
+                                       ? headCell(i, j) * phase.density()[row + i]
+                                       : p[row + i];
             } else {
                 const float value =
                     solidMask[row + i] ? headCell(i, j)
                                        : phiCell(i, j) + p[row + i];
-                writeFloat(value * cfg.ro);
+                scratch[row + i] = value * cfg.ro;
             }
         }
     }
-    flushFloatBuffer();
+    writeArray(scratch.data(), cellCount);
     fout << "\n";
 
-    // Not an extra field and not optional: without it a continuation starts
-    // from a domain of nothing but fluid 2 and it looks like the water
-    // evaporated between one frame and the next.
     if (multiphase) {
         fout << "SCALARS phase float 1\n" << "LOOKUP_TABLE default\n";
-        for (float value : phase.fraction())
-            writeFloat(value);
-        flushFloatBuffer();
+        writeArray(phase.fraction().data(), phase.fraction().size());
         fout << "\n";
     }
 
@@ -2518,6 +2636,8 @@ void Solver::saveVTK(int stepNum) const {
     // these two and has to be able to reproduce them exactly
     std::vector<float> uCell(static_cast<size_t>(nx) * ny);
     std::vector<float> vCell(static_cast<size_t>(nx) * ny);
+
+    std::vector<float> interleaved(cellCount * 3u, 0.0f);
 
     fout << "VECTORS velocity float\n";
     for (int j = 0; j < ny; ++j){
@@ -2541,23 +2661,17 @@ void Solver::saveVTK(int stepNum) const {
             }
             uCell[rowV + i] = uu;
             vCell[rowV + i] = vv;
-            writeFloat(uu);
-            writeFloat(vv);
-            writeFloat(0.0f);
+            interleaved[(rowV + i) * 3u] = uu;
+            interleaved[(rowV + i) * 3u + 1u] = vv;
         }
     }
-    flushFloatBuffer();
+    writeArray(interleaved.data(), interleaved.size());
     fout << "\n";
 
-    // Whatever else this run was asked to carry. The writer knows nothing
-    // about what is in the list, which is the point: the next field is one
-    // entry in buildExtraFields and no change here at all.
     for (const ExtraField& field : buildExtraFields(uCell, vCell)) {
         fout << "SCALARS " << field.name << " float 1\n"
              << "LOOKUP_TABLE default\n";
-        for (float value : field.values)
-            writeFloat(value);
-        flushFloatBuffer();
+        writeArray(field.values.data(), field.values.size());
         fout << "\n";
     }
 

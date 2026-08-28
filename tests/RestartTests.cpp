@@ -6,9 +6,6 @@ using namespace testing;
 
 namespace {
 
-// Runs a configuration and returns the frame at the step it was told to save,
-// rather than the last one, so the continuation has something in the middle to
-// start from.
 bool runAndKeep(Config cfg, RestartData& out, std::string& error) {
     const std::filesystem::path dir(cfg.outputDir);
     std::filesystem::create_directories(dir);
@@ -41,16 +38,12 @@ bool runAndKeep(Config cfg, RestartData& out, std::string& error) {
     return loadRestart(newest, out, error);
 }
 
-}   // namespace
+}
 
 int main() {
     const std::filesystem::path root = scratchDir("restart");
     std::string error;
 
-    // One run all the way through, and the same run cut in half and picked up
-    // again from its own frame. Nothing about the second one is allowed to be
-    // different, because the frame carries the face velocities exactly rather
-    // than rebuilding them from cell averages.
     Config whole = baseConfig(root / "whole");
     whole.totalTime = 0.12;
     whole.mgIterations = 20;

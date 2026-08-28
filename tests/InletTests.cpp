@@ -6,9 +6,6 @@ using namespace testing;
 
 namespace {
 
-// Everything crossing the border, split by which way it is going. An outlet is
-// not told how much to take, so this is the only way to find out whether the
-// projection actually sent as much out as was pushed in.
 struct Balance {
     double in = 0.0;
     double out = 0.0;
@@ -48,9 +45,6 @@ Config bandConfig(const std::filesystem::path& out) {
     return cfg;
 }
 
-// The inlet column of the frame against what the boundary layer says that side
-// should be imposing. Not "roughly a band in the middle" - face by face, so a
-// band off by one cell or a profile scaled wrong is a failure and not a shrug.
 int checkInletColumn(const RestartData& frame, const Config& cfg,
                      const char* label) {
     const BoundarySpec& spec = cfg.boundaries[BoundarySide::Left];
@@ -115,16 +109,13 @@ int expectAccepted(const Config& cfg, const char* label) {
     return 0;
 }
 
-}   // namespace
+}
 
 int main() {
     const std::filesystem::path root = scratchDir("inlet");
     std::string error;
     int rc = 0;
 
-    // A band down the middle of the left side. The outlet is not told anything
-    // about it and has to work out on its own that it is now taking a fifth of
-    // a full channel, spread over the whole of its own height.
     {
         Config cfg = bandConfig(root / "uniform");
         cfg.boundaries[BoundarySide::Left].from = 0.4f;
@@ -137,9 +128,6 @@ int main() {
         rc |= checkBalance(frame, "uniform band");
     }
 
-    // Same band, parabolic. The peak is 1.5 times the speed so that the band
-    // carries the same flow rate either way, which is the only reason anybody
-    // can switch profile without also recomputing the speed.
     {
         Config cfg = bandConfig(root / "parabolic");
         cfg.boundaries[BoundarySide::Left].from = 0.25f;
@@ -169,7 +157,6 @@ int main() {
                         "rate as the flat one");
     }
 
-    // Bottom to top, so the two axes are not quietly different code paths.
     {
         Config cfg = baseConfig(root / "vertical");
         cfg.geometryFile = "empty";
@@ -201,7 +188,6 @@ int main() {
                         "through the top");
     }
 
-    // The configurations that cannot conserve mass, and the two that can.
     {
         Config cfg = bandConfig(root / "refused");
         cfg.boundaries[BoundarySide::Right].kind = BoundaryKind::Wall;
@@ -229,8 +215,6 @@ int main() {
         rc |= expectAccepted(cfg, "lid driven cavity");
     }
     {
-        // Two inlets facing each other at the same speed cancel exactly, and a
-        // closed box full of fluid that is not being added to is fine.
         Config cfg = bandConfig(root / "accepted");
         cfg.boundaries[BoundarySide::Right].kind = BoundaryKind::Inlet;
         cfg.boundaries[BoundarySide::Right].speed = -cfg.U0;

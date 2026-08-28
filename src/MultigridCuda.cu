@@ -282,6 +282,128 @@ __global__ void computeNormKernel(
         partial[blockIdx.x] = shared[0];
 }
 
+__global__ void applyOperatorKernel(
+    int nx,
+    int ny,
+    const float* __restrict__ x,
+    const float* __restrict__ coefW,
+    const float* __restrict__ coefE,
+    const float* __restrict__ coefS,
+    const float* __restrict__ coefN,
+    const float* __restrict__ diag,
+    float* __restrict__ out)
+{
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= nx || j >= ny)
+        return;
+    const int id = j * nx + i;
+    const float sum =
+        coefW[id] * x[id - 1] + coefE[id] * x[id + 1] +
+        coefS[id] * x[id - nx] + coefN[id] * x[id + nx];
+    out[id] = diag[id] * x[id] - sum;
+}
+
+__global__ void dotKernel(
+    int cellCount,
+    const float* __restrict__ a,
+    const float* __restrict__ b,
+    float* __restrict__ partial)
+{
+    __shared__ float shared[NORM_BLOCK];
+
+    float sum = 0.0f;
+    for (int id = blockIdx.x * blockDim.x + threadIdx.x;
+         id < cellCount;
+         id += blockDim.x * gridDim.x)
+        sum += a[id] * b[id];
+
+    shared[threadIdx.x] = sum;
+    __syncthreads();
+
+    for (unsigned stride = blockDim.x / 2u; stride > 0u; stride >>= 1) {
+        if (threadIdx.x < stride)
+            shared[threadIdx.x] += shared[threadIdx.x + stride];
+        __syncthreads();
+    }
+
+    if (threadIdx.x == 0)
+        partial[blockIdx.x] = shared[0];
+}
+
+__global__ void residualFromOperatorKernel(
+    int cellCount,
+    const float* __restrict__ b,
+    const float* __restrict__ ax,
+    const float* __restrict__ diag,
+    float* __restrict__ r)
+{
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= cellCount)
+        return;
+    r[id] = (diag[id] > 0.0f) ? (b[id] - ax[id]) : 0.0f;
+}
+
+__global__ void negateKernel(
+    int cellCount,
+    const float* __restrict__ src,
+    float* __restrict__ dst)
+{
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id < cellCount)
+        dst[id] = -src[id];
+}
+
+__global__ void combineKernel(
+    int cellCount,
+    const float* __restrict__ z,
+    float beta,
+    float* __restrict__ d)
+{
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id < cellCount)
+        d[id] = z[id] + beta * d[id];
+}
+
+__global__ void stepKernel(
+    int cellCount,
+    float alpha,
+    const float* __restrict__ d,
+    const float* __restrict__ q,
+    float* __restrict__ x,
+    float* __restrict__ r,
+    float* __restrict__ previous)
+{
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id >= cellCount)
+        return;
+    previous[id] = r[id];
+    x[id] += alpha * d[id];
+    r[id] -= alpha * q[id];
+}
+
+__global__ void differenceKernel(
+    int cellCount,
+    const float* __restrict__ before,
+    const float* __restrict__ after,
+    float* __restrict__ out)
+{
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id < cellCount)
+        out[id] = before[id] - after[id];
+}
+
+__global__ void blendKernel(
+    int cellCount,
+    float alpha,
+    const float* __restrict__ saved,
+    float* __restrict__ values)
+{
+    const int id = blockIdx.x * blockDim.x + threadIdx.x;
+    if (id < cellCount)
+        values[id] = saved[id] + alpha * (values[id] - saved[id]);
+}
+
 // Device memory. The previous version called cudaMalloc/cudaFree for every
 // level on every pressure solve, i.e. tens of allocations per time step, and
 // that dominated the GPU path completely. Here the whole hierarchy is allocated
@@ -315,6 +437,15 @@ void Multigrid::freeDevice() {
         d = DeviceLevel{};
     }
     deviceLevels.clear();
+
+    if (deviceCgAlloc) {
+        cudaFree(deviceCgAlloc);
+        deviceCgAlloc = nullptr;
+        deviceCgX = deviceCgR = deviceCgZ = deviceCgD = nullptr;
+        deviceCgQ = deviceCgPrev = deviceCgB = nullptr;
+        deviceSavedPressure = deviceSavedResidual = nullptr;
+        deviceCgCells = 0;
+    }
 
     if (deviceReduceBuffer) {
         cudaFree(deviceReduceBuffer);
@@ -407,10 +538,6 @@ void Multigrid::setGeometryCuda() {
     deviceReady = true;
 }
 
-// Only the stencil, and only what the host just rebuilt. The hierarchy, the
-// masks and the transfer weights are untouched, so this is what a per step
-// coefficient change costs on the device: six copies per level and no
-// allocation at all.
 void Multigrid::uploadCoefficientsCuda() {
     if (!deviceReady)
         return;
@@ -601,6 +728,78 @@ void Multigrid::prolongateSolutionCuda(int coarseLevel) {
     CUDA_CHECK_LAUNCH("prolongateKernel(solution)");
 }
 
+void Multigrid::allocateCgDevice() {
+    const int count = gridLevels[0].cellCount;
+    const int halo = gridLevels[0].nx + 8;
+    if (deviceCgCells == count && deviceCgAlloc)
+        return;
+    if (deviceCgAlloc) {
+        cudaFree(deviceCgAlloc);
+        deviceCgAlloc = nullptr;
+    }
+    const size_t stride = static_cast<size_t>(count + 2 * halo + 16);
+    const size_t total = stride * 9u * sizeof(float);
+    CUDA_CHECK(cudaMalloc(&deviceCgAlloc, total));
+    CUDA_CHECK(cudaMemset(deviceCgAlloc, 0, total));
+    float* base = deviceCgAlloc;
+    const auto take = [&]() {
+        float* out = base + halo;
+        base += stride;
+        return out;
+    };
+    deviceCgX = take();
+    deviceCgR = take();
+    deviceCgZ = take();
+    deviceCgD = take();
+    deviceCgQ = take();
+    deviceCgPrev = take();
+    deviceCgB = take();
+    deviceSavedPressure = take();
+    deviceSavedResidual = take();
+    deviceCgCells = count;
+}
+
+float Multigrid::dotCuda(int count, const float* a, const float* b) {
+    dotKernel<<<reduceBlocks, NORM_BLOCK>>>(count, a, b, deviceReduceBuffer);
+    CUDA_CHECK_LAUNCH("dotKernel");
+    CUDA_CHECK(cudaMemcpy(hostReduceBuffer, deviceReduceBuffer,
+                          static_cast<size_t>(reduceBlocks) * sizeof(float),
+                          cudaMemcpyDeviceToHost));
+    double total = 0.0;
+    for (int block = 0; block < reduceBlocks; ++block)
+        total += hostReduceBuffer[block];
+    return static_cast<float>(total);
+}
+
+void Multigrid::dampCorrectionCuda(int level) {
+    const Level& grid = gridLevels[level];
+    const DeviceLevel& d = deviceLevels[level];
+    const int count = grid.cellCount;
+    const int blocks = (count + NORM_BLOCK - 1) / NORM_BLOCK;
+
+    computeResidualCuda(level);
+
+    differenceKernel<<<blocks, NORM_BLOCK>>>(count, deviceSavedResidual,
+                                             d.residual, deviceCgQ);
+    CUDA_CHECK_LAUNCH("differenceKernel");
+
+    const float numerator = dotCuda(count, deviceSavedResidual, deviceCgQ);
+    const float denominator = dotCuda(count, deviceCgQ, deviceCgQ);
+    float alpha = 1.0f;
+    if (denominator > 1e-30f) {
+        alpha = numerator / denominator;
+        if (!std::isfinite(alpha))
+            alpha = 1.0f;
+        alpha = std::min(2.0f, std::max(0.0f, alpha));
+    }
+    if (alpha == 1.0f)
+        return;
+
+    blendKernel<<<blocks, NORM_BLOCK>>>(count, alpha, deviceSavedPressure,
+                                        d.pressure);
+    CUDA_CHECK_LAUNCH("blendKernel");
+}
+
 void Multigrid::vCycleCuda(
     int level,
     float smootherOmega,
@@ -616,7 +815,20 @@ void Multigrid::vCycleCuda(
     computeResidualCuda(level);
     restrictResidualCuda(level);
     vCycleCuda(level + 1, smootherOmega, coarseOmega);
-    prolongateCorrectionCuda(level + 1);
+    if (coefficientsUniform || level != 0) {
+        prolongateCorrectionCuda(level + 1);
+    } else {
+        const Level& grid = gridLevels[level];
+        const DeviceLevel& d = deviceLevels[level];
+        const size_t bytes =
+            static_cast<size_t>(grid.cellCount) * sizeof(float);
+        CUDA_CHECK(cudaMemcpy(deviceSavedPressure, d.pressure, bytes,
+                              cudaMemcpyDeviceToDevice));
+        CUDA_CHECK(cudaMemcpy(deviceSavedResidual, d.residual, bytes,
+                              cudaMemcpyDeviceToDevice));
+        prolongateCorrectionCuda(level + 1);
+        dampCorrectionCuda(level);
+    }
     smoothSORCuda(level, smootherOmega, POST_SMOOTH_SWEEPS);
 }
 
@@ -644,6 +856,134 @@ void Multigrid::fullMultigridCuda(float smootherOmega, float coarseOmega) {
     }
 }
 
+float Multigrid::solvePCGCuda(
+    std::vector<float>& pressure,
+    const std::vector<float>& rhs,
+    float smootherOmega,
+    float coarseOmega,
+    int maxCycles,
+    float tolerance,
+    float rhsScale)
+{
+    const Level& finest = gridLevels[0];
+    const DeviceLevel& d0 = deviceLevels[0];
+    const int count = finest.cellCount;
+    const size_t bytes = static_cast<size_t>(count) * sizeof(float);
+    const int blocks = (count + NORM_BLOCK - 1) / NORM_BLOCK;
+    const dim3 block2(BLOCK_X, BLOCK_Y);
+    const dim3 grid2((finest.nx + BLOCK_X - 1) / BLOCK_X,
+                     (finest.ny + BLOCK_Y - 1) / BLOCK_Y);
+
+    allocateCgDevice();
+
+    std::vector<float> host(count);
+
+    CUDA_CHECK(cudaMemcpy(deviceCgX, pressure.data(), bytes,
+                          cudaMemcpyHostToDevice));
+    CUDA_CHECK(cudaMemcpy(d0.rhs, rhs.data(), bytes, cudaMemcpyHostToDevice));
+    zeroSolidPressureKernel<<<blocks, NORM_BLOCK>>>(count, deviceCgX, d0.rhs,
+                                                    d0.invDiag);
+    CUDA_CHECK_LAUNCH("zeroSolidPressureKernel");
+
+    const auto pinLevel = [&](float* values) {
+        if (!pressureSingular)
+            return;
+        CUDA_CHECK(cudaMemcpy(host.data(), values, bytes,
+                              cudaMemcpyDeviceToHost));
+        removeNullSpace(host.data(), finest);
+        CUDA_CHECK(cudaMemcpy(values, host.data(), bytes,
+                              cudaMemcpyHostToDevice));
+    };
+    const auto normOf = [&](const float* values) {
+        return std::sqrt(std::max(0.0f, dotCuda(count, values, values)));
+    };
+
+    pinLevel(d0.rhs);
+
+    negateKernel<<<blocks, NORM_BLOCK>>>(count, d0.rhs, deviceCgB);
+    CUDA_CHECK_LAUNCH("negateKernel");
+
+    const float norm = (rhsScale > 0.0f && !pressureSingular)
+                           ? rhsScale
+                           : computeRhsNormCuda(0);
+    const float scale = (norm > 1e-20f) ? norm : 1.0f;
+
+    if (firstSolve) {
+        CUDA_CHECK(cudaMemcpy(d0.pressure, deviceCgX, bytes,
+                              cudaMemcpyDeviceToDevice));
+        fullMultigridCuda(smootherOmega, coarseOmega);
+        CUDA_CHECK(cudaMemcpy(deviceCgX, d0.pressure, bytes,
+                              cudaMemcpyDeviceToDevice));
+        firstSolve = false;
+    }
+
+    applyOperatorKernel<<<grid2, block2>>>(
+        finest.nx, finest.ny, deviceCgX, d0.coefW, d0.coefE, d0.coefS,
+        d0.coefN, d0.diag, deviceCgQ);
+    CUDA_CHECK_LAUNCH("applyOperatorKernel");
+    residualFromOperatorKernel<<<blocks, NORM_BLOCK>>>(
+        count, deviceCgB, deviceCgQ, d0.diag, deviceCgR);
+    CUDA_CHECK_LAUNCH("residualFromOperatorKernel");
+    pinLevel(deviceCgR);
+
+    lastCycles = 0;
+    float relative = normOf(deviceCgR) / scale;
+    double rzOld = 0.0;
+
+    for (int cycle = 0; cycle < maxCycles && relative >= tolerance; ++cycle) {
+        negateKernel<<<blocks, NORM_BLOCK>>>(count, deviceCgR, d0.rhs);
+        CUDA_CHECK_LAUNCH("negateKernel");
+        CUDA_CHECK(cudaMemset(d0.pressure, 0, bytes));
+        vCycleCuda(0, smootherOmega, coarseOmega);
+        pinLevel(d0.pressure);
+        CUDA_CHECK(cudaMemcpy(deviceCgZ, d0.pressure, bytes,
+                              cudaMemcpyDeviceToDevice));
+
+        const double rz = dotCuda(count, deviceCgR, deviceCgZ);
+        if (cycle == 0) {
+            CUDA_CHECK(cudaMemcpy(deviceCgD, deviceCgZ, bytes,
+                                  cudaMemcpyDeviceToDevice));
+        } else {
+            differenceKernel<<<blocks, NORM_BLOCK>>>(count, deviceCgR,
+                                                     deviceCgPrev, deviceCgQ);
+            CUDA_CHECK_LAUNCH("differenceKernel");
+            const double numerator = dotCuda(count, deviceCgQ, deviceCgZ);
+            const double beta = (std::fabs(rzOld) > 1e-300)
+                                    ? std::max(0.0, numerator / rzOld)
+                                    : 0.0;
+            combineKernel<<<blocks, NORM_BLOCK>>>(
+                count, deviceCgZ, static_cast<float>(beta), deviceCgD);
+            CUDA_CHECK_LAUNCH("combineKernel");
+        }
+
+        applyOperatorKernel<<<grid2, block2>>>(
+            finest.nx, finest.ny, deviceCgD, d0.coefW, d0.coefE, d0.coefS,
+            d0.coefN, d0.diag, deviceCgQ);
+        CUDA_CHECK_LAUNCH("applyOperatorKernel");
+        const double dq = dotCuda(count, deviceCgD, deviceCgQ);
+        if (!(std::fabs(dq) > 1e-300))
+            break;
+        const float alpha = static_cast<float>(rz / dq);
+        if (!std::isfinite(alpha))
+            break;
+
+        stepKernel<<<blocks, NORM_BLOCK>>>(count, alpha, deviceCgD, deviceCgQ,
+                                           deviceCgX, deviceCgR, deviceCgPrev);
+        CUDA_CHECK_LAUNCH("stepKernel");
+        pinLevel(deviceCgR);
+        rzOld = rz;
+        ++lastCycles;
+        relative = normOf(deviceCgR) / scale;
+    }
+
+    pinLevel(deviceCgX);
+    CUDA_CHECK(cudaMemcpy(d0.pressure, deviceCgX, bytes,
+                          cudaMemcpyDeviceToDevice));
+    CUDA_CHECK(cudaMemcpy(pressure.data(), deviceCgX, bytes,
+                          cudaMemcpyDeviceToHost));
+    return relative;
+}
+
 float Multigrid::solveCuda(
     std::vector<float>& pressure,
     const std::vector<float>& rhs,
@@ -657,6 +997,10 @@ float Multigrid::solveCuda(
         std::fprintf(stderr, "Multigrid::solveCuda called before setGeometry\n");
         return 0.0f;
     }
+
+    if (!coefficientsUniform)
+        return solvePCGCuda(pressure, rhs, smootherOmega, coarseOmega,
+                            maxCycles, tolerance, rhsScale);
 
     const Level& finest = gridLevels[0];
     const DeviceLevel& dFinest = deviceLevels[0];

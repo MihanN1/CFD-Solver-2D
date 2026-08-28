@@ -14,15 +14,12 @@ struct Row {
     float vorticity;
 };
 
-}   // namespace
+}
 
 int main() {
     const std::filesystem::path root = scratchDir("convection");
     std::string error;
 
-    // Every scheme on the same case. The point of the second order ones is
-    // that they stop throwing the field away, so what is measured is how much
-    // of the vorticity behind the body is still there at the end.
     Row rows[] = {
         {"upwind", ConvectionScheme::Upwind, LimiterKind::VanLeer,
          TimeScheme::Euler, 0.0f},
@@ -70,9 +67,6 @@ int main() {
         return fail("the reference run produced no vorticity at all, so this "
                     "case cannot tell the schemes apart");
 
-    // The ordering is the whole claim: a limiter that keeps more of the second
-    // order term throws less of the field away, and no limiting at all throws
-    // away least. If this ever inverts, the reconstruction is wrong.
     if (!(minmod > upwind))
         return fail("muscl with minmod is not less dissipative than upwind");
     if (!(vanLeer > minmod))

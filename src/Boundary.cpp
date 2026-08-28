@@ -12,7 +12,7 @@ std::string lower(const std::string& text) {
     return out;
 }
 
-}   // namespace
+}
 
 bool parseBoundaryKind(const std::string& text,
                        BoundaryKind& out,
@@ -84,8 +84,7 @@ void inletBandCells(const BoundarySpec& spec,
     last = static_cast<int>(std::floor(hi * cellsAlongSide + 0.5f));
     first = std::max(0, std::min(first, cellsAlongSide));
     last = std::max(first, std::min(last, cellsAlongSide));
-    // A band thinner than one cell still has to let something through, or the
-    // case silently becomes a closed box and the pressure problem goes bad.
+
     if (last == first && cellsAlongSide > 0) {
         last = std::min(cellsAlongSide, first + 1);
         if (last == first)
@@ -108,8 +107,6 @@ float inletVelocityAt(const BoundarySpec& spec, float t) {
     if (!(width > 0.0f))
         return spec.speed;
 
-    // Peak of 1.5 * speed, so the parabola carries the same flow rate as the
-    // flat profile of the same speed and nobody has to convert by hand.
     const float s = (t - lo) / width;
     return 6.0f * spec.speed * s * (1.0f - s);
 }

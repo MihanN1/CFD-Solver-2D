@@ -117,9 +117,6 @@ const char* const kBuildMarkers[] = {CFD_VERSION_MARKER, CFD_FEATURES_MARKER};
 const char* const* const kBuildMarkersKeepAlive = kBuildMarkers;
 }   // namespace
 
-// Second order convection with a one stage time scheme is only conditionally
-// stable, and the condition is not the CFL number anybody is thinking about
-// when they set it. Saying so beats letting it blow up on step one.
 static void warnAboutScheme(const Config& cfg) {
     if (cfg.convection == ConvectionScheme::Upwind ||
         cfg.timeScheme != TimeScheme::Euler)

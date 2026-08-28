@@ -31,9 +31,6 @@ private:
     std::vector<float> u, u_star;
     std::vector<float> uPrev, vPrev;
 
-    // Snapshot the steady check compares against, and the time it was taken
-    // at. Only allocated when the check is on, because on a channel it is dead
-    // weight the size of the velocity field.
     std::vector<float> uSteady, vSteady;
     double steadyStamp = 0.0;
     float steadyRate = 0.0f;
@@ -51,6 +48,7 @@ private:
     // Steps whose pressure solve ran out of V-cycles before reaching
     // mgTolerance. The velocity field keeps a divergence of that order, and
     // nothing said so before: mg res simply sat in the step line.
+    bool capillaryReported = false;
     bool poissonShortReported = false;
     int poissonShortSteps = 0;
     float poissonWorstResidual = 0.0f;
@@ -113,10 +111,6 @@ private:
     std::vector<MirrorFace> uMirrorFaces;
     std::vector<MirrorFace> vMirrorFaces;
 
-    // One side of the domain, reduced to what the kernels actually need: the
-    // ghost value a tangential stencil reads across it, written as
-    // ghost = sign * inner + offset, and whether the normal face is driven,
-    // held shut or left to the pressure.
     struct SideData {
         BoundaryKind kind = BoundaryKind::Slip;
         float ghostSign = 1.0f;
@@ -132,21 +126,21 @@ private:
     void resolveBoundaries();
     void applyOutletFaces();
 
-    // Two fluids, or one. Everything below is dead weight at one phase: the
-    // field is never allocated, the coefficients are never uploaded, and the
-    // kernels take the branch they always took.
     PhaseField phase;
     bool multiphase = false;
     std::vector<float> coeffX, coeffY;
     void refreshPhaseCoefficients();
     void advectPhase();
 
-    // Regions pushing fluid in from inside the domain. cellRate is the volume
-    // added per unit volume per second in each cell, which is exactly the
-    // divergence the projection has to produce there.
+    bool hasTension = false;
+    std::vector<float> tensionX, tensionY;
+    void refreshSurfaceTension();
+
     std::vector<float> sourceRate;
     std::vector<float> sourcePhase;
     std::vector<float> sourceU, sourceV;
+
+    std::vector<int> sourceCells;
     bool hasSources = false;
     double sourceInflow = 0.0;
     void buildSources();
@@ -169,15 +163,9 @@ private:
     template <int Phi, bool TwoPhase> void predictorImpl();
     template <bool TwoPhase> void correctorImpl();
 
-    // One whole forward Euler step of the projection method. The Runge-Kutta
-    // schemes are convex combinations of these, which is what keeps the result
-    // divergence free: every stage ends in a projection.
     void advanceStage();
     void blendWithPrevious(float weightPrevious);
 
-    // Largest velocity change per unit time since the last snapshot, divided by
-    // whatever drives this case. Returns false while there is nothing to
-    // compare against yet.
     bool steadyReached();
     void solvePoisson();
     void corrector();
@@ -209,17 +197,10 @@ private:
     float maxDivergence() const;
     float maxVelocity() const;
 
-    // What the pressure array has to be multiplied by to be pascals. At one
-    // phase p is the kinematic pressure and this is the density; at two the
-    // projection already carries 1/rho on every face, so p is in pascals and
-    // this is one.
     float pressureScale() const { return multiphase ? 1.0f : cfg.ro; }
 
     void saveVTK(int stepNum) const;
 
-    // Named fields the frame carries beyond the three it has always had. The
-    // writer walks this list rather than knowing what is in it, so a field
-    // added later is one entry here and nothing else.
     struct ExtraField {
         std::string name;
         std::vector<float> values;
@@ -233,10 +214,7 @@ private:
     // problem for the body force, so p carries only the reduced pressure and
     // this is added on output. Identically zero when gravity is off. The
     // reference point is the outlet at mid-height, which keeps phi small.
-    // The hydrostatic potential itself, whichever mode is running. A solid
-    // cell has no solved pressure in it, so this is what goes in its place;
-    // leaving it at zero punches a hole through the pressure map that has
-    // nothing to do with the flow.
+
     inline float headCell(int i, int j) const {
         return gx * ((i + 0.5f - cfg.nx) * dx) +
                gy * ((j + 0.5f - 0.5f * cfg.ny) * dy);
@@ -249,10 +227,6 @@ private:
                gy * ((j + 0.5f - 0.5f * cfg.ny) * dy);
     }
 
-    // Same field at the middle of a boundary face rather than a cell centre.
-    // With the force in the solve, p carries the head as well, so an open side
-    // is held at the head rather than at zero and the outflow stops being
-    // driven by a step in pressure that is not physically there.
     inline float phiFace(BoundarySide side, int k) const {
         if (!bodyGravity)
             return 0.0f;
@@ -272,11 +246,6 @@ private:
         return 0.0f;
     }
 
-    // The pressure the outside of an open side is held at, in whatever units
-    // p is carrying. At one density that is the kinematic head and this is
-    // phiFace unchanged; at two, p is in pascals, so the head is weighed by the
-    // density actually sitting against that face - the light fluid does not
-    // hold up the same column the heavy one does.
     float phiOutside(BoundarySide side, int k) const;
 
     // Inline index helpers (for readability)
