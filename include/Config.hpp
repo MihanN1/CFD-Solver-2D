@@ -38,6 +38,53 @@ enum class TimeScheme {
     RK3
 };
 
+// How the phase fraction is carried. None of these reconstruct the interface
+// the way PLIC does; they are algebraic, which is a fraction of the cost and
+// the reason a two-phase run is not ten times slower than a single-phase one.
+// upwind smears the interface and is here as the thing the other two are
+// measured against, hric compresses it by steering towards downwind where the
+// interface is aligned with the flow, cicsam does the same with a smooth
+// weighting that behaves better when it is not.
+enum class VofScheme {
+    Upwind,
+    Hric,
+    Cicsam
+};
+
+// What is in the domain when the run starts. layer fills everything below
+// phaseLevel with fluid 1, drop puts a circle of fluid 1 in a domain of fluid
+// 2, column is the dam break: a block of fluid 1 in the low corner. file reads
+// one value per cell from a text file, which is what the UI paints.
+enum class PhaseInit {
+    Layer,
+    Drop,
+    Column,
+    File
+};
+
+bool parseVofScheme(const std::string& text, VofScheme& out, std::string& error);
+bool parsePhaseInit(const std::string& text, PhaseInit& out, std::string& error);
+const char* vofSchemeName(VofScheme scheme);
+const char* phaseInitName(PhaseInit init);
+
+// One region that pushes fluid into the domain from the inside rather than
+// through a side. rate is the volume flow per unit area of the region per
+// second, so it does not change meaning when the region is resized; the
+// direction is where the fluid is aimed, and phase is which fluid comes out.
+struct FlowSource {
+    float x = 0.0f, y = 0.0f;
+    float radius = 0.0f;
+    float rate = 0.0f;
+    float angle = 0.0f;   // degrees, 0 = +x, counter-clockwise
+    float phase = 1.0f;
+};
+
+bool parseSources(const std::string& text,
+                  std::vector<FlowSource>& out,
+                  std::string& error);
+
+std::string sourcesHelp();
+
 // One geometry file and where it sits. An unplaced profile keeps the old
 // behaviour: centred in the domain at a fifth of its smaller side.
 struct Profile {
@@ -111,6 +158,26 @@ struct Config {
     float gravityAccel = 9.81f;   // m/s^2
     float gravityAngle = 0.0f;    // degrees, clockwise, 0 = down
     GravityMode gravityMode = GravityMode::Reduced;
+
+    // Phases. 1 is every run written before this existed: one density, one
+    // viscosity, ro and nu, and not one line of the phase code runs. 2 turns on
+    // the phase fraction, and then rho1/nu1 and rho2/nu2 are what the two
+    // fluids are and ro/nu are ignored.
+    int phases = 1;
+    float rho1 = 1000.0f;   // kg/m^3, the fluid the initial shape is made of
+    float rho2 = 1.225f;    // kg/m^3, what fills the rest of the domain
+    float nu1 = 1e-6f;      // m^2/s
+    float nu2 = 1.5e-5f;    // m^2/s
+    PhaseInit phaseInit = PhaseInit::Layer;
+    float phaseLevel = 0.5f;    // layer height / drop radius, fraction of the domain
+    float phaseX = 0.5f;        // drop or column centre, fraction of Lx
+    float phaseY = 0.5f;        // drop centre, fraction of Ly
+    std::string initialPhaseFile = "";
+    VofScheme vofScheme = VofScheme::Hric;
+
+    // Fluid pushed in from inside the domain rather than through a side.
+    // Empty is every run so far.
+    std::string sources = "";
 
     // Numerics
     ConvectionScheme convection = ConvectionScheme::Upwind;
@@ -207,6 +274,14 @@ struct Config {
     // the way to ask for a domain with no body in it, which is what a cavity
     // wants and what there was no way to say before.
     bool emptyDomain() const;
+
+    // Two fluids share the domain, which is what turns on the phase field, the
+    // variable coefficients in the projection and the body force formulation
+    // of gravity. Written out once here so nothing has to remember that
+    // "phases > 1" is the condition.
+    bool multiphase() const { return phases > 1; }
+
+    std::vector<FlowSource> resolvedSources() const;
 
     std::string serialize() const;
 };

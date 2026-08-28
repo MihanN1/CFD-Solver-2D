@@ -108,10 +108,14 @@ struct DomainExtent {
 // balances itself and this only has to catch the sets that cannot: fluid
 // pushed into a domain with nothing open, and an inlet band too narrow to
 // cover a single cell. Both run to the end producing nonsense otherwise.
+// extraInflow is whatever else is being pushed in that the sides know nothing
+// about - a flow source inside the domain - in the same units, m^2/s. It has
+// to leave the same way an inlet's does.
 bool checkBoundaryMassBalance(const BoundarySet& sides,
                               float defaultSpeed,
                               const DomainExtent& domain,
                               const std::vector<int>& solid,
-                              std::string& error);
+                              std::string& error,
+                              double extraInflow = 0.0);
 
 std::string boundaryHelp();

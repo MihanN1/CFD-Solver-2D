@@ -388,10 +388,15 @@ int main(int argc, char** argv) {
     }
     mesh.printInfo();
 
+    double sourceInflow = 0.0;
+    for (const FlowSource& source : cfg.resolvedSources())
+        sourceInflow += static_cast<double>(source.rate) * 2.0 *
+                        3.14159265358979 * source.radius;
+
     std::string balanceError;
     if (!checkBoundaryMassBalance(cfg.boundaries, cfg.U0,
                                   DomainExtent{cfg.Lx, cfg.Ly, cfg.nx, cfg.ny},
-                                  mesh.solid, balanceError)) {
+                                  mesh.solid, balanceError, sourceInflow)) {
         std::cerr << "\n!!! " << balanceError << "\n\nNothing has been "
                      "started.\n";
         return 1;

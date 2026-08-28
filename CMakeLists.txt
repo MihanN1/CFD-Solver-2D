@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(CFD-Solver-2D
-    VERSION 0.4.0
+    VERSION 0.5.0
     LANGUAGES CXX
 )
 
@@ -174,6 +174,7 @@ set(CFD_CORE_SOURCES
     src/AppPaths.cpp
     src/Boundary.cpp
     src/Config.cpp
+    src/Phase.cpp
     src/Restart.cpp
     src/Mesh.cpp
     src/Solver.cpp
@@ -486,6 +487,7 @@ if(BUILD_TESTING)
         ChannelTests
         CavityTests
         InletTests
+        MultiphaseTests
     )
     foreach(test ${CFD_TESTS})
         add_executable(${test} "tests/${test}.cpp")
