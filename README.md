@@ -150,6 +150,7 @@ is not there:
 | `bcLeft` … `inletProfile` | `bcBottom` |
 | `caseType` `lidSpeed` `steadyTolerance` | `caseType` |
 | `phases` `rho1` `nu1` `rho2` `nu2` `phaseInit` … `sources` | `vofScheme` |
+| `mixing` `diffusivity` `surfaceTension` `contactAngle` | `surfaceTension` |
 
 `bc<Side>Speed` is only written when that side is a `movingWall` or the speed is
 not zero. Writing `bcLeftSpeed=0` for an inlet would tell the solver a standstill
@@ -172,6 +173,25 @@ under it. Zero, the default, runs the whole of **Total time**.
 **Phases** turns the FLUIDS group into two fluids with their own densities and
 viscosities, and the setup view into something you can paint on. `phases=1`
 sends none of it.
+
+**Surface tension** (in mN/m, because that is how everybody quotes it - water
+against air is 72) and **Contact angle** are the last two rows of the FLUIDS
+group, held back on the solver having the keys at all - a 0.5 solver is asked
+exactly what it was asked before. Zero tension is off. The angle is measured
+inside fluid 1 at a wall: under 90 it wets the wall and climbs, over 90 it
+beads off.
+
+**Mixing** decides whether there is a surface at all. `immiscible` is oil and
+water and is what every run so far did. `miscible` is ink and water: no
+interface, the interface scheme is not read, the composition spreads by
+**Diffusivity** instead - and a surface tension on top of that is refused
+rather than quietly ignored, because there is nothing for it to pull on.
+
+Surface tension is not free in wall clock either. The step size it forces is
+`sqrt((rho1+rho2)*d^3/(4*pi*sigma))`, it usually binds well before the CFL
+number does, and it falls as `d^1.5`, so halving the cell size costs about
+three times the steps. The solver says so on the first step rather than
+appearing to hang.
 
 **Paint** replaces the 3D preview with the solver's own grid, one pixel per
 cell, and paints the initial volume fraction straight onto it. Left button

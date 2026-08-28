@@ -182,10 +182,6 @@ void drawThickLine(
     target.draw(segment);
 }
 
-// The panel is one list of rows and everything about it - the layout, the
-// scrolling, the group headers, the config file - works off that list by
-// index. So a dropdown and a text box are kinds of row rather than new
-// widgets: nothing else in here has to learn they exist.
 enum class ControlKind {
     Number,
     Choice,
@@ -324,9 +320,6 @@ struct Slider {
 
     bool setFromText(const std::string& input, std::string& error) {
         if (kind == ControlKind::Text) {
-            // The solver owns the grammar of these, and says exactly what is
-            // wrong with a line it will not take. Refusing it here as well
-            // would only mean two opinions about the same string.
             if (input.find_first_of("\r\n") != std::string::npos) {
                 error = "this has to stay on one line";
                 return false;
@@ -862,6 +855,10 @@ enum ParameterIndex : std::size_t {
     PhaseSpotX,
     PhaseSpotY,
     VofSchemeKind,
+    MixingKindRow,
+    Diffusivity,
+    SurfaceTension,
+    ContactAngle,
     SourceLine,
     GravityEnabled,
     GravityAccel,
@@ -937,7 +934,8 @@ const char* parameterKey(std::size_t index) {
     static constexpr std::array<const char*, ParameterCount> keys{{
         "U0", "nu", "ro",
         "phases", "rho1", "nu1", "rho2", "nu2",
-        "phaseInit", "phaseLevel", "phaseX", "phaseY", "vofScheme", "sources",
+        "phaseInit", "phaseLevel", "phaseX", "phaseY", "vofScheme",
+        "mixing", "diffusivity", "surfaceTension", "contactAngle", "sources",
         "gravityEnabled", "gravityAccel", "gravityAngle", "gravityMode",
         "sliceAngleX", "sliceAngleZ", "sliceRotation", "profiles",
         "caseType", "lidSpeed",
@@ -982,6 +980,14 @@ std::string parameterHelp(std::size_t index) {
         return "Where the drop sits, or how wide the column is, as fractions of Lx and Ly.";
     case VofSchemeKind:
         return "How the interface is carried. hric and cicsam both push it back together every step; upwind smears it over ten cells and is here to be compared against.";
+    case MixingKindRow:
+        return "mixing: immiscible is oil and water, a surface between them that surface tension can pull on. miscible is ink and water, no surface at all - the composition spreads by diffusion instead and the interface scheme above is not read.";
+    case Diffusivity:
+        return "diffusivity: how fast one fluid spreads through the other, m2/s, and only read when they mix. Salt in water is about 1e-9, a gas into another gas about 1e-5.";
+    case SurfaceTension:
+        return "surfaceTension: sigma, in mN/m because that is how everybody quotes it. Water against air is 72, mercury is 485, a soap film is about 25. Zero is off and the whole curvature pass is skipped. It costs time steps as well as time: dt has to stay under sqrt((rho1+rho2)*dx^3/(4*pi*sigma)) or the smallest capillary wave the grid can hold blows up, and the solver says so on the first step.";
+    case ContactAngle:
+        return "contactAngle: degrees, measured inside fluid 1, at a solid wall. 90 is a wall neither fluid prefers, under 90 means fluid 1 wets it and creeps up, over 90 means it beads off.";
     case SourceLine:
         return "sources, in the solver's own grammar: x=0.5,y=0.2,r=0.05,rate=2,angle=90,phase=1 - a disc inside the domain that pushes fluid out of itself. Needs an outlet like an inlet does.";
     case GravityEnabled:
@@ -1701,12 +1707,13 @@ struct SolverExecutableInfo {
     bool supportsMultipleContours = false;  // more than one closed loop
     bool supportsGravity = false;           // gravityEnabled= Accel= Angle=
     bool supportsWallMotion = false;        // wallMotion=
-    bool supportsProfiles = false;          // profiles=
-    bool supportsExtraFields = false;       // extraFields=
-    bool supportsSchemes = false;           // convection= limiter= timeScheme=
-    bool supportsBoundaries = false;        // bcLeft= .. inletProfile=
-    bool supportsCase = false;              // caseType= lidSpeed= steadyTolerance=
-    bool supportsPhases = false;            // phases= rho1= .. sources=
+    bool supportsProfiles = false;
+    bool supportsExtraFields = false;
+    bool supportsSchemes = false;
+    bool supportsBoundaries = false;
+    bool supportsCase = false;
+    bool supportsPhases = false;
+    bool supportsTension = false;
     std::string version = "unknown";
     std::string features;
     std::string build = "Unknown build";
@@ -1894,6 +1901,7 @@ SolverExecutableInfo inspectSolverExecutable(
     info.supportsBoundaries = binaryContains(executable, "bcBottom");
     info.supportsCase = binaryContains(executable, "caseType");
     info.supportsPhases = binaryContains(executable, "vofScheme");
+    info.supportsTension = binaryContains(executable, "surfaceTension");
     info.supportsContinuation =
         info.version != "unknown" &&
         compareSolverVersions(info.version, "0.1.1") >= 0;
@@ -2011,6 +2019,11 @@ public:
               Slider{"Start y", "", 0.0, 1.0, 0.5, false, false},
               Slider{"Interface scheme", "", 0.0, 2.0, 1.0, true, false, false, 0.0,
                      ControlKind::Choice, {"upwind", "hric", "cicsam"}},
+              Slider{"Mixing", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"immiscible", "miscible"}},
+              Slider{"Diffusivity", "m2/s", 0.0, 1.0, 1e-6, false, true},
+              Slider{"Surface tension", "mN/m", 0.0, 1000.0, 0.0, false, false},
+              Slider{"Contact angle", "deg", 0.0, 180.0, 90.0, false, false},
               Slider{"Flow sources", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
                      ControlKind::Text},
               Slider{"Gravity", "", 0.0, 1.0, 0.0, true, false, true},
@@ -2345,13 +2358,7 @@ private:
             }
         };
 
-        // A row of paint controls along the bottom of the setup view. Off
-        // screen in every sense while the run is one phase: the button that
-        // turns them on is not drawn either.
         {
-            // The toggle lives at the top of the view, where nothing else does.
-            // The rest of the row only exists while painting is on, and the
-            // slice controls that share the bottom edge are not drawn then.
             paintButton_.bounds = {
                 {setupViewport_.position.x + 12.0f,
                  setupViewport_.position.y + 12.0f},
@@ -2431,11 +2438,7 @@ private:
             resultCatalogFuture_.valid() || !inFlightFrames_.empty();
         const bool solverAvailable =
             solverInfo_.valid && solverInfo_.recognized;
-        // A model is no longer the only thing a run can be made of: an empty
-        // domain is a case in its own right and a painted phase field is a
-        // whole initial condition. The button stayed grey through both of
-        // those, which made "the profile is optional" true everywhere except
-        // where it mattered.
+
         const bool haveSomethingToRun =
             !geometry_.empty() || solverInfo_.supportsCase;
         generateButton_.enabled =
@@ -2750,8 +2753,6 @@ private:
                         next = index + 1;
             }
             if (next >= names.size()) {
-                // Round the list and back to pressure, so the button is a way
-                // out of the extra fields as well as a way in.
                 resultQuantity_ = ResultQuantity::Pressure;
                 activeScalarName_.clear();
             } else {
@@ -3480,10 +3481,7 @@ private:
         config.saveInterval =
             static_cast<int>(std::lround(sliders_[SaveInterval].value));
         config.useCuda = sliders_[UseCuda].value >= 0.5;
-        // Nothing loaded is a real answer once the solver understands it: a
-        // lid driven cavity has no model in it and never wanted one. Older
-        // solvers have no word for that, so they keep getting the empty path
-        // and the same "load a model first" they always got.
+
         config.geometryFile =
             (geometry_.triangles().empty() && solverInfo_.supportsCase)
                 ? std::filesystem::path("empty")
@@ -3537,6 +3535,11 @@ private:
         config.phaseX = sliders_[PhaseSpotX].value;
         config.phaseY = sliders_[PhaseSpotY].value;
         config.vofScheme = sliders_[VofSchemeKind].choice();
+        config.supportsTension = solverInfo_.supportsTension;
+        config.mixing = sliders_[MixingKindRow].choice();
+        config.diffusivity = sliders_[Diffusivity].value;
+        config.surfaceTension = sliders_[SurfaceTension].value * 1e-3;
+        config.contactAngle = sliders_[ContactAngle].value;
         config.sources = sliders_[SourceLine].text;
         config.initialPhaseFile.clear();
 
@@ -3562,7 +3565,7 @@ private:
 
     std::optional<std::size_t> sliderForValidationError(
         const std::string& error) const {
-        const std::array<std::pair<const char*, ParameterIndex>, 18> mappings{{
+        const std::array<std::pair<const char*, ParameterIndex>, 22> mappings{{
             {"Lx", DomainX}, {"Ly", DomainY}, {"nx", CellsX}, {"ny", CellsY},
             {"U0", WindSpeed}, {"nu", Viscosity}, {"ro", Density},
             {"CFL", Cfl}, {"totalTime", TotalTime},
@@ -3570,7 +3573,9 @@ private:
             {"omega", CoarseSorOmega}, {"smootherOmega", SmootherOmega},
             {"mgIterations", MgIterations}, {"mgTolerance", MgTolerance},
             {"mgMinCoarseSize", MgMinCoarseSize},
-            {"saveInterval", SaveInterval}, {"useCuda", UseCuda}
+            {"saveInterval", SaveInterval}, {"useCuda", UseCuda},
+            {"mixing", MixingKindRow}, {"diffusivity", Diffusivity},
+            {"surfaceTension", SurfaceTension}, {"contactAngle", ContactAngle}
         }};
         for (const auto& mapping : mappings) {
             if (error.rfind(mapping.first, 0) == 0) {
@@ -3786,8 +3791,6 @@ private:
                 continue;
             }
             if (slider.kind == ControlKind::Choice) {
-                // A file written by a newer build can name an option this one
-                // does not have. Keeping the default beats refusing the file.
                 slider.setChoice(found->second);
                 continue;
             }
@@ -4051,9 +4054,6 @@ private:
         invalidSlider_.reset();
         applyCacheBudget();
 
-        // An empty domain has no section to cut, so the mask, the contour
-        // warning and the adapter are all skipped rather than asked to produce
-        // something out of nothing.
         const bool emptyDomain = requestedConfig.geometryFile == "empty";
 
         MaskResult mask;
@@ -4179,10 +4179,6 @@ private:
             return;
         }
 
-        // An adapter with no contours in it makes the solver fall back to its
-        // verification circle, which is how a lid driven cavity ends up with a
-        // cylinder sitting in the middle of it. The word empty is the solver
-        // saying outright that there is nothing there.
         const std::filesystem::path adapterFile =
             runDirectory / "section-adapter.obj";
         if (!emptyDomain &&
@@ -4195,9 +4191,6 @@ private:
         solverConfig.geometryFile =
             emptyDomain ? std::filesystem::path("empty") : adapterFile;
 
-        // What was painted goes next to the run rather than into a temporary
-        // file somewhere, so the folder holding the frames also holds the
-        // thing they started from.
         ensurePaintField();
         if (requestedConfig.phases > 1 && paintFieldUsed()) {
             const std::filesystem::path phaseFile =
@@ -4338,8 +4331,7 @@ private:
         config.restartFile = frame.sourcePath;
         config.totalTime = target;
         config.addTime = addTime;
-        // The frame carries its own wallMotion, so an empty wall line says
-        // nothing rather than overwriting it.
+
         if (config.wallMotion.empty())
             config.supportsWallMotion = false;
         if (config.profiles.empty())
@@ -5321,7 +5313,6 @@ private:
         }
     }
 
-    // ---- the paint canvas -------------------------------------------------
 
     bool phasesOn() const {
         return solverInfo_.supportsPhases &&
@@ -5334,9 +5325,7 @@ private:
         if (nx == paintNx_ && ny == paintNy_ &&
             paintField_.size() == static_cast<std::size_t>(nx) * ny)
             return;
-        // The grid changed under the painting. Nothing sensible can be said
-        // about the old cells, so it starts again rather than being stretched
-        // into something nobody drew.
+
         paintNx_ = nx;
         paintNy_ = ny;
         paintField_.assign(static_cast<std::size_t>(std::max(nx, 1)) *
@@ -5352,8 +5341,6 @@ private:
         return false;
     }
 
-    // The domain drawn to scale inside the viewport, so a 2:1 box looks like
-    // one and a cell is square on screen when it is square in the solver.
     sf::FloatRect paintCanvasRect() const {
         sf::FloatRect area = setupViewport_;
         area.position.x += 12.0f;
@@ -5381,7 +5368,7 @@ private:
         if (paintNx_ < 1 || paintNy_ < 1 || !canvas.contains(point))
             return false;
         const float fx = (point.x - canvas.position.x) / canvas.size.x;
-        // Screen y runs down and the solver's j runs up.
+
         const float fy = 1.0f - (point.y - canvas.position.y) / canvas.size.y;
         outI = std::min(paintNx_ - 1,
                         std::max(0, static_cast<int>(fx * paintNx_)));
@@ -5398,9 +5385,7 @@ private:
             addSourceAt(ci, cj);
             return;
         }
-        // Two buttons, two fluids, and which is which follows the row that is
-        // selected: the right button always lays down the other one, so a
-        // stroke can be taken back without reaching for anything.
+
         const bool wantSecond = (paintTarget_ == 1) != secondary;
         const float value = wantSecond ? 0.0f : 1.0f;
         const int r = std::max(0, paintBrush_);
@@ -5418,8 +5403,6 @@ private:
         }
     }
 
-    // Painting a source writes a line in the solver's own grammar into the
-    // sources row rather than inventing a second way of saying the same thing.
     void addSourceAt(int ci, int cj) {
         const double dx = sliders_[DomainX].value / std::max(1, paintNx_);
         const double dy = sliders_[DomainY].value / std::max(1, paintNy_);
@@ -5506,7 +5489,6 @@ private:
         frame.setOutlineThickness(1.0f);
         window_->draw(frame);
 
-        // The brush, where it is about to land.
         int ci = 0, cj = 0;
         if (paintCellAt(lastMouse_, ci, cj)) {
             const float cellW = canvas.size.x / std::max(1, paintNx_);
@@ -5527,12 +5509,10 @@ private:
         drawPhaseLegend(canvas);
     }
 
-    // Two fluids, two hues, and how much of the cell is fluid 1 read off the
-    // strength of the colour rather than a second axis nobody can see.
     static sf::Color phaseColour(float fraction) {
         const float t = std::min(1.0f, std::max(0.0f, fraction));
-        const sf::Color light(38, 44, 58);      // fluid 2, the ambient one
-        const sf::Color heavy(64, 156, 255);    // fluid 1
+        const sf::Color light(38, 44, 58);
+        const sf::Color heavy(64, 156, 255);
         return sf::Color(
             static_cast<std::uint8_t>(light.r + (heavy.r - light.r) * t),
             static_cast<std::uint8_t>(light.g + (heavy.g - light.g) * t),
@@ -6089,9 +6069,6 @@ private:
             return {};
         }
         if (resultQuantity_ == ResultQuantity::Scalar) {
-            // An extra field has no series range: the run may not have carried
-            // it in every frame, and stretching one frame's scale over a field
-            // that was not there is worse than scaling each frame on its own.
             const auto trimmed =
                 activeFrame_->scalarTrimmedRanges.find(activeScalarName_);
             if (trimmedRange_ &&
@@ -6210,11 +6187,7 @@ private:
             const bool rangeAvailable = range.available;
             const double rangeMinimum = range.minimum;
             const double rangeMaximum = range.maximum;
-            // The phase field is not a measurement with an interesting range,
-            // it is a mixture: 0 is one fluid, 1 is the other, and what is
-            // worth seeing is where the line between them is. A general
-            // purpose colour ramp turns that into a rainbow with the
-            // interface somewhere in the green.
+
             const bool asPhase =
                 resultQuantity_ == ResultQuantity::Scalar &&
                 activeScalarName_ == "phase";
@@ -6482,10 +6455,7 @@ private:
                     : scalarColor(normalized, 0.0, 1.0));
             window_->draw(rectangle);
         }
-        // The bar reads 0 to 1 whatever the frame happens to hold, because a
-        // fraction of fluid 1 is a fraction of fluid 1 and rescaling it to the
-        // extremes that turned up in this frame would make a domain of pure
-        // water look like a domain of half water.
+
         if (resultQuantity_ == ResultQuantity::Scalar &&
             activeScalarName_ == "phase") {
             window_->draw(makeText(
@@ -6773,9 +6743,7 @@ private:
 
     DisplayMode mode_ = DisplayMode::Setup;
     ResultQuantity resultQuantity_ = ResultQuantity::Pressure;
-    // Whatever else the frames turned out to carry. The view knows the names
-    // only because the frames named them, so a field the solver learns to
-    // write later shows up here without this file changing again.
+
     std::string activeScalarName_;
     std::vector<std::uint8_t> scalarFinite_;
     Button setupTab_{"Setup"};
@@ -6821,13 +6789,9 @@ private:
 
     float setupZoom_ = 1.0f;
 
-    // ---- painting the initial phase field --------------------------------
-    // One value per cell of the solver's own grid, which is why the canvas is
-    // nx by ny and not the window: what is painted is exactly what the solver
-    // starts from, with no resampling in between to argue about.
     bool painting_ = false;
     int paintBrush_ = 3;
-    int paintTarget_ = 0;   // 0 = fluid 1, 1 = fluid 2, 2 = a source
+    int paintTarget_ = 0;
     int paintNx_ = 0;
     int paintNy_ = 0;
     std::vector<float> paintField_;

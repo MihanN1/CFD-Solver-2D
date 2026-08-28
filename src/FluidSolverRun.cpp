@@ -77,9 +77,7 @@ bool validateGeometry(const std::filesystem::path& filename,
     if (pathText.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "geometryFile must not contain CR or LF");
     }
-    // The two words the solver reads as "there is nothing in the domain".
-    // empty leaves it empty; none is the older spelling and puts the
-    // verification circle in the middle, which is a body like any other.
+
     {
         std::string lowered = pathText;
         std::transform(lowered.begin(), lowered.end(), lowered.begin(),
@@ -243,6 +241,24 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                                    "fractions of the domain, so they live "
                                    "between 0 and 1");
         }
+        if (config.supportsTension) {
+            if (config.mixing != "immiscible" && config.mixing != "miscible")
+                return fail(error, "mixing is immiscible or miscible");
+            if (!(config.diffusivity >= 0.0) ||
+                !std::isfinite(config.diffusivity))
+                return fail(error, "diffusivity cannot be negative");
+            if (!(config.surfaceTension >= 0.0) ||
+                !std::isfinite(config.surfaceTension))
+                return fail(error, "surfaceTension cannot be negative");
+            if (!(config.contactAngle >= 0.0) ||
+                !(config.contactAngle <= 180.0))
+                return fail(error, "contactAngle is measured inside fluid 1 "
+                                   "and lives between 0 and 180 degrees");
+            if (config.mixing == "miscible" && config.surfaceTension > 0.0)
+                return fail(error, "fluids that mix have no surface for "
+                                   "tension to pull on: set surfaceTension to "
+                                   "zero, or make them immiscible");
+        }
         if (!config.gravityEnabled)
             return fail(error, "two fluids with gravity off never separate: "
                                "the density difference is the only thing that "
@@ -273,10 +289,6 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                            "inlet occupies is empty");
     }
     {
-        // A closed box is a perfectly good case - it is what a lid driven
-        // cavity is - and the solver knows its pressure is only defined up to
-        // a constant. Fluid pushed into one that cannot leave is not: that is
-        // a mass balance nothing can satisfy.
         bool anyOutlet = false;
         bool anyInlet = false;
         for (int side = 0; side < 4; ++side) {
@@ -287,8 +299,7 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
             if (!std::isfinite(config.boundarySpeed[side]))
                 return fail(error, "boundary speeds must be finite");
         }
-        // A source pushes fluid in from the middle of the domain and needs
-        // somewhere for it to go exactly as an inlet does.
+
         if (!config.sources.empty())
             anyInlet = true;
         if (config.supportsBoundaries && config.caseType != "cavity" &&
@@ -422,8 +433,16 @@ bool buildFluidSolverArguments(
             arguments.push_back("nu1=" + serializeDouble(config.nu1));
             arguments.push_back("nu2=" + serializeDouble(config.nu2));
             arguments.push_back("vofScheme=" + config.vofScheme);
-            // A painted field wins over any of the built in shapes: the point
-            // of painting one is that it is not a layer or a circle.
+            if (config.supportsTension) {
+                arguments.push_back("mixing=" + config.mixing);
+                arguments.push_back("diffusivity=" +
+                                    serializeDouble(config.diffusivity));
+                arguments.push_back("surfaceTension=" +
+                                    serializeDouble(config.surfaceTension));
+                arguments.push_back("contactAngle=" +
+                                    serializeDouble(config.contactAngle));
+            }
+
             if (!config.initialPhaseFile.empty()) {
                 arguments.push_back("phaseInit=file");
                 arguments.push_back("initialPhaseFile=" +
@@ -453,10 +472,7 @@ bool buildFluidSolverArguments(
         for (int side = 0; side < 4; ++side) {
             arguments.push_back(std::string(kKind[side]) + "=" +
                                 config.boundaryKind[side]);
-            // A speed is only named when it means something. Writing
-            // "bcLeftSpeed=0" for an inlet would tell the solver that a
-            // standstill was asked for, and an inlet at U0 would come out
-            // stopped - which is exactly how that goes wrong.
+
             const bool movingWall = config.boundaryKind[side] == "movingWall";
             if (movingWall || config.boundarySpeed[side] != 0.0)
                 arguments.push_back(std::string(kSpeed[side]) + "=" +

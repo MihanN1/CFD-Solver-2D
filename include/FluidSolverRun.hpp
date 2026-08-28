@@ -74,10 +74,6 @@ struct FluidSolverRunConfig {
     // which is what the solver does when the key is absent.
     std::string wallMotion;
 
-    // ---- everything the fundamentals branch added -------------------------
-    // Each block is held back the same way: the UI looks for the key name in
-    // the executable and only puts it on the line when it is there, so a newer
-    // UI still drives an older solver instead of stopping it on argument one.
     bool supportsProfiles = false;
     std::string profiles;
 
@@ -90,20 +86,11 @@ struct FluidSolverRunConfig {
     std::string timeScheme = "euler";
     std::string gravityMode = "reduced";
 
-    // caseType is a preset: cavity replaces all four sides with its own, so
-    // the bc keys are left off the line entirely when it is picked. Sending
-    // both would mean the preset ran and was then overwritten by whatever the
-    // boundary rows happened to say, which is not what picking a preset means.
     bool supportsCase = false;
     std::string caseType = "channel";
     double lidSpeed = 1.0;
     double steadyTolerance = 0.0;
 
-    // ---- two fluids -------------------------------------------------------
-    // phases = 1 sends none of this and the solver runs exactly as it did.
-    // At 2 it takes rho1/nu1 and rho2/nu2 instead of ro and nu, and the
-    // initial shape is either one of the three built in ones or a field
-    // painted here and written beside the run.
     bool supportsPhases = false;
     int phases = 1;
     double rho1 = 1000.0;
@@ -115,13 +102,18 @@ struct FluidSolverRunConfig {
     double phaseX = 0.5;
     double phaseY = 0.5;
     std::string vofScheme = "hric";
+
+    bool supportsTension = false;
+    std::string mixing = "immiscible";
+    double diffusivity = 1e-6;
+    double surfaceTension = 0.0;
+    double contactAngle = 90.0;
     std::filesystem::path initialPhaseFile;
-    // "x=0.5,y=0.2,r=0.05,rate=2,angle=90,phase=1;..." in the solver's own
-    // grammar, handed over untouched.
+
     std::string sources;
 
     bool supportsBoundaries = false;
-    // left, right, bottom, top
+
     std::string boundaryKind[4] = {"inlet", "outlet", "slip", "slip"};
     double boundarySpeed[4] = {0.0, 0.0, 0.0, 0.0};
     double inletFrom = 0.0;

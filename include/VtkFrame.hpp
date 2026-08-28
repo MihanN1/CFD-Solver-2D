@@ -66,10 +66,7 @@ struct VtkFrame {
     // onto three shades; these are what the view falls back on instead.
     DataRange pressureTrimmedRange;
     DataRange velocityMagnitudeTrimmedRange;
-    // Every other one-float-per-cell array the frame turned out to carry, in
-    // the order it carried them. pressure, solid and velocity stay where they
-    // are: they are read on every pixel of every redraw and have no business
-    // going through a hash lookup to get there.
+
     std::vector<std::string> scalarNames;
     std::unordered_map<std::string, std::vector<float>> scalars;
     std::unordered_map<std::string, DataRange> scalarRanges;

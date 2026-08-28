@@ -136,7 +136,6 @@ int main() {
     }
     config.gravityAccel = 9.81;
 
-    // Sides, then the case preset that replaces all of them.
     config.supportsBoundaries = true;
     config.boundaryKind[0] = "inlet";
     config.boundaryKind[3] = "movingWall";
@@ -154,8 +153,7 @@ int main() {
         !hasPrefix(arguments, "inletFrom=")) {
         return fail("boundary arguments are incomplete");
     }
-    // The trap from the last branch: a zero speed written out for an inlet
-    // tells the solver a standstill was asked for.
+
     if (hasPrefix(arguments, "bcLeftSpeed=")) {
         return fail("a zero inlet speed was written out again");
     }
@@ -183,15 +181,12 @@ int main() {
         !contains(arguments, "lidSpeed=1.5")) {
         return fail("cavity arguments are incomplete");
     }
-    // The preset owns all four sides. Sending the boundary rows after it would
-    // undo it and quietly give back a channel.
+
     if (hasPrefix(arguments, "bcLeft=") || hasPrefix(arguments, "bcTop=") ||
         hasPrefix(arguments, "inletFrom=")) {
         return fail("the cavity preset was overwritten by the boundary rows");
     }
 
-    // Four walls and no outlet is what a cavity is, and only a channel has to
-    // give the fluid somewhere to go.
     for (int side = 0; side < 4; ++side) {
         config.boundaryKind[side] = "wall";
     }
@@ -216,8 +211,6 @@ int main() {
     }
     config.caseType = "cavity";
 
-    // An empty domain is a real answer to "what geometry", and the only way
-    // the UI can ask for a cavity with nothing floating in the middle of it.
     config.geometryFile = "empty";
     if (!maskui::validateFluidSolverRunConfig(config, error)) {
         return fail("geometryFile=empty was refused: " + error);
@@ -234,7 +227,6 @@ int main() {
     config.boundaryKind[0] = "inlet";
     config.boundaryKind[1] = "outlet";
 
-    // Two fluids, and everything that only exists at two fluids.
     config.supportsPhases = true;
     config.phases = 2;
     config.gravityEnabled = true;
@@ -250,8 +242,6 @@ int main() {
         return fail("two phase arguments are incomplete");
     }
 
-    // A painted field is not one of the three built in shapes and has to win
-    // over whichever one the row happens to be showing.
     config.initialPhaseFile = root / "initial-phase.txt";
     if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
         return fail("painted phase arguments failed: " + error);
@@ -282,8 +272,49 @@ int main() {
     }
     config.vofScheme = "hric";
 
-    // A source pushes fluid in from inside and needs an outlet exactly as an
-    // inlet does.
+    if (hasPrefix(arguments, "surfaceTension=") ||
+        hasPrefix(arguments, "mixing=")) {
+        return fail("tension keys were sent to a solver that has no idea what "
+                    "they are");
+    }
+    config.supportsTension = true;
+    config.surfaceTension = 0.0625;
+    config.contactAngle = 40.0;
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("tension arguments failed: " + error);
+    }
+    if (!contains(arguments, "surfaceTension=0.0625") ||
+        !contains(arguments, "contactAngle=40") ||
+        !contains(arguments, "mixing=immiscible") ||
+        !hasPrefix(arguments, "diffusivity=")) {
+        return fail("the tension block is incomplete");
+    }
+    config.surfaceTension = -1.0;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a negative surface tension was accepted");
+    }
+    config.surfaceTension = 0.0625;
+    config.contactAngle = 200.0;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a contact angle past 180 degrees was accepted");
+    }
+    config.contactAngle = 90.0;
+    config.mixing = "miscible";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("fluids that mix were given a surface to pull on");
+    }
+    config.surfaceTension = 0.0;
+    if (!maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("miscible with no tension was refused: " + error);
+    }
+    config.diffusivity = -1.0;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a negative diffusivity was accepted");
+    }
+    config.diffusivity = 1e-6;
+    config.mixing = "immiscible";
+    config.supportsTension = false;
+
     config.sources = "x=0.5,y=0.2,r=0.05,rate=2,angle=90";
     if (!maskui::validateFluidSolverRunConfig(config, error)) {
         return fail("a source with an outlet was refused: " + error);

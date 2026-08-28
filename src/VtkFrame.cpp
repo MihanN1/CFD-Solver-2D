@@ -941,9 +941,6 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                 hasSolid = true;
             } else if (type == "float" && componentCount == 1 &&
                        frame.scalars.find(name) == frame.scalars.end()) {
-                // Anything else the solver decided to write. The reader does
-                // not need to know what it means, only that it is one float a
-                // cell, and the view lists whatever turned up.
                 if (!allRequiredArraysPresent(
                         hasPressure, hasSolid, hasVelocity)) {
                     throw VtkParseError(
@@ -1085,12 +1082,6 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                         hasRestartConfig = true;
                         frame.restart.hasConfigText = true;
                     } else if (name == "facePack") {
-                        // The face velocities as what is left of them once the
-                        // cell averages have predicted them - a quarter of the
-                        // space the three plain arrays took, and what every
-                        // frame has carried since. The UI never decodes it; it
-                        // only has to know the frame can be continued, and the
-                        // solver is the one that reads it back.
                         hasFacePack = componentCount == 1 && !bytes.empty();
                     }
                 } else if (type == "float" || type == "int") {
@@ -1127,10 +1118,6 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
             "VTK frame is missing pressure, solid, or velocity");
     }
 
-    // Two shapes are continuable. The old one spelled the state out as three
-    // plain arrays; the one every current frame uses packs the faces into a
-    // single block and drops pRaw, because the pressure array already holds
-    // what it repeated.
     const bool legacyArraysMatch =
         frame.nx < std::numeric_limits<std::size_t>::max() &&
         hasUFace && hasVFace && hasPRaw &&
@@ -1314,8 +1301,6 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
         frame.pressureTrimmedRange = trimmed(pressureSamples);
         frame.velocityMagnitudeTrimmedRange = trimmed(magnitudeSamples);
 
-        // Same two ranges for whatever else the frame carried. A colour scale
-        // needs them and the view has no idea in advance what it is scaling.
         for (const std::string& name : frame.scalarNames) {
             const std::vector<float>& values = frame.scalars.at(name);
             DataRange full;
