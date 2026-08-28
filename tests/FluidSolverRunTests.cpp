@@ -227,6 +227,74 @@ int main() {
         return fail("a geometry file that does not exist was accepted");
     }
     config.geometryFile = geometry;
+    config.caseType = "channel";
+    for (int side = 0; side < 4; ++side) {
+        config.boundaryKind[side] = "slip";
+    }
+    config.boundaryKind[0] = "inlet";
+    config.boundaryKind[1] = "outlet";
+
+    // Two fluids, and everything that only exists at two fluids.
+    config.supportsPhases = true;
+    config.phases = 2;
+    config.gravityEnabled = true;
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("two phase arguments failed: " + error);
+    }
+    if (!contains(arguments, "phases=2") ||
+        !contains(arguments, "rho1=1000") ||
+        !contains(arguments, "vofScheme=hric") ||
+        !contains(arguments, "phaseInit=layer") ||
+        !hasPrefix(arguments, "nu1=") ||
+        !hasPrefix(arguments, "phaseLevel=")) {
+        return fail("two phase arguments are incomplete");
+    }
+
+    // A painted field is not one of the three built in shapes and has to win
+    // over whichever one the row happens to be showing.
+    config.initialPhaseFile = root / "initial-phase.txt";
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("painted phase arguments failed: " + error);
+    }
+    if (!contains(arguments, "phaseInit=file") ||
+        !hasPrefix(arguments, "initialPhaseFile=")) {
+        return fail("the painted field was not sent");
+    }
+    if (hasPrefix(arguments, "phaseLevel=")) {
+        return fail("a built in shape was sent alongside the painted field");
+    }
+    config.initialPhaseFile.clear();
+
+    config.gravityEnabled = false;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("two fluids with gravity off were accepted, and they never "
+                    "separate");
+    }
+    config.gravityEnabled = true;
+    config.phases = 3;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("three phases were accepted");
+    }
+    config.phases = 2;
+    config.vofScheme = "plic";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a VOF scheme this solver does not have was accepted");
+    }
+    config.vofScheme = "hric";
+
+    // A source pushes fluid in from inside and needs an outlet exactly as an
+    // inlet does.
+    config.sources = "x=0.5,y=0.2,r=0.05,rate=2,angle=90";
+    if (!maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a source with an outlet was refused: " + error);
+    }
+    config.boundaryKind[1] = "wall";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a source with nowhere for the fluid to go was accepted");
+    }
+    config.boundaryKind[1] = "outlet";
+    config.sources.clear();
+    config.phases = 1;
 
     std::error_code cleanupError;
     std::filesystem::remove_all(root, cleanupError);

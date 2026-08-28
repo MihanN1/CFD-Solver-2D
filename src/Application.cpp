@@ -852,6 +852,17 @@ enum ParameterIndex : std::size_t {
     WindSpeed,
     Viscosity,
     Density,
+    Phases,
+    Density1,
+    Viscosity1,
+    Density2,
+    Viscosity2,
+    PhaseInitKind,
+    PhaseLevel,
+    PhaseSpotX,
+    PhaseSpotY,
+    VofSchemeKind,
+    SourceLine,
     GravityEnabled,
     GravityAccel,
     GravityAngle,
@@ -907,8 +918,9 @@ struct ParameterGroupInfo {
     const char* label;
 };
 
-constexpr std::array<ParameterGroupInfo, 11> PARAMETER_GROUPS{{
+constexpr std::array<ParameterGroupInfo, 12> PARAMETER_GROUPS{{
     {WindSpeed, "FLOW"},
+    {Phases, "FLUIDS"},
     {SliceX, "GEOMETRY"},
     {CaseKind, "BOUNDARIES"},
     {WallMotionLine, "WALLS"},
@@ -924,6 +936,8 @@ constexpr std::array<ParameterGroupInfo, 11> PARAMETER_GROUPS{{
 const char* parameterKey(std::size_t index) {
     static constexpr std::array<const char*, ParameterCount> keys{{
         "U0", "nu", "ro",
+        "phases", "rho1", "nu1", "rho2", "nu2",
+        "phaseInit", "phaseLevel", "phaseX", "phaseY", "vofScheme", "sources",
         "gravityEnabled", "gravityAccel", "gravityAngle", "gravityMode",
         "sliceAngleX", "sliceAngleZ", "sliceRotation", "profiles",
         "caseType", "lidSpeed",
@@ -951,6 +965,25 @@ std::string parameterHelp(std::size_t index) {
         return "nu: kinematic viscosity; affects Reynolds number and diffusion timestep.";
     case Density:
         return "rho / CLI key ro: physical density used by the solver pressure output.";
+    case Phases:
+        return "phases: 1 is one fluid and every run before this one. 2 turns on the volume fraction, and then rho and nu are ignored in favour of the two fluids below.";
+    case Density1:
+    case Viscosity1:
+        return "Fluid 1 is what the start shape is made of, and what the brush paints. Water is 1000 kg/m3 and 1e-6 m2/s.";
+    case Density2:
+    case Viscosity2:
+        return "Fluid 2 fills everything the start shape does not. Air is 1.225 kg/m3 and 1.5e-5 m2/s.";
+    case PhaseInitKind:
+        return "What is in the domain at the start: layer fills the bottom, drop is a circle, column is the dam break block. Painting overrides all three.";
+    case PhaseLevel:
+        return "Layer height, drop diameter or column height, as a fraction of the domain.";
+    case PhaseSpotX:
+    case PhaseSpotY:
+        return "Where the drop sits, or how wide the column is, as fractions of Lx and Ly.";
+    case VofSchemeKind:
+        return "How the interface is carried. hric and cicsam both push it back together every step; upwind smears it over ten cells and is here to be compared against.";
+    case SourceLine:
+        return "sources, in the solver's own grammar: x=0.5,y=0.2,r=0.05,rate=2,angle=90,phase=1 - a disc inside the domain that pushes fluid out of itself. Needs an outlet like an inlet does.";
     case GravityEnabled:
         return "gravityEnabled: adds gravity as a uniform body force. At constant density it moves the pressure map, not the velocity field.";
     case GravityAccel:
@@ -1673,6 +1706,7 @@ struct SolverExecutableInfo {
     bool supportsSchemes = false;           // convection= limiter= timeScheme=
     bool supportsBoundaries = false;        // bcLeft= .. inletProfile=
     bool supportsCase = false;              // caseType= lidSpeed= steadyTolerance=
+    bool supportsPhases = false;            // phases= rho1= .. sources=
     std::string version = "unknown";
     std::string features;
     std::string build = "Unknown build";
@@ -1859,6 +1893,7 @@ SolverExecutableInfo inspectSolverExecutable(
     info.supportsSchemes = binaryContains(executable, "timeScheme");
     info.supportsBoundaries = binaryContains(executable, "bcBottom");
     info.supportsCase = binaryContains(executable, "caseType");
+    info.supportsPhases = binaryContains(executable, "vofScheme");
     info.supportsContinuation =
         info.version != "unknown" &&
         compareSolverVersions(info.version, "0.1.1") >= 0;
@@ -1964,6 +1999,20 @@ public:
               Slider{"Wind speed U0", "m/s", 0.0, 200.0, 1.0, false, false},
               Slider{"Viscosity nu", "m2/s", 1e-8, 10.0, 0.01, false, true},
               Slider{"Density rho (ro)", "kg/m3", 0.01, 5000.0, 1.225, false, true},
+              Slider{"Phases", "", 1.0, 2.0, 1.0, true, false},
+              Slider{"Fluid 1 density", "kg/m3", 0.01, 20000.0, 1000.0, false, true},
+              Slider{"Fluid 1 viscosity", "m2/s", 1e-8, 10.0, 1e-6, false, true},
+              Slider{"Fluid 2 density", "kg/m3", 0.01, 20000.0, 1.225, false, true},
+              Slider{"Fluid 2 viscosity", "m2/s", 1e-8, 10.0, 1.5e-5, false, true},
+              Slider{"Start shape", "", 0.0, 3.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"layer", "drop", "column", "file"}},
+              Slider{"Start level", "", 0.0, 1.0, 0.5, false, false},
+              Slider{"Start x", "", 0.0, 1.0, 0.5, false, false},
+              Slider{"Start y", "", 0.0, 1.0, 0.5, false, false},
+              Slider{"Interface scheme", "", 0.0, 2.0, 1.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"upwind", "hric", "cicsam"}},
+              Slider{"Flow sources", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
+                     ControlKind::Text},
               Slider{"Gravity", "", 0.0, 1.0, 0.0, true, false, true},
               Slider{"Gravity g", "m/s2", 0.0, 100.0, 9.81, false, false},
               Slider{"Gravity angle", "deg", -180.0, 180.0, 0.0, false, false},
@@ -2296,6 +2345,32 @@ private:
             }
         };
 
+        // A row of paint controls along the bottom of the setup view. Off
+        // screen in every sense while the run is one phase: the button that
+        // turns them on is not drawn either.
+        {
+            // The toggle lives at the top of the view, where nothing else does.
+            // The rest of the row only exists while painting is on, and the
+            // slice controls that share the bottom edge are not drawn then.
+            paintButton_.bounds = {
+                {setupViewport_.position.x + 12.0f,
+                 setupViewport_.position.y + 12.0f},
+                {96.0f, 30.0f}};
+            const float y = setupViewport_.position.y +
+                            setupViewport_.size.y - 42.0f;
+            float x = setupViewport_.position.x + 12.0f;
+            const auto place = [&](Button& button, float w) {
+                button.bounds = {{x, y}, {w, 30.0f}};
+                x += w + 8.0f;
+            };
+            place(paintFluid1Button_, 78.0f);
+            place(paintFluid2Button_, 78.0f);
+            place(paintSourceButton_, 78.0f);
+            place(paintFillButton_, 62.0f);
+            place(paintClearButton_, 62.0f);
+            place(paintUndoButton_, 62.0f);
+        }
+
         pressureButton_.bounds = {{20.0f, 72.0f}, {126.0f, 36.0f}};
         velocityButton_.bounds = {{154.0f, 72.0f}, {126.0f, 36.0f}};
         fieldButton_.bounds = {{288.0f, 72.0f}, {156.0f, 36.0f}};
@@ -2356,8 +2431,15 @@ private:
             resultCatalogFuture_.valid() || !inFlightFrames_.empty();
         const bool solverAvailable =
             solverInfo_.valid && solverInfo_.recognized;
+        // A model is no longer the only thing a run can be made of: an empty
+        // domain is a case in its own right and a painted phase field is a
+        // whole initial condition. The button stayed grey through both of
+        // those, which made "the profile is optional" true everywhere except
+        // where it mattered.
+        const bool haveSomethingToRun =
+            !geometry_.empty() || solverInfo_.supportsCase;
         generateButton_.enabled =
-            solverAvailable && !geometry_.empty() &&
+            solverAvailable && haveSomethingToRun &&
             !solverProcess_.active && !loadingResults;
         outputFolderButton_.enabled =
             !solverProcess_.active && !loadingResults;
@@ -2510,6 +2592,8 @@ private:
     void handleSetupMousePressed(
         sf::Mouse::Button button,
         sf::Vector2f position) {
+        if (handlePaintMousePressed(button, position))
+            return;
         if (button == sf::Mouse::Button::Left &&
             importButton_.hit(position)) {
             importGeometry();
@@ -2780,7 +2864,10 @@ private:
     void handleMouseMoved(sf::Vector2f position) {
         const sf::Vector2f delta = position - lastMouse_;
         lastMouse_ = position;
-        if (draggingParameterScrollbar_) {
+        if (paintStroke_) {
+            paintAt(position,
+                    sf::Mouse::isButtonPressed(sf::Mouse::Button::Right));
+        } else if (draggingParameterScrollbar_) {
             setParameterScrollFromThumb(
                 position.y - parameterScrollbarGrabOffset_);
         } else if (activeSlider_.has_value()) {
@@ -2833,6 +2920,12 @@ private:
             updateLayout(layoutSize_);
             return;
         }
+        if (mode_ == DisplayMode::Setup && painting_ && phasesOn() &&
+            setupViewport_.contains(position)) {
+            paintBrush_ = std::min(64, std::max(0,
+                paintBrush_ + (delta > 0.0f ? 1 : -1)));
+            return;
+        }
         if (mode_ == DisplayMode::Setup &&
             setupViewport_.contains(position)) {
             setupZoom_ = clampFloat(
@@ -2849,6 +2942,7 @@ private:
     }
 
     void endDragging() {
+        paintStroke_ = false;
         const std::optional<std::size_t> releasedSlider = activeSlider_;
         if (activeSlider_.has_value()) {
             sliders_[*activeSlider_].dragging = false;
@@ -3430,6 +3524,21 @@ private:
         config.limiter = sliders_[Limiter].choice();
         config.timeScheme = sliders_[TimeSchemeKind].choice();
         config.gravityMode = sliders_[GravityMode].choice();
+
+        config.supportsPhases = solverInfo_.supportsPhases;
+        config.phases =
+            static_cast<int>(std::lround(sliders_[Phases].value));
+        config.rho1 = sliders_[Density1].value;
+        config.rho2 = sliders_[Density2].value;
+        config.nu1 = sliders_[Viscosity1].value;
+        config.nu2 = sliders_[Viscosity2].value;
+        config.phaseInit = sliders_[PhaseInitKind].choice();
+        config.phaseLevel = sliders_[PhaseLevel].value;
+        config.phaseX = sliders_[PhaseSpotX].value;
+        config.phaseY = sliders_[PhaseSpotY].value;
+        config.vofScheme = sliders_[VofSchemeKind].choice();
+        config.sources = sliders_[SourceLine].text;
+        config.initialPhaseFile.clear();
 
         config.supportsCase = solverInfo_.supportsCase;
         config.caseType = sliders_[CaseKind].choice();
@@ -4085,6 +4194,20 @@ private:
         FluidSolverRunConfig solverConfig = requestedConfig;
         solverConfig.geometryFile =
             emptyDomain ? std::filesystem::path("empty") : adapterFile;
+
+        // What was painted goes next to the run rather than into a temporary
+        // file somewhere, so the folder holding the frames also holds the
+        // thing they started from.
+        ensurePaintField();
+        if (requestedConfig.phases > 1 && paintFieldUsed()) {
+            const std::filesystem::path phaseFile =
+                runDirectory / "initial-phase.txt";
+            if (!writePaintField(phaseFile, error)) {
+                status_ = error;
+                return;
+            }
+            solverConfig.initialPhaseFile = phaseFile;
+        }
         solverConfig.sliceAngleX = 0.0;
         solverConfig.sliceAngleZ = 0.0;
         solverConfig.sliceRotation = 0.0;
@@ -5198,6 +5321,319 @@ private:
         }
     }
 
+    // ---- the paint canvas -------------------------------------------------
+
+    bool phasesOn() const {
+        return solverInfo_.supportsPhases &&
+               std::lround(sliders_[Phases].value) > 1;
+    }
+
+    void ensurePaintField() {
+        const int nx = static_cast<int>(std::lround(sliders_[CellsX].value));
+        const int ny = static_cast<int>(std::lround(sliders_[CellsY].value));
+        if (nx == paintNx_ && ny == paintNy_ &&
+            paintField_.size() == static_cast<std::size_t>(nx) * ny)
+            return;
+        // The grid changed under the painting. Nothing sensible can be said
+        // about the old cells, so it starts again rather than being stretched
+        // into something nobody drew.
+        paintNx_ = nx;
+        paintNy_ = ny;
+        paintField_.assign(static_cast<std::size_t>(std::max(nx, 1)) *
+                               std::max(ny, 1),
+                           0.0f);
+        paintUndo_.clear();
+    }
+
+    bool paintFieldUsed() const {
+        for (float value : paintField_)
+            if (value > 0.0f)
+                return true;
+        return false;
+    }
+
+    // The domain drawn to scale inside the viewport, so a 2:1 box looks like
+    // one and a cell is square on screen when it is square in the solver.
+    sf::FloatRect paintCanvasRect() const {
+        sf::FloatRect area = setupViewport_;
+        area.position.x += 12.0f;
+        area.position.y += 52.0f;
+        area.size.x -= 24.0f;
+        area.size.y -= 146.0f;
+        const float want =
+            static_cast<float>(sliders_[DomainX].value /
+                               std::max(1e-9, sliders_[DomainY].value));
+        const float have = area.size.x / std::max(1.0f, area.size.y);
+        if (want > have) {
+            const float h = area.size.x / want;
+            area.position.y += (area.size.y - h) * 0.5f;
+            area.size.y = h;
+        } else {
+            const float w = area.size.y * want;
+            area.position.x += (area.size.x - w) * 0.5f;
+            area.size.x = w;
+        }
+        return area;
+    }
+
+    bool paintCellAt(sf::Vector2f point, int& outI, int& outJ) const {
+        const sf::FloatRect canvas = paintCanvasRect();
+        if (paintNx_ < 1 || paintNy_ < 1 || !canvas.contains(point))
+            return false;
+        const float fx = (point.x - canvas.position.x) / canvas.size.x;
+        // Screen y runs down and the solver's j runs up.
+        const float fy = 1.0f - (point.y - canvas.position.y) / canvas.size.y;
+        outI = std::min(paintNx_ - 1,
+                        std::max(0, static_cast<int>(fx * paintNx_)));
+        outJ = std::min(paintNy_ - 1,
+                        std::max(0, static_cast<int>(fy * paintNy_)));
+        return true;
+    }
+
+    void paintAt(sf::Vector2f point, bool secondary) {
+        int ci = 0, cj = 0;
+        if (!paintCellAt(point, ci, cj))
+            return;
+        if (paintTarget_ == 2) {
+            addSourceAt(ci, cj);
+            return;
+        }
+        // Two buttons, two fluids, and which is which follows the row that is
+        // selected: the right button always lays down the other one, so a
+        // stroke can be taken back without reaching for anything.
+        const bool wantSecond = (paintTarget_ == 1) != secondary;
+        const float value = wantSecond ? 0.0f : 1.0f;
+        const int r = std::max(0, paintBrush_);
+        for (int j = cj - r; j <= cj + r; ++j) {
+            if (j < 0 || j >= paintNy_)
+                continue;
+            for (int i = ci - r; i <= ci + r; ++i) {
+                if (i < 0 || i >= paintNx_)
+                    continue;
+                const int dx = i - ci, dy = j - cj;
+                if (dx * dx + dy * dy > r * r)
+                    continue;
+                paintField_[static_cast<std::size_t>(j) * paintNx_ + i] = value;
+            }
+        }
+    }
+
+    // Painting a source writes a line in the solver's own grammar into the
+    // sources row rather than inventing a second way of saying the same thing.
+    void addSourceAt(int ci, int cj) {
+        const double dx = sliders_[DomainX].value / std::max(1, paintNx_);
+        const double dy = sliders_[DomainY].value / std::max(1, paintNy_);
+        const double x = (ci + 0.5) * dx;
+        const double y = (cj + 0.5) * dy;
+        const double radius = std::max(1, paintBrush_) * std::max(dx, dy);
+        std::ostringstream line;
+        line << std::setprecision(6) << "x=" << x << ",y=" << y
+             << ",r=" << radius << ",rate=1,angle=90,phase=1";
+        std::string& text = sliders_[SourceLine].text;
+        if (!text.empty())
+            text += ";";
+        text += line.str();
+        status_ = "Source added. Edit the Flow sources row for rate and angle.";
+    }
+
+    void pushPaintUndo() {
+        paintUndo_.push_back(paintField_);
+        if (paintUndo_.size() > 32)
+            paintUndo_.erase(paintUndo_.begin());
+    }
+
+    void undoPaint() {
+        if (paintUndo_.empty())
+            return;
+        paintField_ = paintUndo_.back();
+        paintUndo_.pop_back();
+    }
+
+    bool writePaintField(const std::filesystem::path& path,
+                         std::string& error) const {
+        std::ofstream out(path, std::ios::out | std::ios::trunc);
+        if (!out.is_open()) {
+            error = "Cannot write the painted phase field: " + path.string();
+            return false;
+        }
+        for (int j = 0; j < paintNy_; ++j) {
+            for (int i = 0; i < paintNx_; ++i) {
+                out << paintField_[static_cast<std::size_t>(j) * paintNx_ + i];
+                out << (i + 1 == paintNx_ ? '\n' : ' ');
+            }
+        }
+        out.flush();
+        if (!out) {
+            error = "The painted phase field did not write out fully.";
+            return false;
+        }
+        return true;
+    }
+
+    void drawPaintCanvas() {
+        ensurePaintField();
+        const sf::FloatRect canvas = paintCanvasRect();
+
+        if (paintNx_ > 0 && paintNy_ > 0) {
+            sf::Image image({static_cast<unsigned>(paintNx_),
+                             static_cast<unsigned>(paintNy_)},
+                            sf::Color::Transparent);
+            for (int j = 0; j < paintNy_; ++j)
+                for (int i = 0; i < paintNx_; ++i) {
+                    const float value =
+                        paintField_[static_cast<std::size_t>(j) * paintNx_ + i];
+                    const sf::Color colour = phaseColour(value);
+                    image.setPixel({static_cast<unsigned>(i),
+                                    static_cast<unsigned>(paintNy_ - 1 - j)},
+                                   colour);
+                }
+            sf::Texture texture;
+            if (texture.loadFromImage(image)) {
+                texture.setSmooth(false);
+                sf::Sprite sprite(texture);
+                sprite.setPosition(canvas.position);
+                sprite.setScale(
+                    {canvas.size.x / static_cast<float>(paintNx_),
+                     canvas.size.y / static_cast<float>(paintNy_)});
+                window_->draw(sprite);
+            }
+        }
+
+        sf::RectangleShape frame(canvas.size);
+        frame.setPosition(canvas.position);
+        frame.setFillColor(sf::Color::Transparent);
+        frame.setOutlineColor(BORDER);
+        frame.setOutlineThickness(1.0f);
+        window_->draw(frame);
+
+        // The brush, where it is about to land.
+        int ci = 0, cj = 0;
+        if (paintCellAt(lastMouse_, ci, cj)) {
+            const float cellW = canvas.size.x / std::max(1, paintNx_);
+            const float cellH = canvas.size.y / std::max(1, paintNy_);
+            const float radius =
+                std::max(1, paintBrush_) * std::max(cellW, cellH);
+            sf::CircleShape cursor(radius);
+            cursor.setOrigin({radius, radius});
+            cursor.setPosition({
+                canvas.position.x + (ci + 0.5f) * cellW,
+                canvas.position.y + canvas.size.y - (cj + 0.5f) * cellH});
+            cursor.setFillColor(sf::Color::Transparent);
+            cursor.setOutlineColor(ACCENT);
+            cursor.setOutlineThickness(1.5f);
+            window_->draw(cursor);
+        }
+
+        drawPhaseLegend(canvas);
+    }
+
+    // Two fluids, two hues, and how much of the cell is fluid 1 read off the
+    // strength of the colour rather than a second axis nobody can see.
+    static sf::Color phaseColour(float fraction) {
+        const float t = std::min(1.0f, std::max(0.0f, fraction));
+        const sf::Color light(38, 44, 58);      // fluid 2, the ambient one
+        const sf::Color heavy(64, 156, 255);    // fluid 1
+        return sf::Color(
+            static_cast<std::uint8_t>(light.r + (heavy.r - light.r) * t),
+            static_cast<std::uint8_t>(light.g + (heavy.g - light.g) * t),
+            static_cast<std::uint8_t>(light.b + (heavy.b - light.b) * t));
+    }
+
+    void drawPhaseLegend(const sf::FloatRect& canvas) {
+        const float x = canvas.position.x;
+        const float y = canvas.position.y + canvas.size.y + 10.0f;
+        for (int k = 0; k < 64; ++k) {
+            sf::RectangleShape swatch({3.0f, 12.0f});
+            swatch.setPosition({x + k * 3.0f, y});
+            swatch.setFillColor(phaseColour(k / 63.0f));
+            window_->draw(swatch);
+        }
+        window_->draw(makeText(font_, "fluid 2", 12, {x + 196.0f, y - 2.0f},
+                               MUTED));
+        window_->draw(makeText(font_, "fluid 1", 12, {x + 250.0f, y - 2.0f},
+                               MUTED));
+        std::ostringstream hint;
+        hint << "brush " << paintBrush_ << " cells - wheel resizes, drag paints "
+             << (paintTarget_ == 1 ? "fluid 2" : "fluid 1")
+             << ", right button paints the other, " << paintNx_ << "x"
+             << paintNy_ << " grid";
+        window_->draw(makeText(font_, hint.str(), 12,
+                               {x + 320.0f, y - 2.0f}, MUTED));
+    }
+
+    void drawPaintControls() {
+        paintButton_.label = painting_ ? "Painting" : "Paint";
+        paintButton_.selected = painting_;
+        paintFluid1Button_.label = "Fluid 1";
+        paintFluid2Button_.label = "Fluid 2";
+        paintSourceButton_.label = "Source";
+        paintFillButton_.label = "Fill";
+        paintClearButton_.label = "Clear";
+        paintUndoButton_.label = "Undo";
+        paintFluid1Button_.selected = paintTarget_ == 0;
+        paintFluid2Button_.selected = paintTarget_ == 1;
+        paintSourceButton_.selected = paintTarget_ == 2;
+        paintFluid1Button_.enabled = painting_;
+        paintFluid2Button_.enabled = painting_;
+        paintSourceButton_.enabled = painting_;
+        paintFillButton_.enabled = painting_;
+        paintClearButton_.enabled = painting_;
+        paintUndoButton_.enabled = painting_ && !paintUndo_.empty();
+
+        paintButton_.draw(*window_, font_);
+        if (!painting_)
+            return;
+        paintFluid1Button_.draw(*window_, font_);
+        paintFluid2Button_.draw(*window_, font_);
+        paintSourceButton_.draw(*window_, font_);
+        paintFillButton_.draw(*window_, font_);
+        paintClearButton_.draw(*window_, font_);
+        paintUndoButton_.draw(*window_, font_);
+    }
+
+    bool handlePaintMousePressed(sf::Mouse::Button button,
+                                 sf::Vector2f position) {
+        if (!phasesOn())
+            return false;
+        if (button == sf::Mouse::Button::Left && paintButton_.hit(position)) {
+            painting_ = !painting_;
+            if (painting_)
+                ensurePaintField();
+            return true;
+        }
+        if (!painting_)
+            return false;
+        if (button == sf::Mouse::Button::Left) {
+            if (paintFluid1Button_.hit(position)) { paintTarget_ = 0; return true; }
+            if (paintFluid2Button_.hit(position)) { paintTarget_ = 1; return true; }
+            if (paintSourceButton_.hit(position)) { paintTarget_ = 2; return true; }
+            if (paintFillButton_.hit(position)) {
+                pushPaintUndo();
+                std::fill(paintField_.begin(), paintField_.end(), 1.0f);
+                return true;
+            }
+            if (paintClearButton_.hit(position)) {
+                pushPaintUndo();
+                std::fill(paintField_.begin(), paintField_.end(), 0.0f);
+                return true;
+            }
+            if (paintUndoButton_.hit(position)) {
+                undoPaint();
+                return true;
+            }
+        }
+        int ci = 0, cj = 0;
+        if (!paintCellAt(position, ci, cj))
+            return false;
+        if (button != sf::Mouse::Button::Left &&
+            button != sf::Mouse::Button::Right)
+            return false;
+        pushPaintUndo();
+        paintStroke_ = true;
+        paintAt(position, button == sf::Mouse::Button::Right);
+        return true;
+    }
+
     void drawSetup() {
         drawPanel(
             *window_,
@@ -5231,11 +5667,16 @@ private:
         viewBackground.setOutlineThickness(1.0f);
         window_->draw(viewBackground);
 
-        if (geometry_.empty()) {
+        if (painting_ && phasesOn()) {
+            drawPaintCanvas();
+        } else if (geometry_.empty()) {
             window_->draw(makeText(
                 font_,
-                "Import an STL or OBJ model",
-                24,
+                phasesOn()
+                    ? "Import a model, or paint the fluid straight onto the "
+                      "grid - a profile is optional now"
+                    : "Import an STL or OBJ model",
+                phasesOn() ? 18 : 24,
                 {
                     setupViewport_.position.x + 40.0f,
                     setupViewport_.position.y + 50.0f
@@ -5244,8 +5685,12 @@ private:
         } else {
             drawGeometryPreview();
         }
-        drawSetupInfoOverlay();
-        drawSliceControls();
+        if (phasesOn())
+            drawPaintControls();
+        if (!painting_) {
+            drawSetupInfoOverlay();
+            drawSliceControls();
+        }
     }
 
     void drawGeometryPreview() {
@@ -5765,6 +6210,14 @@ private:
             const bool rangeAvailable = range.available;
             const double rangeMinimum = range.minimum;
             const double rangeMaximum = range.maximum;
+            // The phase field is not a measurement with an interesting range,
+            // it is a mixture: 0 is one fluid, 1 is the other, and what is
+            // worth seeing is where the line between them is. A general
+            // purpose colour ramp turns that into a rainbow with the
+            // interface somewhere in the green.
+            const bool asPhase =
+                resultQuantity_ == ResultQuantity::Scalar &&
+                activeScalarName_ == "phase";
 
             // One row per thread. Rows are independent and the map is pure
             // arithmetic, so this is the cheapest parallelism in the UI. The
@@ -5786,10 +6239,11 @@ private:
                         if (finiteMask[dataIndex] == 0 || !rangeAvailable) {
                             color = INVALID_COLOR;
                         } else {
-                            color = scalarColor(
-                                values[dataIndex],
-                                rangeMinimum,
-                                rangeMaximum);
+                            color = asPhase
+                                        ? phaseColour(values[dataIndex])
+                                        : scalarColor(values[dataIndex],
+                                                      rangeMinimum,
+                                                      rangeMaximum);
                         }
                     }
 
@@ -6021,8 +6475,28 @@ private:
                     legendBounds_.size.y *
                         static_cast<float>(1.0 - normalized)
             });
-            rectangle.setFillColor(scalarColor(normalized, 0.0, 1.0));
+            rectangle.setFillColor(
+                (resultQuantity_ == ResultQuantity::Scalar &&
+                 activeScalarName_ == "phase")
+                    ? phaseColour(static_cast<float>(normalized))
+                    : scalarColor(normalized, 0.0, 1.0));
             window_->draw(rectangle);
+        }
+        // The bar reads 0 to 1 whatever the frame happens to hold, because a
+        // fraction of fluid 1 is a fraction of fluid 1 and rescaling it to the
+        // extremes that turned up in this frame would make a domain of pure
+        // water look like a domain of half water.
+        if (resultQuantity_ == ResultQuantity::Scalar &&
+            activeScalarName_ == "phase") {
+            window_->draw(makeText(
+                font_, "fluid 1", 12,
+                {legendBounds_.position.x - 4.0f,
+                 legendBounds_.position.y - 16.0f}, MUTED));
+            window_->draw(makeText(
+                font_, "fluid 2", 12,
+                {legendBounds_.position.x - 4.0f,
+                 legendBounds_.position.y + legendBounds_.size.y + 2.0f},
+                MUTED));
         }
 
         const std::string unit =
@@ -6346,6 +6820,26 @@ private:
     sf::Vector2f lastMouse_{0.0f, 0.0f};
 
     float setupZoom_ = 1.0f;
+
+    // ---- painting the initial phase field --------------------------------
+    // One value per cell of the solver's own grid, which is why the canvas is
+    // nx by ny and not the window: what is painted is exactly what the solver
+    // starts from, with no resampling in between to argue about.
+    bool painting_ = false;
+    int paintBrush_ = 3;
+    int paintTarget_ = 0;   // 0 = fluid 1, 1 = fluid 2, 2 = a source
+    int paintNx_ = 0;
+    int paintNy_ = 0;
+    std::vector<float> paintField_;
+    std::vector<std::vector<float>> paintUndo_;
+    bool paintStroke_ = false;
+    Button paintButton_;
+    Button paintFluid1Button_;
+    Button paintFluid2Button_;
+    Button paintSourceButton_;
+    Button paintFillButton_;
+    Button paintClearButton_;
+    Button paintUndoButton_;
     float resultZoom_ = 1.0f;
     sf::Vector2f resultPan_{0.0f, 0.0f};
     std::vector<SectionSegment> sectionSegments_;

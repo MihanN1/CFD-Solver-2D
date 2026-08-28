@@ -149,6 +149,7 @@ is not there:
 | `convection` `limiter` `timeScheme` `gravityMode` | `timeScheme` |
 | `bcLeft` … `inletProfile` | `bcBottom` |
 | `caseType` `lidSpeed` `steadyTolerance` | `caseType` |
+| `phases` `rho1` `nu1` `rho2` `nu2` `phaseInit` … `sources` | `vofScheme` |
 
 `bc<Side>Speed` is only written when that side is a `movingWall` or the speed is
 not zero. Writing `bcLeftSpeed=0` for an inlet would tell the solver a standstill
@@ -167,6 +168,41 @@ the boundary rows happened to say, which is not what picking a preset means.
 **Stop when steady** is `steadyTolerance`: the run ends early once the largest
 velocity change per second, measured against whatever drives the case, drops
 under it. Zero, the default, runs the whole of **Total time**.
+
+**Phases** turns the FLUIDS group into two fluids with their own densities and
+viscosities, and the setup view into something you can paint on. `phases=1`
+sends none of it.
+
+**Paint** replaces the 3D preview with the solver's own grid, one pixel per
+cell, and paints the initial volume fraction straight onto it. Left button
+lays down fluid 1, right button takes it back to fluid 2, the wheel resizes the
+brush, and Fill, Clear and Undo do what they say. What is painted is written as
+`initial-phase.txt` beside the run and passed as `initialPhaseFile`, so the
+folder holding the frames also holds the thing they started from - and a
+painted field overrides whichever of layer, drop and column the Start shape row
+happens to be showing, because the point of painting one is that it is none of
+those.
+
+The brush also places **sources**, and it does it by writing a line in the
+solver's own grammar into the Flow sources row rather than inventing a second
+way of saying the same thing. Drop one, then edit the row for rate and angle.
+
+Fluid 1 and Fluid 2 are which of the two the left button lays down; the right
+button always lays down the other, so a stroke can be taken back without
+reaching for anything.
+
+Changing nx or ny throws the painting away rather than stretching it into
+something nobody drew.
+
+**Run simulation** is no longer greyed out without a model. That was the last
+place where "the profile is optional" was not actually true: an empty domain is
+a case in its own right and a painted phase field is a whole initial condition,
+and the button stayed dead through both.
+
+In the results view the `phase` field gets a colour map of its own, fixed to
+0..1 rather than to whatever turned up in this frame: a domain of pure water
+should look like pure water and not like half of it. Everything else the solver
+writes still goes through the general ramp.
 
 When nothing has been drawn, the UI now sends `geometryFile=empty` instead of a
 section adapter with no contours in it. An empty adapter used to make the solver

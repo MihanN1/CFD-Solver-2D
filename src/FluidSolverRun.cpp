@@ -214,6 +214,44 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
     if (config.extraFields.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "extraFields must not contain CR or LF");
     }
+    if (config.phases != 1 && config.phases != 2) {
+        return fail(error, "phases is 1 or 2: a second phase field would need "
+                           "a rule for what happens where three fluids meet, "
+                           "and there is not one");
+    }
+    if (config.phases > 1) {
+        if (!(config.rho1 > 0.0) || !(config.rho2 > 0.0) ||
+            !std::isfinite(config.rho1) || !std::isfinite(config.rho2)) {
+            return fail(error, "both densities have to be positive numbers");
+        }
+        if (!(config.nu1 >= 0.0) || !(config.nu2 >= 0.0) ||
+            !std::isfinite(config.nu1) || !std::isfinite(config.nu2)) {
+            return fail(error, "neither viscosity can be negative");
+        }
+        if (config.vofScheme != "upwind" && config.vofScheme != "hric" &&
+            config.vofScheme != "cicsam") {
+            return fail(error, "vofScheme is upwind, hric or cicsam");
+        }
+        if (config.phaseInit != "layer" && config.phaseInit != "drop" &&
+            config.phaseInit != "column" && config.phaseInit != "file") {
+            return fail(error, "phaseInit is layer, drop, column or file");
+        }
+        for (double fraction : {config.phaseLevel, config.phaseX,
+                                config.phaseY}) {
+            if (!(fraction >= 0.0 && fraction <= 1.0))
+                return fail(error, "phaseLevel, phaseX and phaseY are "
+                                   "fractions of the domain, so they live "
+                                   "between 0 and 1");
+        }
+        if (!config.gravityEnabled)
+            return fail(error, "two fluids with gravity off never separate: "
+                               "the density difference is the only thing that "
+                               "would move them, and nothing here reads it. "
+                               "Turn gravity on, or drop back to one phase");
+    }
+    if (config.sources.find_first_of("\r\n") != std::string::npos) {
+        return fail(error, "sources must not contain CR or LF");
+    }
     if (!std::isfinite(config.lidSpeed)) {
         return fail(error, "lidSpeed must be finite");
     }
@@ -249,6 +287,10 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
             if (!std::isfinite(config.boundarySpeed[side]))
                 return fail(error, "boundary speeds must be finite");
         }
+        // A source pushes fluid in from the middle of the domain and needs
+        // somewhere for it to go exactly as an inlet does.
+        if (!config.sources.empty())
+            anyInlet = true;
         if (config.supportsBoundaries && config.caseType != "cavity" &&
             anyInlet && !anyOutlet && !config.restart)
             return fail(error,
@@ -371,6 +413,30 @@ bool buildFluidSolverArguments(
         arguments.push_back("limiter=" + config.limiter);
         arguments.push_back("timeScheme=" + config.timeScheme);
         arguments.push_back("gravityMode=" + config.gravityMode);
+    }
+    if (config.supportsPhases) {
+        arguments.push_back("phases=" + std::to_string(config.phases));
+        if (config.phases > 1) {
+            arguments.push_back("rho1=" + serializeDouble(config.rho1));
+            arguments.push_back("rho2=" + serializeDouble(config.rho2));
+            arguments.push_back("nu1=" + serializeDouble(config.nu1));
+            arguments.push_back("nu2=" + serializeDouble(config.nu2));
+            arguments.push_back("vofScheme=" + config.vofScheme);
+            // A painted field wins over any of the built in shapes: the point
+            // of painting one is that it is not a layer or a circle.
+            if (!config.initialPhaseFile.empty()) {
+                arguments.push_back("phaseInit=file");
+                arguments.push_back("initialPhaseFile=" +
+                                    config.initialPhaseFile.u8string());
+            } else {
+                arguments.push_back("phaseInit=" + config.phaseInit);
+                arguments.push_back("phaseLevel=" +
+                                    serializeDouble(config.phaseLevel));
+                arguments.push_back("phaseX=" + serializeDouble(config.phaseX));
+                arguments.push_back("phaseY=" + serializeDouble(config.phaseY));
+            }
+        }
+        arguments.push_back("sources=" + config.sources);
     }
     if (config.supportsCase) {
         arguments.push_back("caseType=" + config.caseType);
