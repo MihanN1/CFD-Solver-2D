@@ -140,13 +140,6 @@ inline float predictNextFace(float cell, float previous) {
                               static_cast<double>(previous));
 }
 
-void appendWord(std::string& out, uint32_t word) {
-    out.push_back(static_cast<char>((word >> 24) & 0xFFu));
-    out.push_back(static_cast<char>((word >> 16) & 0xFFu));
-    out.push_back(static_cast<char>((word >> 8) & 0xFFu));
-    out.push_back(static_cast<char>(word & 0xFFu));
-}
-
 bool takeWord(const std::string& in, size_t& pos, uint32_t& word) {
     if (pos + 4 > in.size())
         return false;
@@ -156,19 +149,6 @@ bool takeWord(const std::string& in, size_t& pos, uint32_t& word) {
             static_cast<uint32_t>(static_cast<unsigned char>(in[pos + 3]));
     pos += 4;
     return true;
-}
-
-// Zigzag first, so that a prediction one ulp low and one ulp high both cost a
-// single byte and an exact one costs a zero byte. Everything stays unsigned:
-// the difference of two bit patterns wraps, and it wraps back the same way.
-void appendDelta(std::string& out, uint32_t delta) {
-    const uint32_t sign = (delta & 0x80000000u) ? 0xFFFFFFFFu : 0u;
-    uint32_t zig = (delta << 1) ^ sign;
-    while (zig >= 0x80u) {
-        out.push_back(static_cast<char>((zig & 0x7Fu) | 0x80u));
-        zig >>= 7;
-    }
-    out.push_back(static_cast<char>(zig));
 }
 
 bool takeDelta(const std::string& in, size_t& pos, uint32_t& delta) {
@@ -377,21 +357,38 @@ std::string packFaceVelocities(int nx, int ny,
         return std::string();
 
     std::string out;
-    out.reserve(cells * 3u + 64u);
+    out.resize(4u + 4u * static_cast<size_t>(nx + ny) + cells * 10u);
+    char* cursor = out.data();
+
+    const auto putWord = [&](uint32_t word) {
+        *cursor++ = static_cast<char>((word >> 24) & 0xFFu);
+        *cursor++ = static_cast<char>((word >> 16) & 0xFFu);
+        *cursor++ = static_cast<char>((word >> 8) & 0xFFu);
+        *cursor++ = static_cast<char>(word & 0xFFu);
+    };
+    const auto putDelta = [&](uint32_t delta) {
+        const uint32_t sign = (delta & 0x80000000u) ? 0xFFFFFFFFu : 0u;
+        uint32_t zig = (delta << 1) ^ sign;
+        while (zig >= 0x80u) {
+            *cursor++ = static_cast<char>((zig & 0x7Fu) | 0x80u);
+            zig >>= 7;
+        }
+        *cursor++ = static_cast<char>(zig);
+    };
 
     uint32_t checksum = 2166136261u;
     checksum = hashFaces(u, checksum);
     checksum = hashFaces(v, checksum);
-    appendWord(out, checksum);
+    putWord(checksum);
 
     // The two lines the prediction starts from are spelled out. They are one
     // column and one row, a fraction of a percent of the block, and they save
     // the reader from having to reproduce how the inlet and the bottom wall
     // were set on the run that wrote the frame.
     for (int j = 0; j < ny; ++j)
-        appendWord(out, floatBits(u[static_cast<size_t>(j) * (nx + 1)]));
+        putWord(floatBits(u[static_cast<size_t>(j) * (nx + 1)]));
     for (int i = 0; i < nx; ++i)
-        appendWord(out, floatBits(v[i]));
+        putWord(floatBits(v[i]));
 
     for (int j = 0; j < ny; ++j) {
         const size_t rowU = static_cast<size_t>(j) * (nx + 1);
@@ -400,7 +397,7 @@ std::string packFaceVelocities(int nx, int ny,
         for (int i = 0; i < nx; ++i) {
             const float predicted = predictNextFace(uCell[rowC + i], previous);
             previous = u[rowU + i + 1];
-            appendDelta(out, floatBits(previous) - floatBits(predicted));
+            putDelta(floatBits(previous) - floatBits(predicted));
         }
     }
 
@@ -409,11 +406,11 @@ std::string packFaceVelocities(int nx, int ny,
         for (int i = 0; i < nx; ++i) {
             const float predicted =
                 predictNextFace(vCell[rowV + i], v[rowV + i]);
-            appendDelta(out,
-                        floatBits(v[rowV + nx + i]) - floatBits(predicted));
+            putDelta(floatBits(v[rowV + nx + i]) - floatBits(predicted));
         }
     }
 
+    out.resize(static_cast<size_t>(cursor - out.data()));
     return out;
 }
 
@@ -738,10 +735,6 @@ bool loadRestart(const std::filesystem::path& file,
                          "projected once.\n";
     }
 
-    // A two-phase frame carries the real pressure rather than the kinematic
-    // one, because the projection there already divides by the density on
-    // every face. Scaling it back by ro would be dividing by a density that is
-    // not in the problem any more.
     if (out.p.empty() && cellPressure.size() == cells && out.cfg.ro > 0.0f) {
         const float invRo = out.cfg.multiphase() ? 1.0f : 1.0f / out.cfg.ro;
         out.p.assign(cells, 0.0f);

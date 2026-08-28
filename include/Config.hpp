@@ -3,20 +3,11 @@
 #include <string>
 #include <vector>
 
-// Where the weight of the fluid goes. reduced keeps the solve untouched and
-// adds the hydrostatic head on output, which is exact while the density is one
-// number for the whole domain. body puts the force in the predictor and solves
-// for the total pressure, which is what a domain holding two densities needs.
 enum class GravityMode {
     Reduced,
     Body
 };
 
-// How the convective term reads the field. upwind is the first order scheme
-// this solver has always used. central is second order and keeps nothing back,
-// which needs rk2 or rk3 under it. muscl is the two blended by a limiter, so
-// it is second order where the field is smooth and falls back to upwind where
-// it is not, which is what stops it overshooting at a front.
 enum class ConvectionScheme {
     Upwind,
     Central,
@@ -29,32 +20,18 @@ enum class LimiterKind {
     Superbee
 };
 
-// Forward Euler is one projection per step. The two SSP Runge-Kutta schemes
-// project on every stage, which is what keeps the result divergence free, and
-// cost that many times more per step.
 enum class TimeScheme {
     Euler,
     RK2,
     RK3
 };
 
-// How the phase fraction is carried. None of these reconstruct the interface
-// the way PLIC does; they are algebraic, which is a fraction of the cost and
-// the reason a two-phase run is not ten times slower than a single-phase one.
-// upwind smears the interface and is here as the thing the other two are
-// measured against, hric compresses it by steering towards downwind where the
-// interface is aligned with the flow, cicsam does the same with a smooth
-// weighting that behaves better when it is not.
 enum class VofScheme {
     Upwind,
     Hric,
     Cicsam
 };
 
-// What is in the domain when the run starts. layer fills everything below
-// phaseLevel with fluid 1, drop puts a circle of fluid 1 in a domain of fluid
-// 2, column is the dam break: a block of fluid 1 in the low corner. file reads
-// one value per cell from a text file, which is what the UI paints.
 enum class PhaseInit {
     Layer,
     Drop,
@@ -62,20 +39,25 @@ enum class PhaseInit {
     File
 };
 
+enum class MixingKind {
+    Immiscible,
+    Miscible
+};
+
+bool parseMixingKind(const std::string& text, MixingKind& out,
+                     std::string& error);
+const char* mixingKindName(MixingKind kind);
+
 bool parseVofScheme(const std::string& text, VofScheme& out, std::string& error);
 bool parsePhaseInit(const std::string& text, PhaseInit& out, std::string& error);
 const char* vofSchemeName(VofScheme scheme);
 const char* phaseInitName(PhaseInit init);
 
-// One region that pushes fluid into the domain from the inside rather than
-// through a side. rate is the volume flow per unit area of the region per
-// second, so it does not change meaning when the region is resized; the
-// direction is where the fluid is aimed, and phase is which fluid comes out.
 struct FlowSource {
     float x = 0.0f, y = 0.0f;
     float radius = 0.0f;
     float rate = 0.0f;
-    float angle = 0.0f;   // degrees, 0 = +x, counter-clockwise
+    float angle = 0.0f;
     float phase = 1.0f;
 };
 
@@ -85,8 +67,6 @@ bool parseSources(const std::string& text,
 
 std::string sourcesHelp();
 
-// One geometry file and where it sits. An unplaced profile keeps the old
-// behaviour: centred in the domain at a fifth of its smaller side.
 struct Profile {
     std::string file;
     float x = 0.0f;
@@ -101,10 +81,6 @@ struct Profile {
     bool invertSet = false;
 };
 
-// Reads the profiles string: "<file>@x=..,y=..;<file>@x=..". The separator is
-// '@' rather than ':' because a Windows path already owns the colon. A token
-// with no '@' is a file with no placement. Returns false and fills error in
-// exactly the shape setParam uses.
 bool parseProfiles(const std::string& text,
                    std::vector<Profile>& out,
                    std::string& error);
@@ -159,43 +135,36 @@ struct Config {
     float gravityAngle = 0.0f;    // degrees, clockwise, 0 = down
     GravityMode gravityMode = GravityMode::Reduced;
 
-    // Phases. 1 is every run written before this existed: one density, one
-    // viscosity, ro and nu, and not one line of the phase code runs. 2 turns on
-    // the phase fraction, and then rho1/nu1 and rho2/nu2 are what the two
-    // fluids are and ro/nu are ignored.
     int phases = 1;
-    float rho1 = 1000.0f;   // kg/m^3, the fluid the initial shape is made of
-    float rho2 = 1.225f;    // kg/m^3, what fills the rest of the domain
-    float nu1 = 1e-6f;      // m^2/s
-    float nu2 = 1.5e-5f;    // m^2/s
+    float rho1 = 1000.0f;
+    float rho2 = 1.225f;
+    float nu1 = 1e-6f;
+    float nu2 = 1.5e-5f;
     PhaseInit phaseInit = PhaseInit::Layer;
-    float phaseLevel = 0.5f;    // layer height / drop radius, fraction of the domain
-    float phaseX = 0.5f;        // drop or column centre, fraction of Lx
-    float phaseY = 0.5f;        // drop centre, fraction of Ly
+    float phaseLevel = 0.5f;
+    float phaseX = 0.5f;
+    float phaseY = 0.5f;
     std::string initialPhaseFile = "";
     VofScheme vofScheme = VofScheme::Hric;
 
-    // Fluid pushed in from inside the domain rather than through a side.
-    // Empty is every run so far.
+    MixingKind mixing = MixingKind::Immiscible;
+
+    float diffusivity = 1e-6f;
+
+    float surfaceTension = 0.0f;
+
+    float contactAngle = 90.0f;
+
     std::string sources = "";
 
-    // Numerics
     ConvectionScheme convection = ConvectionScheme::Upwind;
     LimiterKind limiter = LimiterKind::VanLeer;
     TimeScheme timeScheme = TimeScheme::Euler;
 
-    // Boundaries
-    // caseType is a preset over the four sides below rather than a mode of its
-    // own: setting it rewrites them, and naming a side afterwards overrides
-    // whatever the preset put there.
     CaseType caseType = CaseType::Channel;
     float lidSpeed = 1.0f;
     BoundarySet boundaries = defaultChannelBoundaries();
 
-    // Ends the run when the field stops changing, measured as the largest
-    // velocity change per unit time against U0 or the lid speed. Zero is off,
-    // which is what every run before this one did. A cavity has no natural end
-    // time and this is the only sensible one it has.
     float steadyTolerance = 0.0f;
 
     // Time
@@ -215,17 +184,14 @@ struct Config {
     bool useCuda = true;
 
     // Output
-    // Extra named fields written into every frame beside pressure, solid and
-    // velocity. Comma separated, empty by default so a frame stays exactly the
-    // size it used to be unless somebody asks for more.
+
     std::string extraFields = "";
     int saveInterval = 20;              // write a VTK file every N steps
     std::string outputDir = "output";   // directory for solution_*.vtk
 
     // Geometry
     std::string geometryFile = "none";
-    // Several models at once, each with its own place in the domain. Empty
-    // means geometryFile alone, which is every configuration written so far.
+
     std::string profiles = "";
     float sliceAngleX = 0.0;   // degrees
     float sliceAngleZ = 0.0;   // degrees
@@ -265,21 +231,19 @@ struct Config {
     // Nearest parameter name for a typo, empty when nothing is close enough.
     static std::string suggestKey(const std::string& key);
 
-    // geometryFile and profiles say the same thing in two shapes; this is the
-    // one the mesh actually reads.
     std::vector<Profile> resolvedProfiles() const;
 
-    // "none" has always meant the verification circle rather than nothing at
-    // all, and every configuration written so far relies on that. "empty" is
-    // the way to ask for a domain with no body in it, which is what a cavity
-    // wants and what there was no way to say before.
     bool emptyDomain() const;
 
-    // Two fluids share the domain, which is what turns on the phase field, the
-    // variable coefficients in the projection and the body force formulation
-    // of gravity. Written out once here so nothing has to remember that
-    // "phases > 1" is the condition.
     bool multiphase() const { return phases > 1; }
+
+    bool hasSurfaceTension() const {
+        return multiphase() && mixing == MixingKind::Immiscible &&
+               surfaceTension > 0.0f;
+    }
+    bool miscible() const {
+        return multiphase() && mixing == MixingKind::Miscible;
+    }
 
     std::vector<FlowSource> resolvedSources() const;
 

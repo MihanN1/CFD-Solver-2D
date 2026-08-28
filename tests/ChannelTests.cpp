@@ -8,15 +8,8 @@ int main() {
     const std::filesystem::path root = scratchDir("channel");
     std::string error;
 
-    // A channel between two no-slip walls settles into a parabola whose peak
-    // is one and a half times the mean, whatever the viscosity. Nothing else
-    // in the solver is checked against an answer known on paper, and this one
-    // covers the wall condition, the mirrored faces, the inlet and the outlet
-    // in a single number.
     Config cfg = baseConfig(root / "poiseuille");
-    // Re = U*H/nu = 5, so the profile is fully developed within a fraction of
-    // the domain and the viscous time that settles it is H^2/nu = 5 s. Both
-    // numbers are chosen to make this finish in seconds rather than minutes.
+
     cfg.Lx = 2.0f;
     cfg.Ly = 1.0f;
     cfg.nx = 48;
@@ -59,10 +52,6 @@ int main() {
     if (!(std::fabs(peak - 1.5) < 0.06))
         return fail("the peak of the profile is in the wrong place");
 
-    // The same case with free-slip walls, to prove the number above came from
-    // the wall condition and not from the inlet. Nothing takes momentum out at
-    // a free-slip wall, so the row nearest it keeps moving at the inlet speed
-    // while the no-slip one is nearly stopped.
     Config slip = cfg;
     slip.outputDir = (root / "slip").string();
     slip.totalTime = 1.5;

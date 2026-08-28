@@ -111,7 +111,7 @@ Mesh::Mesh(const Config& cfg, const std::vector<uint8_t>* presetSolid)
     rasterizeSection();
     buildSolid();
 
-    if (!geometryLoaded || !hasSection()) {
+    if ((!geometryLoaded || !hasSection()) && !cfg.emptyDomain()) {
         if (!profiles.empty())
             std::cerr << "Warning: no model produced a section, falling back "
                          "to the verification circle.\n";
@@ -619,8 +619,6 @@ void Mesh::buildSection(const Profile& profile) {
     checkPlacement(profile);
 }
 
-// One cell of clearance, because a body sitting exactly on the edge turns that
-// whole side into a wall and nothing about the run says so afterwards.
 void Mesh::checkPlacement(const Profile& profile) {
     if (!placementError.empty() || sectionContours.empty())
         return;
