@@ -895,6 +895,9 @@ enum ParameterIndex : std::size_t {
     BodyPins,
     BodyMotionLine,
     BodyCouplingKind,
+    BodyCollisions,
+    BodyRestitution,
+    BodyForceReport,
     DomainX,
     DomainY,
     CellsX,
@@ -961,6 +964,7 @@ const char* parameterKey(std::size_t index) {
         "uiBodySlideY", "uiBodyVx", "uiBodyVy", "uiBodySpin",
         "uiBodyMass", "uiBodyDensity", "uiBodyPins",
         "bodyMotion", "bodyCoupling",
+        "bodyCollisions", "bodyRestitution", "bodyForceReport",
         "Lx", "Ly", "nx", "ny",
         "CFL", "totalTime", "steadyTolerance", "addTime",
         "dtUpdateInterval", "dtSafety",
@@ -1062,6 +1066,12 @@ std::string parameterHelp(std::size_t index) {
         return "Degrees of freedom held still while the rest are free. A cylinder free to spin but not to drift is x and y pinned; a body free to fall straight down is spin pinned.";
     case BodyMotionLine:
         return "bodyMotion, in the solver's own grammar: <object>:vx=0.2,omega=45;<object>:free=1,mass=2. The rows above write into this and it is what is sent, so editing it by hand does the same thing. @<seconds> opens a keyframe, which the rows above cannot write.";
+    case BodyCollisions:
+        return "Off, bodies pass straight through each other and through the walls - which is what every run before this did and is fine while nothing can meet anything. On, a body that would run into another one or into the domain edge bounces instead. Contact is read off the mask, so it is exact for any shape and not a circle around it.";
+    case BodyRestitution:
+        return "How much of the closing speed survives a bounce. 0 is a body that hits and stops dead, 1 is one that comes back at the speed it arrived. A body whose path you set is unmovable by construction, so a free body hitting one takes the whole impulse.";
+    case BodyForceReport:
+        return "Work out the fluid force on bodies whose path you set as well. It never changes where they go - a set path is a set path - it only puts the force in the step line so you can read what the fluid was doing to it. Free bodies always have it computed, because that is what moves them.";
     case BodyCouplingKind:
         return "How a free body is coupled to the fluid. added carries the fluid that moves with the body on the left hand side of its own equation of motion and costs nothing. strong iterates force and motion inside the step until they agree and costs that many pressure solves. weak does neither and is here to be compared against - it goes unstable as soon as the body is not much heavier than what it displaces.";
     case WallMotionLine:
@@ -2118,6 +2128,9 @@ public:
                      ControlKind::Text},
               Slider{"Coupling", "", 0.0, 2.0, 1.0, true, false, false, 0.0,
                      ControlKind::Choice, {"weak", "added", "strong"}},
+              Slider{"Collisions", "", 0.0, 1.0, 0.0, true, false, true},
+              Slider{"Bounciness", "", 0.0, 1.0, 0.2, false, false},
+              Slider{"Report forces", "", 0.0, 1.0, 0.0, true, false, true},
               Slider{"Domain Lx", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Domain Ly", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Cells nx", "", 8.0, 5000.0, 50.0, true, true},
@@ -3578,6 +3591,9 @@ private:
         config.supportsBodyMotion = solverInfo_.supportsBodyMotion;
         config.bodyMotion = sliders_[BodyMotionLine].text;
         config.bodyCoupling = sliders_[BodyCouplingKind].choice();
+        config.bodyCollisions = sliders_[BodyCollisions].value >= 0.5;
+        config.bodyRestitution = sliders_[BodyRestitution].value;
+        config.bodyForceReport = sliders_[BodyForceReport].value >= 0.5;
 
         config.supportsProfiles = solverInfo_.supportsProfiles;
         config.profiles = sliders_[Profiles].text;
@@ -3632,7 +3648,7 @@ private:
 
     std::optional<std::size_t> sliderForValidationError(
         const std::string& error) const {
-        const std::array<std::pair<const char*, ParameterIndex>, 24> mappings{{
+        const std::array<std::pair<const char*, ParameterIndex>, 25> mappings{{
             {"Lx", DomainX}, {"Ly", DomainY}, {"nx", CellsX}, {"ny", CellsY},
             {"U0", WindSpeed}, {"nu", Viscosity}, {"ro", Density},
             {"CFL", Cfl}, {"totalTime", TotalTime},
@@ -3643,7 +3659,8 @@ private:
             {"saveInterval", SaveInterval}, {"useCuda", UseCuda},
             {"mixing", MixingKindRow}, {"diffusivity", Diffusivity},
             {"surfaceTension", SurfaceTension}, {"contactAngle", ContactAngle},
-            {"bodyMotion", BodyMotionLine}, {"bodyCoupling", BodyCouplingKind}
+            {"bodyMotion", BodyMotionLine}, {"bodyCoupling", BodyCouplingKind},
+            {"bodyRestitution", BodyRestitution}
         }};
         for (const auto& mapping : mappings) {
             if (error.rfind(mapping.first, 0) == 0) {

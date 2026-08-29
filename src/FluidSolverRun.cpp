@@ -214,6 +214,12 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
             config.bodyCoupling != "strong") {
             return fail(error, "bodyCoupling is weak, added or strong");
         }
+        if (!(config.bodyRestitution >= 0.0) ||
+            !(config.bodyRestitution <= 1.0)) {
+            return fail(error, "bodyRestitution is how much of the closing "
+                               "speed survives a bounce, so it lives between "
+                               "0 and 1");
+        }
 
         if (config.geometryFile == "empty" && config.profiles.empty()) {
             return fail(error, "bodyMotion needs a model to move: an empty "
@@ -430,8 +436,17 @@ bool buildFluidSolverArguments(
     }
     if (config.supportsBodyMotion) {
         arguments.push_back("bodyMotion=" + config.bodyMotion);
-        if (!config.bodyMotion.empty())
+        if (!config.bodyMotion.empty()) {
             arguments.push_back("bodyCoupling=" + config.bodyCoupling);
+            arguments.push_back(
+                "bodyCollisions=" + std::string(config.bodyCollisions ? "1" : "0"));
+            if (config.bodyCollisions)
+                arguments.push_back("bodyRestitution=" +
+                                    serializeDouble(config.bodyRestitution));
+            arguments.push_back(
+                "bodyForceReport=" +
+                std::string(config.bodyForceReport ? "1" : "0"));
+        }
     }
     if (config.supportsProfiles && !config.profiles.empty()) {
         arguments.push_back("profiles=" + config.profiles);

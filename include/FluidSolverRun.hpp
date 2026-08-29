@@ -78,6 +78,9 @@ struct FluidSolverRunConfig {
 
     std::string bodyMotion;
     std::string bodyCoupling = "added";
+    bool bodyCollisions = false;
+    double bodyRestitution = 0.2;
+    bool bodyForceReport = false;
 
     bool supportsProfiles = false;
     std::string profiles;

@@ -191,6 +191,9 @@ number is not known until the mask is generated.
              Pinned             which degrees of freedom are held
              Body motion        text, the solver's grammar
              Coupling           weak | added | strong
+             Collisions         off, bodies pass through each other
+             Bounciness         how much of the closing speed survives
+             Report forces      work the force out for set paths too
 
 The two text rows are the truth and the rows above them are a way of writing
 into one entry of each - exactly as the brush is a way of writing into the
@@ -198,6 +201,24 @@ sources row. Pick a body and the rows read that body's entry back out of the
 text; change a row and it writes that entry back. Editing the text by hand does
 the same thing, and `@<seconds>` keyframes can only be written there, because a
 timetable is not a slider.
+
+**Collisions** is off by default and that is deliberate: turning it on changes
+the answer, and every run written before this branch had bodies passing
+through each other. On, a body that would run into another one or into the
+domain edge bounces instead, and **Bounciness** is how much of the closing
+speed comes back - 0 stops dead, 1 rebounds at the speed it arrived.
+
+**Report forces** works the fluid force out for bodies whose path you set as
+well. It never changes where they go; a set path is a set path. It only puts
+the force in the step line so you can read what the fluid was doing to the
+body - useful just before you release it, and for a drag coefficient. Free
+bodies always have it computed, because that is the thing that moves them.
+
+One trap the UI cannot fix for you: **object numbers come from the mask, not
+from the order the models are listed in.** The flood fill walks the grid in
+scan order, so of two shapes side by side either can end up as number 1. The
+solver prints the mapping with the mesh, before anything runs, and that is what
+the Body row is pointing at.
 
 **Behaviour** is the one row that decides which of the two strings an entry
 goes into. `drag` and `slip` are `wallMotion` - the surface moves and the body
