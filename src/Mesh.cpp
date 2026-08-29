@@ -623,6 +623,9 @@ void Mesh::checkPlacement(const Profile& profile) {
     if (!placementError.empty() || sectionContours.empty())
         return;
 
+    if (profile.attach)
+        return;
+
     double lowX = std::numeric_limits<double>::max();
     double lowY = std::numeric_limits<double>::max();
     double highX = std::numeric_limits<double>::lowest();

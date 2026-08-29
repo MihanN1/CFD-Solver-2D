@@ -202,6 +202,16 @@ bool Solver::setInitialState(RestartData&& state,
 
     restartBodies = std::move(state.bodies);
 
+    const std::size_t cells = static_cast<std::size_t>(cfg.nx) * cfg.ny;
+    for (auto& entry : state.extras) {
+        if (entry.second.size() != cells)
+            continue;
+        if (entry.first == "k")
+            restartK = std::move(entry.second);
+        else if (entry.first == "omega")
+            restartOmega = std::move(entry.second);
+    }
+
     currentTime = state.currentTime;
     step = state.step;
     restartDt = state.dt;
@@ -463,6 +473,7 @@ void Solver::advectPhase() {
     phase.refreshProperties(solidMask);
     refreshPhaseCoefficients();
     refreshSurfaceTension();
+    refreshViscosity();
 }
 
 void Solver::buildSources() {
@@ -911,6 +922,7 @@ void Solver::refreshGeometry() {
         if (hasTension)
             refreshSurfaceTension();
     }
+    refreshViscosity();
 
     fillFreshCells();
 
@@ -1598,6 +1610,23 @@ void Solver::initFields()
 
     multiphase = cfg.multiphase();
     hasTension = cfg.hasSurfaceTension();
+    turbulent = cfg.turbulent();
+    if (turbulent) {
+        const float molecular =
+            multiphase ? std::min(cfg.nu1, cfg.nu2) : cfg.nu;
+        const std::size_t cells = static_cast<std::size_t>(nx) * ny;
+        if (restartK.size() == cells && restartOmega.size() == cells)
+            turbulence.setState(std::move(restartK), std::move(restartOmega));
+        turbulence.initialise(cfg, solidMask, nx, ny, dx, dy, molecular);
+        nuTurb = &turbulence.viscosity();
+    }
+    variableViscosity = multiphase || turbulent;
+    if (variableViscosity) {
+        nuCell.assign(static_cast<size_t>(nx) * ny, cfg.nu);
+        nuNode.assign(static_cast<size_t>(nx + 1) * (ny + 1), cfg.nu);
+        viscX.assign(static_cast<size_t>(nx + 1) * ny, 0.0f);
+        viscY.assign(static_cast<size_t>(nx) * (ny + 1), 0.0f);
+    }
     if (multiphase) {
         tensionX.assign(static_cast<size_t>(nx + 1) * ny, 0.0f);
         tensionY.assign(static_cast<size_t>(nx) * (ny + 1), 0.0f);
@@ -1619,6 +1648,11 @@ void Solver::initFields()
     resolveWallMotion();
     resolveBodyMotion();
     resolveBoundaries();
+    if (turbulent)
+        turbulence.setGhosts({sideLeft.ghostSign, sideLeft.ghostOffset},
+                             {sideRight.ghostSign, sideRight.ghostOffset},
+                             {sideBottom.ghostSign, sideBottom.ghostOffset},
+                             {sideTop.ghostSign, sideTop.ghostOffset});
     buildFaceMasks();
     buildSlipFaces();
     buildMirrorFaces();
@@ -1674,6 +1708,7 @@ void Solver::initFields()
         refreshPhaseCoefficients();
         refreshSurfaceTension();
     }
+    refreshViscosity();
     buildSources();
 
     if (bodiesMove) {
@@ -1995,6 +2030,27 @@ void Solver::computeDt(){
                           cfg.dtSafety * std::sqrt(std::min(dx, dy) / g));
     }
 
+    if (turbulent) {
+        const float peak = turbulence.peakViscosity();
+        if (peak > 0.0f)
+            dt = std::min(dt, cfg.dtSafety /
+                                  (2.0f * (nuLimit + peak) *
+                                   (invDx2 + invDy2)));
+
+        const float sources = turbulence.sourceStepLimit();
+        if (sources > 0.0f && cfg.dtSafety * sources < dt) {
+            dt = cfg.dtSafety * sources;
+            if (!turbulenceReported) {
+                turbulenceReported = true;
+                std::cout << "  note: the k-omega source terms set the step "
+                             "size here, not the flow.\n  omega is 60 nu / "
+                             "(beta1 d^2) at a wall, so the first cell off it "
+                             "decides, and that\n  limit falls as dx^2. It is "
+                             "not the solver hanging.\n";
+            }
+        }
+    }
+
     // A field that has stopped being a number has no step size in it, and the
     // old fallback of 1e-6 was a number with no relation to the grid, the fluid
     // or the run: it kept grinding out frames of NaN until the check that only
@@ -2021,46 +2077,176 @@ void Solver::computeDt(){
     }
 }
 
-template <bool TwoPhase>
+template <bool TwoPhase, bool VarVisc>
 void Solver::predictorByScheme() {
     switch (cfg.convection) {
     case ConvectionScheme::Central:
-        predictorImpl<PhiCentral, TwoPhase>();
+        predictorImpl<PhiCentral, TwoPhase, VarVisc>();
         return;
     case ConvectionScheme::Muscl:
         switch (cfg.limiter) {
         case LimiterKind::Minmod:
-            predictorImpl<PhiMinmod, TwoPhase>();
+            predictorImpl<PhiMinmod, TwoPhase, VarVisc>();
             return;
         case LimiterKind::Superbee:
-            predictorImpl<PhiSuperbee, TwoPhase>();
+            predictorImpl<PhiSuperbee, TwoPhase, VarVisc>();
             return;
         default:
-            predictorImpl<PhiVanLeer, TwoPhase>();
+            predictorImpl<PhiVanLeer, TwoPhase, VarVisc>();
             return;
         }
     default: break;
     }
-    predictorImpl<PhiUpwind, TwoPhase>();
+    predictorImpl<PhiUpwind, TwoPhase, VarVisc>();
+}
+
+void Solver::refreshViscosity() {
+    if (!variableViscosity)
+        return;
+    const int nx = cfg.nx, ny = cfg.ny;
+
+    const float* __restrict mu = multiphase ? phase.viscosity().data() : nullptr;
+    const float* __restrict rho = multiphase ? phase.density().data() : nullptr;
+
+    #pragma omp parallel for schedule(static) if (ny >= 32)
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        for (int i = 0; i < nx; ++i) {
+            const int id = row + i;
+            const float molecular =
+                multiphase ? mu[id] / std::max(1e-20f, rho[id]) : cfg.nu;
+            nuCell[id] = molecular + (turbulent ? (*nuTurb)[id] : 0.0f);
+        }
+    }
+
+    #pragma omp parallel for schedule(static) if (ny >= 32)
+    for (int j = 0; j <= ny; ++j) {
+        for (int i = 0; i <= nx; ++i) {
+            float sum = 0.0f;
+            int count = 0;
+            for (int dj = -1; dj <= 0; ++dj)
+                for (int di = -1; di <= 0; ++di) {
+                    const int cj = j + dj, ci = i + di;
+                    if (cj < 0 || cj >= ny || ci < 0 || ci >= nx)
+                        continue;
+                    sum += nuCell[cj * nx + ci];
+                    ++count;
+                }
+            nuNode[j * (nx + 1) + i] = count > 0 ? sum / count : cfg.nu;
+        }
+    }
+}
+
+void Solver::computeViscousStress() {
+    const int nx = cfg.nx, ny = cfg.ny;
+    const float* __restrict uPtr = u.data();
+    const float* __restrict vPtr = v.data();
+    const float* __restrict nuC = nuCell.data();
+    const float* __restrict nuN = nuNode.data();
+    float* __restrict outX = viscX.data();
+    float* __restrict outY = viscY.data();
+
+    #pragma omp parallel for schedule(static) if (ny >= 32)
+    for (int j = 0; j < ny; ++j) {
+        const int rowU = j * (nx + 1);
+        const int row = j * nx;
+        for (int i = 1; i < nx; ++i) {
+            const int id = rowU + i;
+            const float dudxRight =
+                (uPtr[id + 1] - uPtr[id]) * invDx;
+            const float dudxLeft =
+                (uPtr[id] - uPtr[id - 1]) * invDx;
+            const float normal =
+                2.0f * (nuC[row + i] * dudxRight -
+                        nuC[row + i - 1] * dudxLeft) * invDx;
+
+            const int nodeBottom = j * (nx + 1) + i;
+            const int nodeTop = (j + 1) * (nx + 1) + i;
+            const float uAbove =
+                (j + 1 < ny) ? uPtr[id + (nx + 1)]
+                             : sideTop.ghostSign * uPtr[id] +
+                                   sideTop.ghostOffset;
+            const float uBelow =
+                (j > 0) ? uPtr[id - (nx + 1)]
+                        : sideBottom.ghostSign * uPtr[id] +
+                              sideBottom.ghostOffset;
+            const float shearTop =
+                (uAbove - uPtr[id]) * invDy +
+                (vPtr[(j + 1) * nx + i] - vPtr[(j + 1) * nx + i - 1]) * invDx;
+            const float shearBottom =
+                (uPtr[id] - uBelow) * invDy +
+                (vPtr[row + i] - vPtr[row + i - 1]) * invDx;
+            const float cross =
+                (nuN[nodeTop] * shearTop - nuN[nodeBottom] * shearBottom) *
+                invDy;
+
+            outX[id] = normal + cross;
+        }
+        outX[rowU] = 0.0f;
+        outX[rowU + nx] = 0.0f;
+    }
+
+    #pragma omp parallel for schedule(static) if (ny >= 32)
+    for (int j = 1; j < ny; ++j) {
+        const int rowV = j * nx;
+        for (int i = 0; i < nx; ++i) {
+            const int id = rowV + i;
+            const float dvdyTop =
+                (vPtr[id + nx] - vPtr[id]) * invDy;
+            const float dvdyBottom =
+                (vPtr[id] - vPtr[id - nx]) * invDy;
+            const float normal =
+                2.0f * (nuC[rowV + i] * dvdyTop -
+                        nuC[rowV - nx + i] * dvdyBottom) * invDy;
+
+            const int nodeLeft = j * (nx + 1) + i;
+            const int nodeRight = j * (nx + 1) + i + 1;
+            const float vRight =
+                (i + 1 < nx) ? vPtr[id + 1]
+                             : sideRight.ghostSign * vPtr[id] +
+                                   sideRight.ghostOffset;
+            const float vLeft =
+                (i > 0) ? vPtr[id - 1]
+                        : sideLeft.ghostSign * vPtr[id] +
+                              sideLeft.ghostOffset;
+            const float shearRight =
+                (vRight - vPtr[id]) * invDx +
+                (uPtr[j * (nx + 1) + i + 1] -
+                 uPtr[(j - 1) * (nx + 1) + i + 1]) * invDy;
+            const float shearLeft =
+                (vPtr[id] - vLeft) * invDx +
+                (uPtr[j * (nx + 1) + i] -
+                 uPtr[(j - 1) * (nx + 1) + i]) * invDy;
+            const float cross =
+                (nuN[nodeRight] * shearRight - nuN[nodeLeft] * shearLeft) *
+                invDx;
+
+            outY[id] = normal + cross;
+        }
+    }
+    std::fill(viscY.begin(), viscY.begin() + nx, 0.0f);
+    std::fill(viscY.end() - nx, viscY.end(), 0.0f);
 }
 
 void Solver::predictor() {
+    if (variableViscosity)
+        computeViscousStress();
     if (multiphase)
-        predictorByScheme<true>();
+        predictorByScheme<true, true>();
+    else if (variableViscosity)
+        predictorByScheme<false, true>();
     else
-        predictorByScheme<false>();
+        predictorByScheme<false, false>();
 }
 
-template <int Phi, bool TwoPhase>
+template <int Phi, bool TwoPhase, bool VarVisc>
 void Solver::predictorImpl() {
     const int nx = cfg.nx, ny = cfg.ny;
     const float dtNu = dt * cfg.nu;
     const float dtConv = dt;
 
-    const float* __restrict nuFaceX =
-        TwoPhase ? phase.faceNuX().data() : nullptr;
-    const float* __restrict nuFaceY =
-        TwoPhase ? phase.faceNuY().data() : nullptr;
+    const float* __restrict viscXPtr = VarVisc ? viscX.data() : nullptr;
+    const float* __restrict viscYPtr = VarVisc ? viscY.data() : nullptr;
 
     const float* __restrict tensX = TwoPhase ? tensionX.data() : nullptr;
     const float* __restrict tensY = TwoPhase ? tensionY.data() : nullptr;
@@ -2165,10 +2351,10 @@ void Solver::predictorImpl() {
                 _mm256_add_ps(
                     d2udx2,
                     d2udy2);
-            __m256 dtNuHere = dtNuVec;
-            if constexpr (TwoPhase)
-                dtNuHere = _mm256_mul_ps(
-                    dtVec, _mm256_loadu_ps(nuFaceX + rowU + i));
+            __m256 viscVec = _mm256_mul_ps(dtNuVec, diff);
+            if constexpr (VarVisc)
+                viscVec = _mm256_mul_ps(
+                    dtVec, _mm256_loadu_ps(viscXPtr + rowU + i));
             __m256 forceVec = bodyGxVec;
             if constexpr (TwoPhase)
                 forceVec = _mm256_add_ps(
@@ -2180,7 +2366,7 @@ void Solver::predictorImpl() {
                         _mm256_sub_ps(
                             uij,
                             _mm256_mul_ps(dtConvVec, conv)),
-                        _mm256_mul_ps(dtNuHere, diff)),
+                        viscVec),
                     forceVec);
             _mm256_storeu_ps(
                 uStarRow + i,
@@ -2223,8 +2409,8 @@ void Solver::predictorImpl() {
             uStarRow[i] = uMask[i] * (
                 u_ij
                 - dtConv * (u_ij*dudx + v_n*dudy)
-                + (TwoPhase ? dt * nuFaceX[rowU + i] : dtNu) *
-                      (d2udx2 + d2udy2)
+                + (VarVisc ? dt * viscXPtr[rowU + i]
+                           : dtNu * (d2udx2 + d2udy2))
                 + bodyGx + (TwoPhase ? dt * tensX[rowU + i] : 0.0f))
                 + uWallRow[i];
         }
@@ -2281,8 +2467,8 @@ void Solver::predictorImpl() {
             uStarRow[i] = uMask[i] * (
                 u_ij
                 - dtConv * (u_ij*dudx + v_n*dudy)
-                + (TwoPhase ? dt * nuFaceX[rowU + i] : dtNu) *
-                      (d2udx2 + d2udy2)
+                + (VarVisc ? dt * viscXPtr[rowU + i]
+                           : dtNu * (d2udx2 + d2udy2))
                 + bodyGx + (TwoPhase ? dt * tensX[rowU + i] : 0.0f))
                 + uWallRow[i];
         }
@@ -2365,10 +2551,10 @@ void Solver::predictorImpl() {
                 _mm256_add_ps(
                     d2vdx2,
                     d2vdy2);
-            __m256 dtNuHere = dtNuVec;
-            if constexpr (TwoPhase)
-                dtNuHere = _mm256_mul_ps(
-                    dtVec, _mm256_loadu_ps(nuFaceY + rowV + i));
+            __m256 viscVec = _mm256_mul_ps(dtNuVec, diff);
+            if constexpr (VarVisc)
+                viscVec = _mm256_mul_ps(
+                    dtVec, _mm256_loadu_ps(viscYPtr + rowV + i));
             __m256 forceVec = bodyGyVec;
             if constexpr (TwoPhase)
                 forceVec = _mm256_add_ps(
@@ -2380,7 +2566,7 @@ void Solver::predictorImpl() {
                         _mm256_sub_ps(
                             vij,
                             _mm256_mul_ps(dtConvVec, conv)),
-                        _mm256_mul_ps(dtNuHere, diff)),
+                        viscVec),
                     forceVec);
             _mm256_storeu_ps(
                 vStarRow + i,
@@ -2423,8 +2609,8 @@ void Solver::predictorImpl() {
             vStarRow[i] = vMask[i] * (
                 v_ij
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
-                + (TwoPhase ? dt * nuFaceY[rowV + i] : dtNu) *
-                      (d2vdx2 + d2vdy2)
+                + (VarVisc ? dt * viscYPtr[rowV + i]
+                           : dtNu * (d2vdx2 + d2vdy2))
                 + bodyGy + (TwoPhase ? dt * tensY[rowV + i] : 0.0f))
                 + vWallRow[i];
         }
@@ -2470,8 +2656,8 @@ void Solver::predictorImpl() {
             vStarRow[iCol] = vMask[iCol] * (
                 v_ij
                 - dtConv * (u_e*dvdx + v_ij*dvdy)
-                + (TwoPhase ? dt * nuFaceY[rowV + iCol] : dtNu) *
-                      (d2vdx2 + d2vdy2)
+                + (VarVisc ? dt * viscYPtr[rowV + iCol]
+                           : dtNu * (d2vdx2 + d2vdy2))
                 + bodyGy + (TwoPhase ? dt * tensY[rowV + iCol] : 0.0f))
                 + vWallRow[iCol];
         }
@@ -3201,6 +3387,10 @@ void Solver::run() {
 
         if (multiphase)
             advectPhase();
+        if (turbulent) {
+            turbulence.advance(u, v, solidMask, dt);
+            refreshViscosity();
+        }
 
         currentTime += dt;
         // stepDt is a float and the remainder it was cut from is a double, so
@@ -3376,6 +3566,20 @@ std::vector<Solver::ExtraField> Solver::buildExtraFields(
             field.name = "source";
             if (hasSources)
                 field.values = sourceRate;
+        } else if (key == "nut") {
+            field.name = "nuT";
+            if (turbulent)
+                field.values = turbulence.viscosity();
+        } else if (key == "k" || key == "omega") {
+            continue;
+        } else if (key == "walldistance") {
+            field.name = "wallDistance";
+            if (turbulent)
+                field.values = turbulence.distance();
+        } else if (key == "strain") {
+            field.name = "strain";
+            if (turbulent)
+                field.values = turbulence.strain();
         } else if (key == "objectid") {
             field.name = "objectId";
             for (size_t id = 0; id < cells; ++id)
@@ -3479,6 +3683,16 @@ void Solver::saveVTK(int stepNum) const {
     if (multiphase) {
         fout << "SCALARS phase float 1\n" << "LOOKUP_TABLE default\n";
         writeArray(phase.fraction().data(), phase.fraction().size());
+        fout << "\n";
+    }
+
+    if (turbulence.transported()) {
+        fout << "SCALARS k float 1\n" << "LOOKUP_TABLE default\n";
+        writeArray(turbulence.kinetic().data(), turbulence.kinetic().size());
+        fout << "\n";
+        fout << "SCALARS omega float 1\n" << "LOOKUP_TABLE default\n";
+        writeArray(turbulence.frequency().data(),
+                   turbulence.frequency().size());
         fout << "\n";
     }
 

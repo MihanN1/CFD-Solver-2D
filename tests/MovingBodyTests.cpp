@@ -482,6 +482,50 @@ int main() {
         report(line);
     }
 
+    {
+        struct Shape { const char* kind; double travelled; };
+        Shape shapes[] = {{"constant", 0.0}, {"linear", 0.0}, {"bezier", 0.0},
+                          {"quad", 0.0}, {"bounce", 0.0}};
+        for (Shape& shape : shapes) {
+            Config cfg = movingCase(
+                root / ("interp-" + std::string(shape.kind)), model);
+            cfg.totalTime = 1.0;
+            cfg.bodyMotion = std::string("1:@0,vx=0,interp=") + shape.kind +
+                             ",@0.5,vx=0.4,@1,vx=0.4";
+
+            RestartData frame;
+            if (!runCase(cfg, frame, error))
+                return fail(std::string("the ") + shape.kind +
+                            " run failed: " + error);
+            const RestartData::BodyState* body = bodyOf(frame, 1);
+            if (!body)
+                return fail("an interpolation run wrote no body state");
+            shape.travelled = body->x;
+        }
+
+        if (std::fabs(shapes[0].travelled - 0.2) > 0.02)
+            return fail("constant interpolation did not hold: " +
+                        std::to_string(shapes[0].travelled) + " against 0.2");
+
+        for (const Shape& shape : shapes)
+            if (shape.travelled > 0.4 + 1e-3)
+                return fail(std::string(shape.kind) +
+                            " overshot the fastest the body was ever told to "
+                            "go: " + std::to_string(shape.travelled));
+        if (!(shapes[2].travelled > shapes[1].travelled))
+            return fail("bezier came out no smoother than linear, so the "
+                        "handles are doing nothing");
+
+        char line[240];
+        std::snprintf(line, sizeof(line),
+                      "interpolation constant %.4f, linear %.4f, bezier %.4f, "
+                      "quad %.4f, bounce %.4f m",
+                      shapes[0].travelled, shapes[1].travelled,
+                      shapes[2].travelled, shapes[3].travelled,
+                      shapes[4].travelled);
+        report(line);
+    }
+
     removeDir(root);
     if (rc == 0)
         std::cout << "MovingBodyTests OK\n";

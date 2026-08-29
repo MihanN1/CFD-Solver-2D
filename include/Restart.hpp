@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <string>
+#include <utility>
 #include <vector>
 
 // Bumped whenever the binary layout of a frame changes in a way an older reader
@@ -27,6 +28,8 @@ struct RestartData {
     std::vector<float> p;          // nx * ny, kinematic (no ro scaling)
 
     std::vector<float> phase;
+
+    std::vector<std::pair<std::string, std::vector<float>>> extras;
 
     struct BodyState {
         int object = 0;
