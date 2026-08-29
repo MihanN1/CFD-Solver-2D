@@ -227,6 +227,28 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                                "have its outline cut again wherever it goes");
         }
     }
+    if (config.supportsTurbulence && config.turbulence != "none") {
+        if (config.turbulence != "smagorinsky" &&
+            config.turbulence != "kOmegaSST") {
+            return fail(error, "turbulence is none, smagorinsky or kOmegaSST");
+        }
+        if (!(config.turbulenceCs > 0.0) || !(config.turbulenceCs <= 1.0)) {
+            return fail(error, "Cs is the Smagorinsky constant and lives "
+                               "between 0 and 1; 0.17 is the value it was "
+                               "derived at and 0.1 is what channels want");
+        }
+        if (!(config.turbIntensity >= 0.0) ||
+            !(config.turbIntensity <= 1.0)) {
+            return fail(error, "turbIntensity is a fraction of the inlet "
+                               "speed, so it lives between 0 and 1: 0.05 is "
+                               "five percent");
+        }
+        if (!(config.turbLengthScale >= 0.0) ||
+            !std::isfinite(config.turbLengthScale)) {
+            return fail(error, "turbLengthScale cannot be negative; zero lets "
+                               "the solver take a tenth of the domain height");
+        }
+    }
     if (config.profiles.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "profiles must not contain CR or LF");
     }
@@ -446,6 +468,17 @@ bool buildFluidSolverArguments(
             arguments.push_back(
                 "bodyForceReport=" +
                 std::string(config.bodyForceReport ? "1" : "0"));
+        }
+    }
+    if (config.supportsTurbulence) {
+        arguments.push_back("turbulence=" + config.turbulence);
+        if (config.turbulence == "smagorinsky")
+            arguments.push_back("Cs=" + serializeDouble(config.turbulenceCs));
+        if (config.turbulence == "kOmegaSST") {
+            arguments.push_back("turbIntensity=" +
+                                serializeDouble(config.turbIntensity));
+            arguments.push_back("turbLengthScale=" +
+                                serializeDouble(config.turbLengthScale));
         }
     }
     if (config.supportsProfiles && !config.profiles.empty()) {

@@ -152,6 +152,7 @@ is not there:
 | `caseType` `lidSpeed` `steadyTolerance` | `caseType` |
 | `phases` `rho1` `nu1` `rho2` `nu2` `phaseInit` … `sources` | `vofScheme` |
 | `mixing` `diffusivity` `surfaceTension` `contactAngle` | `surfaceTension` |
+| `turbulence` `Cs` `turbIntensity` `turbLengthScale` | `turbLengthScale` |
 
 `bc<Side>Speed` is only written when that side is a `movingWall` or the speed is
 not zero. Writing `bcLeftSpeed=0` for an inlet would tell the solver a standstill
@@ -213,6 +214,31 @@ well. It never changes where they go; a set path is a set path. It only puts
 the force in the step line so you can read what the fluid was doing to the
 body - useful just before you release it, and for a drag coefficient. Free
 bodies always have it computed, because that is the thing that moves them.
+
+=== TURBULENCE ===
+
+    TURBULENCE  Turbulence model        none | smagorinsky | kOmegaSST
+                Smagorinsky Cs          the one constant smagorinsky has
+                Turbulence intensity    fraction of the inlet speed
+                Turbulence length       m, the biggest eddy coming in
+
+Four rows, and three of them are read by one model each. `Cs` is only sent for
+`smagorinsky`; the two inlet rows are only sent for `kOmegaSST`; `none` sends
+the model name and nothing else, so a run with the model off puts exactly one
+extra key on the command line and changes nothing about what the solver does.
+
+The whole group is held back on finding `turbLengthScale` in the executable,
+like every block since 0.2. Point it at a 0.7 solver and none of these four
+rows reach the command line.
+
+Refused before the run rather than after: a `Cs` of zero or above one, an
+intensity above one - an inlet more turbulent than it is moving - and a
+negative length scale.
+
+`nuT`, `wallDistance` and `strain` are `extraFields` like any other and show up
+in the **Field** button once the solver has been asked to write them. `k` and
+`omega` arrive on their own in every frame of a `kOmegaSST` run, because the
+solver needs them back to continue.
 
 One trap the UI cannot fix for you: **object numbers come from the mask, not
 from the order the models are listed in.** The flood fill walks the grid in
@@ -295,15 +321,53 @@ with a cylinder sitting in the middle of it.
 ## Result fields
 
 A frame carries pressure, the solid mask and velocity. Anything else the solver
-was asked to write - `vorticity`, `divergence`, `speed`, `objectId` - is read
-into a registry keyed by the name the frame used, and the **Field** button walks
-whatever turned up and back round to pressure. Nothing in the UI has a list of
-which fields exist, so a field the solver learns to write later shows up without
-this project changing.
+was asked to write - `vorticity`, `divergence`, `speed`, `objectId`, `phase`,
+`nuT`, `k`, `omega`, `wallDistance`, `strain` - is read into a registry keyed by
+the name the frame used, and the **Field** button walks whatever turned up and
+back round to pressure. Nothing in the UI has a list of which fields exist, so a
+field the solver learns to write later shows up without this project changing.
+
+Where a scalar sits in the file is the writer's business, and it took a while to
+admit it. The reader used to refuse any array it did not recognise until it had
+seen all three of pressure, mask and velocity - and the solver writes the phase
+fraction between the pressure and the mask, with `k` and `omega` beside it. So
+every two-fluid frame ever written was rejected on the way in with *Unknown
+scalar array before required arrays: phase*. The order check is gone; a frame
+that never provides the three is still rejected, at the end of the parse where
+that can actually be known.
 
 The three that were always there stay named members rather than map entries:
 they are read on every pixel of every redraw and have no business going through
 a hash lookup to get there.
+
+### The preview is on the solver's grid, not on a better one
+
+The UI cuts the section itself, writes it out as `section-adapter.obj`, and
+then compares the mask the solver rasterised out of that file against the one
+it drew for the preview. They used to disagree, by three cells out of 2500, on
+a cube.
+
+The solver keeps its grid spacing in `float`: `dx = float(Lx)/nx`. The preview
+computed it in `double`. For `Lx = 1, nx = 50` that is 0.019999999552965164
+against 0.02, and by `i = 30` the two disagree about where the cell centre is
+by a part in 10^8.
+
+That is nothing at all right up until a face of the model lands on a cell
+boundary, which for anything axis aligned it does on purpose. Then the four
+corner cells of the rectangle sit at exactly one cell circumradius from the
+outline - the distance at which the rasteriser decides a cell is on the
+boundary - and a part in 10^8 is the whole difference between a solid cell and
+an empty one.
+
+So the preview now divides in `float` too. Being more accurate than the thing
+you are previewing is not an improvement.
+
+The answer this produces is not symmetrical: `float(1)/50` is a hair UNDER
+0.02, so a cell centre drifts towards the origin as its index grows, and the
+far corners land just inside the circumradius while the near ones land just
+outside. Three corners solid, one not. It looks like a bug and it is the
+solver's own answer, which is the only answer a preview is allowed to have.
+GeometryProcessorTests pins all four.
 
 ## Frame loading
 

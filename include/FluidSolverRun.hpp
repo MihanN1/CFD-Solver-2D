@@ -82,6 +82,12 @@ struct FluidSolverRunConfig {
     double bodyRestitution = 0.2;
     bool bodyForceReport = false;
 
+    bool supportsTurbulence = false;
+    std::string turbulence = "none";
+    double turbulenceCs = 0.17;
+    double turbIntensity = 0.05;
+    double turbLengthScale = 0.0;
+
     bool supportsProfiles = false;
     std::string profiles;
 

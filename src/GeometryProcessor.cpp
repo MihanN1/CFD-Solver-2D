@@ -1015,8 +1015,11 @@ MaskResult GeometryProcessor::rasterizeContours(
     }
     result.contours = std::move(contours);
     result.cells.assign(width * height, 0);
-    const double dx = parameters.Lx / parameters.nx;
-    const double dy = parameters.Ly / parameters.ny;
+
+    const double dx = static_cast<float>(parameters.Lx) /
+                      static_cast<float>(parameters.nx);
+    const double dy = static_cast<float>(parameters.Ly) /
+                      static_cast<float>(parameters.ny);
     const double boundaryRadius = 0.5 * std::hypot(dx, dy);
 
     for (int j = 0; j < parameters.ny; ++j) {

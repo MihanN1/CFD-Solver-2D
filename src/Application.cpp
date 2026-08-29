@@ -864,6 +864,10 @@ enum ParameterIndex : std::size_t {
     GravityAccel,
     GravityAngle,
     GravityMode,
+    TurbulenceKindRow,
+    SmagorinskyCs,
+    TurbIntensity,
+    TurbLengthScale,
     SliceX,
     SliceZ,
     SliceRotation,
@@ -931,9 +935,10 @@ struct ParameterGroupInfo {
     const char* label;
 };
 
-constexpr std::array<ParameterGroupInfo, 13> PARAMETER_GROUPS{{
+constexpr std::array<ParameterGroupInfo, 14> PARAMETER_GROUPS{{
     {WindSpeed, "FLOW"},
     {Phases, "FLUIDS"},
+    {TurbulenceKindRow, "TURBULENCE"},
     {SliceX, "GEOMETRY"},
     {CaseKind, "BOUNDARIES"},
     {WallMotionLine, "WALLS"},
@@ -954,6 +959,7 @@ const char* parameterKey(std::size_t index) {
         "phaseInit", "phaseLevel", "phaseX", "phaseY", "vofScheme",
         "mixing", "diffusivity", "surfaceTension", "contactAngle", "sources",
         "gravityEnabled", "gravityAccel", "gravityAngle", "gravityMode",
+        "turbulence", "Cs", "turbIntensity", "turbLengthScale",
         "sliceAngleX", "sliceAngleZ", "sliceRotation", "profiles",
         "caseType", "lidSpeed",
         "bcLeft", "bcRight", "bcBottom", "bcTop",
@@ -1018,6 +1024,14 @@ std::string parameterHelp(std::size_t index) {
         return "gravityAccel: magnitude of that body force in m/s2. 9.81 is Earth.";
     case GravityAngle:
         return "gravityAngle: direction in degrees, measured clockwise from straight down.";
+    case TurbulenceKindRow:
+        return "none solves what is actually on the grid and nothing else, which is right until the grid stops being able to hold the smallest eddy that matters. smagorinsky is a large eddy model: it adds the viscosity the eddies smaller than a cell would have had, and it wants a grid fine enough that they really are small. kOmegaSST carries two more transported fields and models all of the turbulence rather than the small end of it, which is what a Reynolds number in the millions on a grid you can afford needs.";
+    case SmagorinskyCs:
+        return "Cs: the one constant Smagorinsky has. 0.17 is what it comes out at for isotropic turbulence, 0.1 is what channels and anything with a wall in it want, and near a wall it gets damped down from there anyway.";
+    case TurbIntensity:
+        return "How turbulent the inlet is, as a fraction of its speed. 0.01 is a wind tunnel, 0.05 is a pipe, 0.1 is behind something. Only kOmegaSST reads it: it sets k = 1.5*(I*U)^2 coming in.";
+    case TurbLengthScale:
+        return "The size of the biggest eddy coming in through the inlet, in metres. A tenth of the pipe or the duct is the usual guess, and zero lets the solver take a tenth of Ly. Only kOmegaSST reads it: with the intensity above it sets omega coming in.";
     case SliceX:
     case SliceZ:
     case SliceRotation:
@@ -1757,6 +1771,7 @@ struct SolverExecutableInfo {
     bool supportsGravity = false;           // gravityEnabled= Accel= Angle=
     bool supportsWallMotion = false;        // wallMotion=
     bool supportsBodyMotion = false;
+    bool supportsTurbulence = false;
     bool supportsProfiles = false;
     bool supportsExtraFields = false;
     bool supportsSchemes = false;
@@ -1946,6 +1961,7 @@ SolverExecutableInfo inspectSolverExecutable(
     info.supportsGravity = binaryContains(executable, "gravityEnabled");
     info.supportsWallMotion = binaryContains(executable, "wallMotion");
     info.supportsBodyMotion = binaryContains(executable, "bodyMotion");
+    info.supportsTurbulence = binaryContains(executable, "turbLengthScale");
     info.supportsProfiles = binaryContains(executable, "profiles");
     info.supportsExtraFields = binaryContains(executable, "extraFields");
     info.supportsSchemes = binaryContains(executable, "timeScheme");
@@ -2082,6 +2098,12 @@ public:
               Slider{"Gravity angle", "deg", -180.0, 180.0, 0.0, false, false},
               Slider{"Gravity mode", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
                      ControlKind::Choice, {"reduced", "body"}},
+              Slider{"Turbulence model", "", 0.0, 2.0, 0.0, true, false, false,
+                     0.0, ControlKind::Choice,
+                     {"none", "smagorinsky", "kOmegaSST"}},
+              Slider{"Smagorinsky Cs", "", 0.01, 1.0, 0.17, false, false},
+              Slider{"Turbulence intensity", "", 0.0, 1.0, 0.05, false, false},
+              Slider{"Turbulence length", "m", 0.0, 100.0, 0.0, false, false},
               Slider{"Slice X", "deg", -180.0, 180.0, 90.0, true, false},
               Slider{"Slice Z", "deg", -180.0, 180.0, 90.0, true, false},
               Slider{"Slice rotation", "deg", -180.0, 180.0, 0.0, false, false},
@@ -3594,6 +3616,12 @@ private:
         config.bodyCollisions = sliders_[BodyCollisions].value >= 0.5;
         config.bodyRestitution = sliders_[BodyRestitution].value;
         config.bodyForceReport = sliders_[BodyForceReport].value >= 0.5;
+
+        config.supportsTurbulence = solverInfo_.supportsTurbulence;
+        config.turbulence = sliders_[TurbulenceKindRow].choice();
+        config.turbulenceCs = sliders_[SmagorinskyCs].value;
+        config.turbIntensity = sliders_[TurbIntensity].value;
+        config.turbLengthScale = sliders_[TurbLengthScale].value;
 
         config.supportsProfiles = solverInfo_.supportsProfiles;
         config.profiles = sliders_[Profiles].text;
