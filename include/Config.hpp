@@ -39,6 +39,16 @@ enum class PhaseInit {
     File
 };
 
+enum class TurbulenceKind {
+    None,
+    Smagorinsky,
+    KOmegaSST
+};
+
+bool parseTurbulenceKind(const std::string& text, TurbulenceKind& out,
+                         std::string& error);
+const char* turbulenceKindName(TurbulenceKind kind);
+
 enum class MixingKind {
     Immiscible,
     Miscible
@@ -81,6 +91,8 @@ struct Profile {
     bool angleSet = false;
     bool invert = false;
     bool invertSet = false;
+
+    bool attach = false;
 };
 
 bool parseProfiles(const std::string& text,
@@ -116,12 +128,43 @@ bool parseWallMotion(const std::string& text,
 // for anybody who had not read the parser, so the prompt prints this instead.
 std::string wallMotionHelp();
 
+enum class InterpKind {
+    Constant,
+    Linear,
+    Bezier,
+    Sine,
+    Quad,
+    Cubic,
+    Quart,
+    Quint,
+    Expo,
+    Circ,
+    Back,
+    Bounce,
+    Elastic
+};
+
+enum class EaseKind {
+    Auto,
+    In,
+    Out,
+    InOut
+};
+
+bool parseInterpKind(const std::string& text, InterpKind& out,
+                     std::string& error);
+bool parseEaseKind(const std::string& text, EaseKind& out, std::string& error);
+const char* interpKindName(InterpKind kind);
+const char* easeKindName(EaseKind kind);
+
 struct BodyKeyframe {
     float time = 0.0f;
     float vx = 0.0f;
     float vy = 0.0f;
     float omega = 0.0f;   // degrees/s, counter-clockwise
     bool free = false;
+    InterpKind interp = InterpKind::Linear;
+    EaseKind ease = EaseKind::Auto;
 };
 
 struct BodyMotion {
@@ -247,6 +290,13 @@ struct Config {
     float bodyRestitution = 0.2f;
     bool bodyForceReport = false;
 
+    TurbulenceKind turbulence = TurbulenceKind::None;
+
+    float Cs = 0.17f;
+
+    float turbIntensity = 0.05f;
+    float turbLengthScale = 0.0f;
+
     // Methods
     void readFromConsole();
 
@@ -284,6 +334,8 @@ struct Config {
     bool multiphase() const { return phases > 1; }
 
     bool bodiesMove() const { return !bodyMotion.empty(); }
+
+    bool turbulent() const { return turbulence != TurbulenceKind::None; }
 
     bool hasSurfaceTension() const {
         return multiphase() && mixing == MixingKind::Immiscible &&

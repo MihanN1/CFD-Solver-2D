@@ -578,6 +578,11 @@ bool loadRestart(const std::filesystem::path& file,
             } else if (name == "phase" && width == 4) {
                 if (!readFloats(fin, out.phase, count))
                     return fail(error, "Truncated phase array");
+            } else if (width == 4 && components == 1) {
+                std::vector<float> values;
+                if (!readFloats(fin, values, count))
+                    return fail(error, "Truncated SCALARS " + name);
+                out.extras.push_back({name, std::move(values)});
             } else if (!skipBytes(fin,
                                   static_cast<std::streamoff>(count * width))) {
                 return fail(error, "Truncated SCALARS " + name);

@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(CFD-Solver-2D
-    VERSION 0.7.0
+    VERSION 0.8.0
     LANGUAGES CXX
 )
 
@@ -176,6 +176,7 @@ set(CFD_CORE_SOURCES
     src/Config.cpp
     src/Phase.cpp
     src/RigidBody.cpp
+    src/Turbulence.cpp
     src/Restart.cpp
     src/Mesh.cpp
     src/Solver.cpp
@@ -444,6 +445,27 @@ if(CFD_STATIC AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     elseif(CFD_ENABLE_CUDA)
         # libcudart_static wants dlopen and pthread, so the executable stays
         # dynamically linked against libc and the driver.
+        #
+        # -static-libstdc++ does not name an archive, it turns the driver's
+        # -lstdc++ into a static one and lets -L decide which. CMake puts
+        # nvcc's own host compiler directory on the link line, and where that
+        # is a different GCC from the one compiling C++ - which is the normal
+        # case, since nvcc pins an older one - the archive that comes back is
+        # from the wrong release. The binary links, and then dies inside the
+        # first << it reaches, because std::cout was never constructed. Asking
+        # the compiler where its own libstdc++.a lives and putting that
+        # directory in front settles it.
+        execute_process(
+            COMMAND "${CMAKE_CXX_COMPILER}" -print-file-name=libstdc++.a
+            OUTPUT_VARIABLE CFD_LIBSTDCXX_A
+            OUTPUT_STRIP_TRAILING_WHITESPACE
+            ERROR_QUIET
+        )
+        if(EXISTS "${CFD_LIBSTDCXX_A}")
+            get_filename_component(CFD_LIBSTDCXX_DIR "${CFD_LIBSTDCXX_A}" DIRECTORY)
+            target_link_options(cfd_app PRIVATE "-L${CFD_LIBSTDCXX_DIR}")
+            message(STATUS "Static libstdc++: ${CFD_LIBSTDCXX_A}")
+        endif()
         target_link_options(cfd_app PRIVATE -static-libgcc -static-libstdc++)
     else()
         target_link_options(cfd_app PRIVATE
@@ -491,6 +513,7 @@ if(BUILD_TESTING)
         MultiphaseTests
         SurfaceTensionTests
         MovingBodyTests
+        TurbulenceTests
     )
     foreach(test ${CFD_TESTS})
         add_executable(${test} "tests/${test}.cpp")

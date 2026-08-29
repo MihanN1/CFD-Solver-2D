@@ -5,6 +5,7 @@
 #include "Multigrid.hpp"
 #include "Phase.hpp"
 #include "RigidBody.hpp"
+#include "Turbulence.hpp"
 #include "Restart.hpp"
 #include <vector>
 #include <string>
@@ -186,8 +187,21 @@ private:
     void computeDt();
 
     void predictor();
-    template <bool TwoPhase> void predictorByScheme();
-    template <int Phi, bool TwoPhase> void predictorImpl();
+    template <bool TwoPhase, bool VarVisc> void predictorByScheme();
+    template <int Phi, bool TwoPhase, bool VarVisc> void predictorImpl();
+
+    bool variableViscosity = false;
+    std::vector<float> nuCell;
+    std::vector<float> nuNode;
+    std::vector<float> viscX, viscY;
+    void refreshViscosity();
+    void computeViscousStress();
+
+    bool turbulent = false;
+    TurbulenceModel turbulence;
+    const std::vector<float>* nuTurb = nullptr;
+    bool turbulenceReported = false;
+    std::vector<float> restartK, restartOmega;
     template <bool TwoPhase> void correctorImpl();
 
     void advanceStage();

@@ -9,7 +9,8 @@ CFD‑Solver‑2D is an educational/research project that implements a finite‑
 - Full numerical solver with VTK output for post-processing in ParaView.
 - STL/OBJ loading, central plane section extraction, geometry masking, profile rotation, mirroring, and robust contour reconstruction.
 - Optional gravity as a uniform body force, pointing in any direction.
-- Optional wall behaviour: every body in the mask is found and numbered on its own, and each one can spin, drag its surface, or be made frictionless, independently of the rest.- A separate SFML desktop application that configures runs, launches the solver and renders the frames it writes.
+- Optional wall behaviour: every body in the mask is found and numbered on its own, and each one can spin, drag its surface, or be made frictionless, independently of the rest.
+- Optional turbulence: Smagorinsky with near-wall damping, or two-equation k-omega SST, both switched on from the configuration and off by default.- A separate SFML desktop application that configures runs, launches the solver and renders the frames it writes.
 
 The project is designed to simulate external incompressible flow around arbitrary 2D profiles such as cylinders, airfoils, valves, turbine blades, and similar engineering geometries.
 
@@ -20,7 +21,6 @@ The project is designed to simulate external incompressible flow around arbitrar
 Possible future extensions include:
 
 - Adaptive mesh refinement (AMR)
-- Turbulence models
 - Compressible flow solver
 - MAY add several other solvers(deforming solver + electronic solver + thermal solver) and merge all of them into one
 - MAY make a full on website where u would download it all, but only if the previous point is done
@@ -460,7 +460,7 @@ above 0.1, `nu=0`.
 | `mgMinCoarseSize` | int, cells/axis | 8 | >= 2 |
 | `useCuda` | switch | 1 | 1 / 0, ignored on a CPU-only build |
 | `saveInterval` | int, steps | 20 | >= 1 |
-| `extraFields` | list | empty | `vorticity`, `divergence`, `speed`, `objectId`, `density`, `source`, comma separated |
+| `extraFields` | list | empty | `vorticity`, `divergence`, `speed`, `objectId`, `density`, `source`, `curvature`, `nuT`, `wallDistance`, `strain`, comma separated |
 | `outputDir` | path | `output` | created on the first frame, empty = current directory |
 | `geometryFile` | path, `none` or `empty` | `none` | `none` is the verification circle, `empty` is nothing at all |
 | `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
@@ -469,6 +469,13 @@ above 0.1, `nu=0`.
 | `bodyMotion` | list | empty | `<object>:vx=0.2,omega=45;<object>:free=1,mass=2` — bodies that travel, see below |
 | `bodyCoupling` | name | `added` | `weak` / `added` / `strong`, only read by a free body |
 | `bodyIterations` | int | 4 | most force/motion passes inside one step, only read by `strong` |
+| `bodyCollisions` | switch | 0 | off, bodies pass through each other and through the walls |
+| `bodyRestitution` | float | 0.2 | how much of the closing speed survives a bounce, 0 to 1 |
+| `bodyForceReport` | switch | 0 | work the fluid force out for bodies whose path you set too |
+| `turbulence` | name | `none` | `none` / `smagorinsky` / `kOmegaSST`, see below |
+| `Cs` | float | 0.17 | the Smagorinsky constant, 0 to 1; 0.1 is what a channel wants |
+| `turbIntensity` | float | 0.05 | how turbulent the inlet is, as a fraction of its speed; only `kOmegaSST` |
+| `turbLengthScale` | float, m | 0 | the biggest eddy coming in; 0 takes a tenth of `Ly`; only `kOmegaSST` |
 | `profiles` | list | empty | `<file>@x=1,y=0.5,size=0.3;<file>@x=3,y=0.5` — several models at once, see below |
 | `restart` | switch | 0 | 1 / 0 |
 | `restartFile` | path | empty | a `.vtk` frame or the folder holding them |
@@ -968,8 +975,9 @@ the end — this is what `ConvectionTests` asserts:
 ## Extra fields
 
 A frame carries pressure, the solid mask and velocity, and nothing else unless
-asked. `extraFields` adds any of `vorticity`, `divergence`, `speed` and
-`objectId` to every frame:
+asked. `extraFields` adds any of `vorticity`, `divergence`, `speed`,
+`objectId`, `density`, `source`, `curvature`, `nuT`, `wallDistance` and
+`strain` to every frame:
 
 ```powershell
 "Fluid Solver.exe" "extraFields=vorticity,speed"
@@ -978,6 +986,12 @@ asked. `extraFields` adds any of `vorticity`, `divergence`, `speed` and
 They cost four bytes a cell each and are written for ParaView and the UI to
 read; nothing in the solver reads them back, and a frame carrying them still
 continues exactly like one that does not.
+
+Two fields are not on that list because they are not optional. The phase
+fraction goes into every frame of a two-fluid run, and `k` and `omega` go into
+every frame of a `kOmegaSST` run, whether or not anybody asked: the frame is
+also the restart file, and a two-equation model that comes back with the inlet
+values in it has thrown away everything the run spent its time building.
 
 ## Bodies that travel
 
@@ -1183,6 +1197,35 @@ integrates a straight line exactly - and a pair of keyframes is a straight
 line. A body ramped from 0 to 0.5 m/s over 0.2 s and then held moves 0.15001 m
 in 0.4 s, against 0.15 exactly.
 
+### How a segment is shaped
+
+    "bodyMotion=1:@0,vx=0,interp=bezier,@1,vx=0.5,@2,vx=0"
+    "bodyMotion=1:@0,vx=0,interp=elastic,ease=out,@1,vx=0.5"
+
+`interp` belongs to the key it is written on and governs the segment that
+starts there, which is how a 3D package reads it too. The set is the same one:
+
+    constant     hold this value until the next key
+    linear       a straight line, and the default
+    bezier       a cubic with auto-clamped handles
+    sine quad cubic quart quint expo circ back bounce elastic
+
+`ease=in|out|inout|auto` says which end of the segment the easing happens at.
+`auto` is `out` for the ordinary easings and `in` for `back`, `bounce` and
+`elastic` - the three that overshoot read better starting from the key.
+
+**Auto-clamped** is the part worth spelling out. The tangent at a key is the
+slope through its two neighbours, except at a turning point, where it is zero.
+Without that clamp a curve that goes up and then flattens bulges past the value
+it was told to reach, and a body would travel faster than any number you wrote.
+With it, it cannot:
+
+    interpolation constant 0.1979, linear 0.3000, bezier 0.3167, quad 0.3334,
+                  bounce 0.2622 m
+
+all against a ramp whose peak, held for the whole run, would give 0.4. The test
+fails if any of them passes that.
+
 ### Sources that ride
 
     "sources=x=-0.14,y=0,r=0.06,rate=3,angle=180,body=1"
@@ -1242,6 +1285,168 @@ integral over its surface cancel its own weight to five significant figures -
 and it does, to 0.06% of what free fall would have given it. A sign error
 anywhere in the surface integral or the buoyancy shows up there as a body that
 takes off.
+
+## Turbulence
+
+    "Fluid Solver.exe" turbulence=kOmegaSST turbIntensity=0.05 turbLengthScale=0.02 \
+                       nu=1.5e-5 U0=10 Lx=2 Ly=0.2 nx=400 ny=64 \
+                       bcBottom=wall bcTop=wall
+
+Off by default, and off means the solver does exactly what it did before this
+existed: it solves what is on the grid and nothing else. That is right until
+the grid stops being able to hold the smallest eddy that matters, which on any
+grid a person can afford happens somewhere around a Reynolds number of a few
+thousand. Past that the run does not blow up, it quietly lies: the wake is too
+long, the recirculation too strong, the drag too low.
+
+### The viscous term had to change first
+
+Every version before this one wrote the viscous term as `nu * lap(u)`. That is
+not the viscous term, it is what the viscous term collapses to when `nu` is one
+number everywhere. The real one is
+
+    div(2 nu S),    S = (grad u + grad u^T) / 2
+
+and expanding the divergence gives `nu*lap(u)` **plus** `grad(nu)` contracted
+with the strain. The second half is exactly what a turbulence model puts there,
+and dropping it is not an approximation, it is deleting the only term by which
+the model reaches the flow. So `div(2 nu S)` went in first, before either
+model, and the golden master came out bit for bit identical because at a
+constant `nu` the two really are the same expression.
+
+Written out on the MAC grid the diagonal part of `S` lands at cell centres and
+the off-diagonal part at the corners, which is why the code carries two
+viscosity arrays rather than one, and why the corner one is the average of the
+four cells around it. A two-fluid run gets the same term for free: a density
+jump makes `nu` vary just as much as a model does, so the multiphase runs are
+now solving a viscous term they were previously approximating.
+
+### `smagorinsky`
+
+The large-eddy model, and the smaller of the two. It says the eddies below one
+cell behave like extra viscosity:
+
+    nu_t = (Cs * delta * D)^2 * |S|
+
+`delta` is `sqrt(dx*dy)`, `Cs` is yours, and `D` is the damping that stops it
+from putting a full eddy viscosity in the one place there is no room for an
+eddy - hard against a wall.
+
+The obvious damping is to cap the mixing length at `kappa*y`, and it does not
+work. It compares a length against a length, and on any grid a run of this kind
+can afford the first cell centre is already further from the wall than the
+filter width, so the cap never binds and the model is at full strength in the
+first row. The one that does work is van Driest, because it is keyed on a
+Reynolds number rather than a length:
+
+    y+ = y * sqrt(|S| / nu),    D = 1 - exp(-y+ / 26)
+
+with `u_tau` taken from the local strain, `tau_w = mu |S|`, so nothing extra
+has to be carried around. The cap at `kappa*y` is kept underneath it for the
+case where the grid IS fine enough for it to bite. On the test channel that
+brings the mixing length in the first row off the wall down to 32% of
+`Cs*delta`, and it keeps falling as the grid is refined, which is the whole
+signature of the thing.
+
+`Cs = 0.17` is the value it was derived at for isotropic turbulence. Anything
+with a wall in it wants about `0.1`.
+
+### `kOmegaSST`
+
+Menter's 2003 shear-stress-transport model, two more transported fields:
+
+    Dk/Dt     = P - beta* k omega + div((nu + sigma_k nu_t) grad k)
+    Domega/Dt = alpha S^2 - beta omega^2 + div((nu + sigma_w nu_t) grad omega)
+                + 2 (1 - F1) sigma_w2 / omega * grad k . grad omega
+
+`F1` blends the constants between k-omega near the wall and k-epsilon out in
+the free stream, so it behaves like whichever of the two is right where it is.
+`F2` goes into the eddy viscosity itself:
+
+    nu_t = a1 k / max(a1 omega, |S| F2)
+
+which is the SST part and the reason the model exists: plain k-omega
+overpredicts the shear stress in an adverse pressure gradient and separates
+too late, and that `max` is what limits it.
+
+Three things are imposed rather than solved:
+
+- **omega at a wall.** The analytic near-wall solution is `60 nu / (beta1 d^2)`
+  with `d` the distance to the wall, and any cell with a solid neighbour takes
+  it. On the test channel that is 1228.8, and the field peaks at 1228.8.
+- **k at a wall** goes to zero, for the same reason.
+- **positivity.** Both are positive quantities and an explicit step can take
+  either below zero on a coarse grid, which makes `sqrt(k)` a NaN and the run
+  stops being a run. They are clamped. That is not cosmetic, it is what makes
+  an explicit two-equation model usable at all.
+
+The step size gets a fourth limit alongside advection, diffusion and capillary
+waves: `1/(beta* omega)`, the source term's own time scale. Near a wall omega
+is large and that limit is the one that binds, so a turbulent run takes smaller
+steps than a laminar one on the same grid - that is the model's cost, and it is
+visible in the step line rather than hidden.
+
+### The inlet
+
+`kOmegaSST` needs two numbers at the inlet that nobody measures directly, so
+they are given the way everybody gives them:
+
+    k     = 1.5 * (turbIntensity * U0)^2
+    omega = sqrt(k) / (Cmu^0.25 * turbLengthScale)
+
+`turbIntensity` is 0.01 for a wind tunnel, 0.05 for a pipe, 0.1 behind
+something. `turbLengthScale` is the size of the biggest eddy coming in - a
+tenth of the duct is the usual guess, and 0 lets the solver take a tenth of
+`Ly`. `smagorinsky` reads neither of them.
+
+### What comes out in the frame
+
+`nuT`, `wallDistance` and `strain` are `extraFields`, so ask for them if you
+want to look at them. `k` and `omega` are not optional and go into every frame
+of a `kOmegaSST` run, because the frame is the restart file - a continuation
+that started them back at the inlet values would be a different run. Continuing
+a k-omega run reproduces the straight-through one to 2.8e-4 relative.
+
+The wall distance is a breadth-first sweep out of the solid cells and the
+domain edges, with the diagonal step counted at its own length so a corner does
+not come out further away than it is. It is geometry, not flow, so it is built
+once - and rebuilt when the geometry moves, because bodies that travel are
+allowed in the same run.
+
+### Checked against
+
+`TurbulenceTests`, four cases.
+
+**The wall distance and the damping.** The first row off a wall is half a cell
+away and the middle of a clear channel is half its height, to the cell. Then
+`nu_t = l^2 |S|` is inverted cell by cell - `l = sqrt(nuT/|S|)` - and every
+value in the field is checked against `min(Cs*delta, kappa*y)`, which is the
+model's own definition rather than a ratio between two cells, so it holds on
+any grid. Nothing exceeds it, and in the first row off the wall the length is
+32% of the filter width.
+
+**k-omega stays a number.** k never negative, omega never zero, both finite
+everywhere after the run; k peaks within a factor of the closed-form inlet
+value; omega at the wall matches `60 nu/(beta1 d^2)` to a fifth of a percent;
+`nu_t/nu` reaches 43, so the model is doing something.
+
+**A continuation is the same run.** Straight through against split in two, k
+differing by 2.8e-4 relative.
+
+**A backward-facing step**, which is what a turbulence model is actually for.
+Laminar and k-omega on the same grid, same everything: the laminar run has a
+recirculation with -0.77 m/s of backflow in it, k-omega has -0.28, so the model
+took 64% of it out by mixing momentum into the shear layer. On a finer grid at
+Re about 6900 the reattachment lands at 8.6 step heights, against Armaly's
+6-7 for a fully turbulent step and up to about 8 through the transitional
+range - the right answer for the wrong end of the range, which is what a
+two-equation model on a coarse 2D grid is honestly worth.
+
+`smagorinsky` is deliberately NOT in the step comparison. It is an LES model,
+it is asked there to run on a RANS-affordable grid, and on that grid it barely
+changes the answer - -0.85 against the laminar -0.83. That is not a bug in the
+implementation, it is the model being used outside what it is for, and a test
+that asserted otherwise would be asserting a lie.
 
 ## Walls: moving and slipping
 

@@ -42,6 +42,7 @@ const char* const kKeys[] = {
     "invertSection", "wallMotion", "profiles",
     "bodyMotion", "bodyCoupling", "bodyIterations",
     "bodyCollisions", "bodyRestitution", "bodyForceReport",
+    "turbulence", "Cs", "turbIntensity", "turbLengthScale",
     "restart", "restartFile", "addTime",
     "gravityMode", "convection", "limiter", "timeScheme",
     "caseType", "lidSpeed", "steadyTolerance",
@@ -296,6 +297,40 @@ bool assignSideKind(BoundarySpec& spec,
     return true;
 }
 
+}
+
+bool parseTurbulenceKind(const std::string& text, TurbulenceKind& out,
+                         std::string& error) {
+    const std::string name = toLower(cleanValue(text));
+    if (name == "none" || name == "off" || name == "laminar") {
+        out = TurbulenceKind::None;
+        return true;
+    }
+    if (name == "smagorinsky" || name == "smag" || name == "les") {
+        out = TurbulenceKind::Smagorinsky;
+        return true;
+    }
+    if (name == "komega" || name == "k-omega" || name == "sst" ||
+        name == "komegasst") {
+        out = TurbulenceKind::KOmegaSST;
+        return true;
+    }
+    error = badValue("turbulence", cleanValue(text),
+                     "it is none, smagorinsky or kOmegaSST. none is a laminar "
+                     "run and is what every run before this did; smagorinsky "
+                     "reads the eddy viscosity straight off the local strain "
+                     "and carries nothing; kOmegaSST is Menter's SST, two "
+                     "transport equations, which is what a wall bounded flow "
+                     "needs");
+    return false;
+}
+
+const char* turbulenceKindName(TurbulenceKind kind) {
+    switch (kind) {
+    case TurbulenceKind::Smagorinsky: return "smagorinsky";
+    case TurbulenceKind::KOmegaSST:   return "kOmegaSST";
+    default:                          return "none";
+    }
 }
 
 bool parseMixingKind(const std::string& text, MixingKind& out,
@@ -555,6 +590,7 @@ bool parseProfiles(const std::string& text,
                 else if (name == "ax")     { profile.angleX = float(number); profile.angleSet = true; }
                 else if (name == "az")     { profile.angleZ = float(number); profile.angleSet = true; }
                 else if (name == "invert") { profile.invert = number != 0.0; profile.invertSet = true; }
+                else if (name == "attach") { profile.attach = number != 0.0; }
                 else {
                     error = badValue("profiles", pair,
                                      "'" + name +
@@ -772,6 +808,88 @@ bool parseWallMotion(const std::string& text,
     return true;
 }
 
+namespace {
+struct NamedInterp {
+    const char* name;
+    InterpKind kind;
+};
+const NamedInterp kInterpKinds[] = {
+    {"constant", InterpKind::Constant}, {"step", InterpKind::Constant},
+    {"hold", InterpKind::Constant},
+    {"linear", InterpKind::Linear},
+    {"bezier", InterpKind::Bezier}, {"smooth", InterpKind::Bezier},
+    {"sine", InterpKind::Sine}, {"sinusoidal", InterpKind::Sine},
+    {"quad", InterpKind::Quad}, {"quadratic", InterpKind::Quad},
+    {"cubic", InterpKind::Cubic},
+    {"quart", InterpKind::Quart}, {"quartic", InterpKind::Quart},
+    {"quint", InterpKind::Quint}, {"quintic", InterpKind::Quint},
+    {"expo", InterpKind::Expo}, {"exponential", InterpKind::Expo},
+    {"circ", InterpKind::Circ}, {"circular", InterpKind::Circ},
+    {"back", InterpKind::Back},
+    {"bounce", InterpKind::Bounce},
+    {"elastic", InterpKind::Elastic}
+};
+}
+
+bool parseInterpKind(const std::string& text, InterpKind& out,
+                     std::string& error) {
+    const std::string name = toLower(cleanValue(text));
+    for (const NamedInterp& known : kInterpKinds)
+        if (name == known.name) {
+            out = known.kind;
+            return true;
+        }
+    error = badValue("interp", cleanValue(text),
+                     "the ones a 3D package has: constant, linear, bezier, "
+                     "and the easings sine, quad, cubic, quart, quint, expo, "
+                     "circ, back, bounce and elastic");
+    return false;
+}
+
+bool parseEaseKind(const std::string& text, EaseKind& out,
+                   std::string& error) {
+    const std::string name = toLower(cleanValue(text));
+    if (name == "auto")  { out = EaseKind::Auto;  return true; }
+    if (name == "in")    { out = EaseKind::In;    return true; }
+    if (name == "out")   { out = EaseKind::Out;   return true; }
+    if (name == "inout" || name == "in-out" || name == "both") {
+        out = EaseKind::InOut;
+        return true;
+    }
+    error = badValue("ease", cleanValue(text),
+                     "it is in, out, inout, or auto - which is out for the "
+                     "ordinary easings and in for back, bounce and elastic, "
+                     "the same choice a 3D package makes");
+    return false;
+}
+
+const char* interpKindName(InterpKind kind) {
+    switch (kind) {
+    case InterpKind::Constant: return "constant";
+    case InterpKind::Bezier:   return "bezier";
+    case InterpKind::Sine:     return "sine";
+    case InterpKind::Quad:     return "quad";
+    case InterpKind::Cubic:    return "cubic";
+    case InterpKind::Quart:    return "quart";
+    case InterpKind::Quint:    return "quint";
+    case InterpKind::Expo:     return "expo";
+    case InterpKind::Circ:     return "circ";
+    case InterpKind::Back:     return "back";
+    case InterpKind::Bounce:   return "bounce";
+    case InterpKind::Elastic:  return "elastic";
+    default:                   return "linear";
+    }
+}
+
+const char* easeKindName(EaseKind kind) {
+    switch (kind) {
+    case EaseKind::In:    return "in";
+    case EaseKind::Out:   return "out";
+    case EaseKind::InOut: return "inout";
+    default:              return "auto";
+    }
+}
+
 std::string bodyMotionHelp() {
     return
         "\n"
@@ -805,6 +923,17 @@ std::string bodyMotionHelp() {
         "                    it belongs to that keyframe until the next @.\n"
         "     Times go forwards. Between two keyframes the velocity is\n"
         "     interpolated; before the first and after the last it is held.\n"
+        "     interp=<kind>  how the segment STARTING at this key is shaped,\n"
+        "                    the same set a 3D package offers:\n"
+        "                      constant  hold until the next key\n"
+        "                      linear    a straight line (the default)\n"
+        "                      bezier    a cubic with auto-clamped handles,\n"
+        "                                so it does not overshoot a turn\n"
+        "                      sine quad cubic quart quint expo circ\n"
+        "                      back bounce elastic\n"
+        "     ease=<in|out|inout|auto>  which end of the segment the easing\n"
+        "                    is applied at. auto is out for the ordinary ones\n"
+        "                    and in for back, bounce and elastic\n"
         "\n"
         "Examples:\n"
         "  1:vx=0.2                    object 1 drifts right at 0.2 m/s\n"
@@ -927,6 +1056,8 @@ bool parseBodyMotion(const std::string& text,
                 frame.vy = target.keys.back().vy;
                 frame.omega = target.keys.back().omega;
                 frame.free = target.keys.back().free;
+                frame.interp = target.keys.back().interp;
+                frame.ease = target.keys.back().ease;
             } else {
                 frame.vx = target.vx;
                 frame.vy = target.vy;
@@ -953,6 +1084,30 @@ bool parseBodyMotion(const std::string& text,
             bool& flag = target.keys.empty() ? target.free
                                              : target.keys.back().free;
             if (!assignBool(flag, name, value, error))
+                return false;
+            continue;
+        }
+        if (name == "interp") {
+            if (target.keys.empty()) {
+                error = badValue("bodyMotion", body,
+                                 "interp belongs to a keyframe and there is "
+                                 "no keyframe yet: open one with @<seconds> "
+                                 "first");
+                return false;
+            }
+            if (!parseInterpKind(value, target.keys.back().interp, error))
+                return false;
+            continue;
+        }
+        if (name == "ease") {
+            if (target.keys.empty()) {
+                error = badValue("bodyMotion", body,
+                                 "ease belongs to a keyframe and there is no "
+                                 "keyframe yet: open one with @<seconds> "
+                                 "first");
+                return false;
+            }
+            if (!parseEaseKind(value, target.keys.back().ease, error))
                 return false;
             continue;
         }
@@ -1345,6 +1500,23 @@ void Config::readFromConsole() {
              "Stop when the field stops changing? Give the rate, or 0 to run "
              "the whole of totalTime (1e-5 is a good number for a cavity)"))
         return;
+    if (!ask("turbulence",
+             "Turbulence model: none (solve what is on the grid and nothing "
+             "else), smagorinsky (large eddy, wants a fine grid) or kOmegaSST "
+             "(two transport equations, what a wall bounded flow at a high "
+             "Reynolds number needs)")) return;
+    if (turbulence == TurbulenceKind::Smagorinsky)
+        if (!ask("Cs", "Smagorinsky constant (0.17 isotropic, 0.1 with a wall "
+                       "in it)")) return;
+    if (turbulence == TurbulenceKind::KOmegaSST) {
+        if (!ask("turbIntensity",
+                 "How turbulent the inlet is, as a fraction of its speed "
+                 "(0.01 a wind tunnel, 0.05 a pipe, 0.1 behind something)"))
+            return;
+        if (!ask("turbLengthScale",
+                 "Size of the largest eddy coming in (m), or 0 for a tenth of "
+                 "Ly")) return;
+    }
     if (!ask("convection",
              "Convective scheme: upwind (first order, what this solver has "
              "always used), muscl or central")) return;
@@ -1385,7 +1557,8 @@ void Config::readFromConsole() {
     if (!ask("invertSection", "Mirror the section? (0 = no, 1 = yes)")) return;
     if (!ask("extraFields",
              "Extra fields to write into every frame, comma separated, empty "
-             "for none (vorticity, divergence, speed, objectId, density, source, curvature)"))
+             "for none (vorticity, divergence, speed, objectId, density, "
+             "source, curvature, nuT, k, omega, wallDistance, strain)"))
         return;
     if (!ask("profiles",
              "Extra models and where they sit, empty for just geometryFile "
@@ -1559,6 +1732,21 @@ void Config::print() const {
             std::cout << "  bodyForceReport  = on, and it still changes "
                          "nothing about where a set path goes\n";
     }
+    std::cout << "  turbulence       = " << turbulenceKindName(turbulence);
+    if (turbulence == TurbulenceKind::None)
+        std::cout << " (only what the grid can hold is solved)";
+    std::cout << "\n";
+    if (turbulence == TurbulenceKind::Smagorinsky)
+        std::cout << "  Cs               = " << Cs << "\n";
+    if (turbulence == TurbulenceKind::KOmegaSST) {
+        std::cout << "  turbIntensity    = " << turbIntensity
+                  << " of the inlet speed\n";
+        std::cout << "  turbLengthScale  = ";
+        if (turbLengthScale > 0.0f)
+            std::cout << turbLengthScale << " m\n";
+        else
+            std::cout << 0.1f * Ly << " m (a tenth of Ly)\n";
+    }
     std::cout << "  profiles         = "
               << (profiles.empty() ? "none (geometryFile only)" : profiles)
               << "\n";
@@ -1704,6 +1892,10 @@ std::string Config::serialize() const {
         << "bodyCollisions=" << (bodyCollisions ? 1 : 0) << "\n"
         << "bodyRestitution=" << bodyRestitution << "\n"
         << "bodyForceReport=" << (bodyForceReport ? 1 : 0) << "\n"
+        << "turbulence=" << turbulenceKindName(turbulence) << "\n"
+        << "Cs=" << Cs << "\n"
+        << "turbIntensity=" << turbIntensity << "\n"
+        << "turbLengthScale=" << turbLengthScale << "\n"
         << "sources=" << sources << "\n"
         << "profiles=" << profiles << "\n"
         << "extraFields=" << extraFields << "\n";
@@ -1973,16 +2165,18 @@ bool Config::setParam(const std::string& key,
             if (name != "vorticity" && name != "divergence" &&
                 name != "objectid" && name != "speed" &&
                 name != "density" && name != "source" &&
-                name != "curvature")
+                name != "curvature" && name != "nut" && name != "k" &&
+                name != "omega" && name != "walldistance" &&
+                name != "strain")
                 bad = name;
         }
         if (!bad.empty()) {
             error = badValue(k, cleanValue(value),
                              "'" + bad +
                                  "' is not a field this build can write. Use "
-                                 "vorticity, divergence, speed, objectId, density, source or "
-                                 "curvature, "
-                                 "comma separated");
+                                 "vorticity, divergence, speed, objectId, "
+                                 "density, source, curvature, nuT, k, omega, "
+                                 "wallDistance or strain, comma separated");
             ok = false;
         } else {
             extraFields = wanted;
@@ -2009,6 +2203,23 @@ bool Config::setParam(const std::string& key,
     }
     else if (k == "bodyCoupling")
         ok = parseBodyCoupling(value, bodyCoupling, error);
+    else if (k == "turbulence")
+        ok = parseTurbulenceKind(value, turbulence, error);
+    else if (k == "Cs")
+        ok = assignFloat(Cs, k, value, 0.0f, 1.0f,
+                         "Cs is the Smagorinsky constant, between 0 and 1; "
+                         "0.17 is isotropic turbulence and 0.1 is what a wall "
+                         "bounded flow usually wants", error);
+    else if (k == "turbIntensity")
+        ok = assignFloat(turbIntensity, k, value, 0.0f, 1.0f,
+                         "turbIntensity is the fraction of the inlet speed "
+                         "that is fluctuation, between 0 and 1; 0.05 is a "
+                         "fairly ordinary wind tunnel", error);
+    else if (k == "turbLengthScale")
+        ok = assignFloat(turbLengthScale, k, value, 0.0f, kHuge,
+                         "turbLengthScale is the size of the largest eddy "
+                         "coming in, in metres; zero lets it be taken as a "
+                         "tenth of the domain height", error);
     else if (k == "bodyForceReport")
         ok = assignBool(bodyForceReport, k, value, error);
     else if (k == "bodyCollisions")
