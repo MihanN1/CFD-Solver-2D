@@ -686,6 +686,10 @@ void Mesh::rasterizeSection() {
     }
 
     const double boundaryRadius = 0.5 * std::hypot(dx, dy);
+    const double radiusSquared = boundaryRadius * boundaryRadius;
+    const double innerSquared = radiusSquared * (1.0 - 1e-12);
+    const double outerSquared = radiusSquared * (1.0 + 1e-12);
+
     const auto distanceToSegment = [](double pointX,
                                       double pointY,
                                       const SectionPoint& first,
@@ -707,32 +711,102 @@ void Mesh::rasterizeSection() {
         return std::hypot(pointX - closestX, pointY - closestY);
     };
 
+    const auto distanceSquared = [](double pointX,
+                                    double pointY,
+                                    const SectionPoint& first,
+                                    const SectionPoint& second) {
+        const double segmentX = second.x - first.x;
+        const double segmentY = second.y - first.y;
+        const double lengthSquared = segmentX * segmentX + segmentY * segmentY;
+        double closestX = first.x;
+        double closestY = first.y;
+        if (lengthSquared > 0.0) {
+            const double projection = std::clamp(
+                ((pointX - first.x) * segmentX +
+                 (pointY - first.y) * segmentY) / lengthSquared,
+                0.0,
+                1.0);
+            closestX += projection * segmentX;
+            closestY += projection * segmentY;
+        }
+        const double offsetX = pointX - closestX;
+        const double offsetY = pointY - closestY;
+        return offsetX * offsetX + offsetY * offsetY;
+    };
+
+    const auto touches = [&](double pointX,
+                             double pointY,
+                             const SectionPoint& first,
+                             const SectionPoint& second) {
+        const double squared = distanceSquared(pointX, pointY, first, second);
+        if (squared > outerSquared)
+            return false;
+        if (squared < innerSquared)
+            return true;
+        return distanceToSegment(pointX, pointY, first, second) <=
+               boundaryRadius;
+    };
+
     // Mark cells touched by any contour's boundary before filling the
     // interiors. "any" is the whole change here: the loop below used to see a
     // single polygon.
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
-            const double cellX = (i + 0.5) * dx;
-            const double cellY = (j + 0.5) * dy;
-            bool touched = false;
 
-            for (const std::vector<SectionPoint>& contour : sectionContours) {
-                if (contour.size() < 3) {
+    for (const std::vector<SectionPoint>& contour : sectionContours) {
+        if (contour.size() < 3)
+            continue;
+
+        double minX = contour[0].x, maxX = contour[0].x;
+        double minY = contour[0].y, maxY = contour[0].y;
+        for (const SectionPoint& point : contour) {
+            minX = std::min(minX, point.x);
+            maxX = std::max(maxX, point.x);
+            minY = std::min(minY, point.y);
+            maxY = std::max(maxY, point.y);
+        }
+
+        const int i0 = std::max(0, static_cast<int>(
+                                       (minX - boundaryRadius) / dx) - 1);
+        const int i1 = std::min(nx - 1, static_cast<int>(
+                                            (maxX + boundaryRadius) / dx) + 1);
+        const int j0 = std::max(0, static_cast<int>(
+                                       (minY - boundaryRadius) / dy) - 1);
+        const int j1 = std::min(ny - 1, static_cast<int>(
+                                            (maxY + boundaryRadius) / dy) + 1);
+        if (i0 > i1 || j0 > j1)
+            continue;
+
+        #pragma omp parallel for schedule(static) if (j1 - j0 >= 16)
+        for (int j = j0; j <= j1; ++j) {
+            const double cellY = (j + 0.5) * dy;
+            std::vector<std::size_t> near;
+            near.reserve(contour.size());
+            for (std::size_t point = 0; point < contour.size(); ++point) {
+                const SectionPoint& first = contour[point];
+                const SectionPoint& second =
+                    contour[(point + 1) % contour.size()];
+                const double low = std::min(first.y, second.y) - boundaryRadius;
+                const double high = std::max(first.y, second.y) + boundaryRadius;
+                if (cellY >= low && cellY <= high)
+                    near.push_back(point);
+            }
+            if (near.empty())
+                continue;
+
+            for (int i = i0; i <= i1; ++i) {
+                if (solid[j * nx + i])
                     continue;
-                }
-                for (std::size_t point = 0; point < contour.size(); ++point) {
+                const double cellX = (i + 0.5) * dx;
+                for (std::size_t point : near) {
                     const SectionPoint& first = contour[point];
                     const SectionPoint& second =
                         contour[(point + 1) % contour.size()];
-                    if (distanceToSegment(cellX, cellY, first, second) <=
-                        boundaryRadius) {
+                    if (std::min(first.x, second.x) - boundaryRadius > cellX ||
+                        std::max(first.x, second.x) + boundaryRadius < cellX)
+                        continue;
+                    if (touches(cellX, cellY, first, second)) {
                         solid[j * nx + i] = 1;
-                        touched = true;
                         break;
                     }
-                }
-                if (touched) {
-                    break;
                 }
             }
         }
@@ -774,15 +848,40 @@ void Mesh::buildSolid() {
         return;
     }
 
-    for (int j = 0; j < ny; ++j) {
-        for (int i = 0; i < nx; ++i) {
+    double minX = 0.0, maxX = 0.0, minY = 0.0, maxY = 0.0;
+    bool first = true;
+    for (const std::vector<SectionPoint>& contour : sectionContours) {
+        if (contour.size() < 3)
+            continue;
+        for (const SectionPoint& point : contour) {
+            if (first) {
+                minX = maxX = point.x;
+                minY = maxY = point.y;
+                first = false;
+                continue;
+            }
+            minX = std::min(minX, point.x);
+            maxX = std::max(maxX, point.x);
+            minY = std::min(minY, point.y);
+            maxY = std::max(maxY, point.y);
+        }
+    }
+    if (first)
+        return;
+
+    const int i0 = std::max(0, static_cast<int>(minX / dx) - 1);
+    const int i1 = std::min(nx - 1, static_cast<int>(maxX / dx) + 1);
+    const int j0 = std::max(0, static_cast<int>(minY / dy) - 1);
+    const int j1 = std::min(ny - 1, static_cast<int>(maxY / dy) + 1);
+
+    #pragma omp parallel for schedule(static) if (j1 - j0 >= 16)
+    for (int j = j0; j <= j1; ++j) {
+        const double cellY = (j + 0.5) * dy;
+        for (int i = i0; i <= i1; ++i) {
             if (solid[j * nx + i] != 0) {
                 continue;
             }
-
-            const double cellX = (i + 0.5) * dx;
-            const double cellY = (j + 0.5) * dy;
-            if (pointInsideSection(cellX, cellY)) {
+            if (pointInsideSection((i + 0.5) * dx, cellY)) {
                 solid[j * nx + i] = 1;
             }
         }
@@ -847,8 +946,158 @@ void Mesh::labelObjects() {
         SolidObject& body = objects[objectId[id] - 1];
         const double offsetX = (id % nx + 0.5) * dx - body.cx;
         const double offsetY = (id / nx + 0.5) * dy - body.cy;
-        body.radius = std::max(body.radius, std::hypot(offsetX, offsetY));
+        body.radius =
+            std::max(body.radius, offsetX * offsetX + offsetY * offsetY);
     }
+    for (SolidObject& body : objects)
+        body.radius = std::sqrt(body.radius);
+
+    for (SolidObject& body : objects) {
+        body.area = body.cells * static_cast<double>(dx) * dy;
+        body.baseCx = body.cx;
+        body.baseCy = body.cy;
+    }
+}
+
+bool Mesh::prepareMotion() {
+    if (motionPrepared)
+        return true;
+    if (objects.empty() || sectionContours.empty())
+        return false;
+
+    baseContours = sectionContours;
+    contourObject.assign(baseContours.size(), 0);
+
+    for (std::size_t which = 0; which < baseContours.size(); ++which) {
+        std::vector<int> votes(objects.size() + 1, 0);
+        for (const SectionPoint& point : baseContours[which]) {
+            const int i = static_cast<int>(point.x / dx);
+            const int j = static_cast<int>(point.y / dy);
+            if (i < 0 || j < 0 || i >= nx || j >= ny)
+                continue;
+            const int label = objectId[j * nx + i];
+            if (label > 0)
+                ++votes[label];
+        }
+        int best = 0;
+        for (std::size_t label = 1; label < votes.size(); ++label)
+            if (votes[label] > votes[best])
+                best = static_cast<int>(label);
+        contourObject[which] = best;
+        if (best == 0)
+            return false;
+    }
+
+    poses.assign(objects.size() + 1, BodyPose());
+    motionPrepared = true;
+    return true;
+}
+
+void Mesh::setPose(int object, const BodyPose& newPose) {
+    if (object >= 1 && static_cast<std::size_t>(object) < poses.size())
+        poses[object] = newPose;
+}
+
+void Mesh::updateSolid() {
+    if (!motionPrepared)
+        return;
+
+    sectionContours = baseContours;
+    for (std::size_t which = 0; which < sectionContours.size(); ++which) {
+        const int owner = contourObject[which];
+        const BodyPose& current = poses[owner];
+        if (current.x == 0.0 && current.y == 0.0 && current.theta == 0.0)
+            continue;
+
+        const double originX = objects[owner - 1].baseCx;
+        const double originY = objects[owner - 1].baseCy;
+        const double cosT = std::cos(current.theta);
+        const double sinT = std::sin(current.theta);
+        for (SectionPoint& point : sectionContours[which]) {
+            const double localX = point.x - originX;
+            const double localY = point.y - originY;
+            point.x = originX + current.x + localX * cosT - localY * sinT;
+            point.y = originY + current.y + localX * sinT + localY * cosT;
+        }
+    }
+
+    rasterizeSection();
+    buildSolid();
+    relabelStable();
+}
+
+void Mesh::relabelStable() {
+    const std::vector<SolidObject> previous = objects;
+    const std::vector<BodyPose> keptPoses = poses;
+    lastRenumbered.clear();
+
+    labelObjects();
+
+    const std::size_t wanted = previous.size();
+
+    struct Candidate {
+        double distance;
+        std::size_t body;
+        std::size_t blob;
+    };
+    std::vector<Candidate> candidates;
+    candidates.reserve(wanted * objects.size());
+    for (std::size_t body = 0; body < wanted; ++body) {
+        const double wantX = previous[body].baseCx + keptPoses[body + 1].x;
+        const double wantY = previous[body].baseCy + keptPoses[body + 1].y;
+        for (std::size_t blob = 0; blob < objects.size(); ++blob)
+            candidates.push_back({std::hypot(objects[blob].cx - wantX,
+                                             objects[blob].cy - wantY),
+                                  body, blob});
+    }
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) {
+                  return a.distance < b.distance;
+              });
+
+    std::vector<int> bodyOf(objects.size(), 0);
+    std::vector<bool> claimed(wanted, false);
+    std::vector<bool> taken(objects.size(), false);
+    for (const Candidate& candidate : candidates) {
+        if (claimed[candidate.body] || taken[candidate.blob])
+            continue;
+        claimed[candidate.body] = true;
+        taken[candidate.blob] = true;
+        bodyOf[candidate.blob] = static_cast<int>(candidate.body) + 1;
+    }
+
+    std::vector<SolidObject> ordered(wanted);
+    for (std::size_t body = 0; body < wanted; ++body) {
+        ordered[body] = previous[body];
+        ordered[body].cells = 0;
+        ordered[body].area = 0.0;
+    }
+    for (std::size_t blob = 0; blob < objects.size(); ++blob) {
+        if (bodyOf[blob] == 0) {
+            ordered.push_back(objects[blob]);
+            bodyOf[blob] = static_cast<int>(ordered.size());
+            lastRenumbered.push_back({0, bodyOf[blob]});
+            continue;
+        }
+        SolidObject kept = objects[blob];
+        kept.baseCx = previous[bodyOf[blob] - 1].baseCx;
+        kept.baseCy = previous[bodyOf[blob] - 1].baseCy;
+        ordered[bodyOf[blob] - 1] = kept;
+    }
+    for (std::size_t body = 0; body < wanted; ++body)
+        if (!claimed[body])
+            lastRenumbered.push_back({static_cast<int>(body) + 1, 0});
+
+    const int cells = nx * ny;
+    for (int id = 0; id < cells; ++id) {
+        const int raw = objectId[id];
+        objectId[id] = raw == 0 ? 0 : bodyOf[raw - 1];
+    }
+
+    objects = std::move(ordered);
+    poses.resize(objects.size() + 1);
+    for (std::size_t body = 0; body < wanted; ++body)
+        poses[body + 1] = keptPoses[body + 1];
 }
 
 void Mesh::initCircle(double cx, double cy, double R) {

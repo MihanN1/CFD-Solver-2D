@@ -127,7 +127,7 @@ __m256 absMask() {
 #endif
 }
 
-Solver::Solver(const Config& cfg, const Mesh& mesh)
+Solver::Solver(const Config& cfg, Mesh& mesh)
     :
     cfg(cfg),
     mesh(mesh),
@@ -199,6 +199,8 @@ bool Solver::setInitialState(RestartData&& state,
         phase.resize(cfg.nx, cfg.ny);
         phase.fraction() = std::move(state.phase);
     }
+
+    restartBodies = std::move(state.bodies);
 
     currentTime = state.currentTime;
     step = state.step;
@@ -478,8 +480,29 @@ void Solver::buildSources() {
 
     constexpr float degToRad = 3.14159265358979f / 180.0f;
     int totalCells = 0;
+    sourcesRide = false;
+    sourceLive.assign(list.size(), 0);
     for (size_t which = 0; which < list.size(); ++which) {
-        const FlowSource& source = list[which];
+        FlowSource source = list[which];
+
+        if (source.body > 0 &&
+            static_cast<size_t>(source.body) < bodies.size()) {
+            const RigidBody& body = bodies[source.body];
+            if (body.free || body.prescribed) {
+                sourcesRide = true;
+                const float theta = static_cast<float>(body.theta);
+                const float cosT = std::cos(theta);
+                const float sinT = std::sin(theta);
+                const float localX = source.x;
+                const float localY = source.y;
+                source.x = body.cx + static_cast<float>(body.x) +
+                           localX * cosT - localY * sinT;
+                source.y = body.cy + static_cast<float>(body.y) +
+                           localX * sinT + localY * cosT;
+                source.angle += theta / degToRad;
+            }
+        }
+
         const float radiusSq = source.radius * source.radius;
         int cells = 0;
         for (int j = 0; j < ny; ++j) {
@@ -506,7 +529,10 @@ void Solver::buildSources() {
                          "it.\n  One cell is " << dx << " x " << dy
                       << " m; give it a bigger radius or a finer grid.\n";
         }
+        sourceLive[which] = cells > 0 ? 1 : 0;
         totalCells += cells;
+        if (cells == 0)
+            continue;
         sourceInflow += static_cast<double>(source.rate) * 2.0 *
                         3.14159265358979 * source.radius;
     }
@@ -589,6 +615,19 @@ void Solver::buildFaceMasks(){
                 uWall[idxU(i, j)] =
                     wall.slideX - wall.omega * (yFace - wall.cy);
             }
+
+            if (bodiesMove && solidLeft != solidRight) {
+                const int owner =
+                    mesh.objectId[row + (solidLeft ? i - 1 : i)];
+                if (owner > 0 && static_cast<size_t>(owner) < bodies.size()) {
+                    const RigidBody& body = bodies[owner];
+                    if (body.free || body.prescribed)
+                        uWall[idxU(i, j)] =
+                            body.vx -
+                            body.omega *
+                                (yFace - (body.cy + static_cast<float>(body.y)));
+                }
+            }
         }
     }
 
@@ -607,6 +646,58 @@ void Solver::buildFaceMasks(){
                 const WallField& wall = wallField[mesh.objectId[row + i]];
                 vWall[idxV(i, j)] =
                     wall.slideY + wall.omega * ((i + 0.5f) * dx - wall.cx);
+            }
+
+            if (bodiesMove && solidTop != solidBot) {
+                const int owner =
+                    mesh.objectId[(solidTop ? row : rowBot) + i];
+                if (owner > 0 && static_cast<size_t>(owner) < bodies.size()) {
+                    const RigidBody& body = bodies[owner];
+                    if (body.free || body.prescribed)
+                        vWall[idxV(i, j)] =
+                            body.vy +
+                            body.omega * ((i + 0.5f) * dx -
+                                          (body.cx +
+                                           static_cast<float>(body.x)));
+                }
+            }
+        }
+    }
+
+    if (bodiesMove) {
+        for (int j = 0; j < ny; ++j) {
+            const int row = j * nx;
+            const float yFace = (j + 0.5f) * dy;
+            for (int i = 1; i < nx; ++i) {
+                if (!solidMask[row + i] || !solidMask[row + i - 1])
+                    continue;
+                const int owner = mesh.objectId[row + i];
+                if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
+                    continue;
+                const RigidBody& body = bodies[owner];
+                if (!body.free && !body.prescribed)
+                    continue;
+                uWall[idxU(i, j)] +=
+                    body.vx -
+                    body.omega * (yFace - (body.cy + static_cast<float>(body.y)));
+            }
+        }
+        for (int j = 1; j < ny; ++j) {
+            const int row = j * nx;
+            const int rowBot = (j - 1) * nx;
+            for (int i = 0; i < nx; ++i) {
+                if (!solidMask[row + i] || !solidMask[rowBot + i])
+                    continue;
+                const int owner = mesh.objectId[row + i];
+                if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
+                    continue;
+                const RigidBody& body = bodies[owner];
+                if (!body.free && !body.prescribed)
+                    continue;
+                vWall[idxV(i, j)] +=
+                    body.vy +
+                    body.omega *
+                        ((i + 0.5f) * dx - (body.cx + static_cast<float>(body.x)));
             }
         }
     }
@@ -770,6 +861,526 @@ void Solver::applyMirrorFaces() {
                          0.5f * (v[mirror.first] + v[mirror.second]);
 }
 
+void Solver::refreshGeometry() {
+    if (!bodiesMove)
+        return;
+
+    const int nx = cfg.nx, ny = cfg.ny;
+    prevSolidMask = solidMask;
+    prevUFluidMask = uFluidMask;
+    prevVFluidMask = vFluidMask;
+    prevObjectId = mesh.objectId;
+
+    applyBodyPoses();
+    mesh.updateSolid();
+
+    if (!mesh.renumbered().empty() && !renumberReported) {
+        renumberReported = true;
+        std::cout << "  note: the bodies were renumbered - ";
+        for (const std::pair<int, int>& change : mesh.renumbered()) {
+            if (change.first == 0)
+                std::cout << "a new body came out as " << change.second << " ";
+            else
+                std::cout << "body " << change.first << " is gone ";
+        }
+        std::cout << "\n  which happens when two of them touch or one leaves "
+                     "the domain. wallMotion and bodyMotion\n  address them by "
+                     "number, so from here those lines mean something else.\n";
+    }
+
+    #pragma omp parallel for schedule(static) if (nx * ny >= 4096)
+    for (int id = 0; id < nx * ny; ++id) {
+        solidMask[id] = mesh.solid[id] ? 1 : 0;
+        fluidCellMaskF[id] = mesh.solid[id] ? 0.0f : 1.0f;
+    }
+
+    buildFaceMasks();
+    buildSlipFaces();
+    buildMirrorFaces();
+    multigrid.setGeometry(solidMask, true);
+
+    if (multiphase) {
+        phase.refreshProperties(solidMask);
+        refreshPhaseCoefficients();
+        if (hasTension)
+            refreshSurfaceTension();
+    }
+
+    fillFreshCells();
+
+    if (hasSources && sourcesRide)
+        buildSources();
+}
+
+void Solver::fillFreshCells() {
+    const int nx = cfg.nx, ny = cfg.ny;
+    freshCells = 0;
+    if (prevSolidMask.size() != solidMask.size())
+        return;
+
+    //
+
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        const float yFace = (j + 0.5f) * dy;
+        for (int i = 0; i <= nx; ++i) {
+            const int id = idxU(i, j);
+            if (!uFluidMask[id] || prevUFluidMask[id])
+                continue;
+            ++freshCells;
+
+            float filled = 0.0f;
+            bool haveBody = false;
+            for (int side = 0; side < 2 && !haveBody; ++side) {
+                const int cell = i - 1 + side;
+                if (cell < 0 || cell >= nx)
+                    continue;
+                const int owner = prevObjectId[row + cell];
+                if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
+                    continue;
+                const RigidBody& body = bodies[owner];
+                if (!body.free && !body.prescribed)
+                    continue;
+                filled = body.vx -
+                         body.omega *
+                             (yFace - (body.cy + static_cast<float>(body.y)));
+                haveBody = true;
+            }
+
+            if (!haveBody) {
+                float sum = 0.0f;
+                int count = 0;
+                for (int step2 = -1; step2 <= 1; step2 += 2) {
+                    const int other = i + step2;
+                    if (other < 0 || other > nx)
+                        continue;
+                    if (prevUFluidMask[idxU(other, j)]) {
+                        sum += u[idxU(other, j)];
+                        ++count;
+                    }
+                    const int upDown = j + step2;
+                    if (upDown < 0 || upDown >= ny)
+                        continue;
+                    if (prevUFluidMask[idxU(i, upDown)]) {
+                        sum += u[idxU(i, upDown)];
+                        ++count;
+                    }
+                }
+                filled = count > 0 ? sum / static_cast<float>(count) : 0.0f;
+            }
+            u[id] = filled;
+        }
+    }
+
+    for (int j = 0; j <= ny; ++j) {
+        for (int i = 0; i < nx; ++i) {
+            const int id = idxV(i, j);
+            if (!vFluidMask[id] || prevVFluidMask[id])
+                continue;
+            ++freshCells;
+
+            float filled = 0.0f;
+            bool haveBody = false;
+            for (int side = 0; side < 2 && !haveBody; ++side) {
+                const int cellRow = j - 1 + side;
+                if (cellRow < 0 || cellRow >= ny)
+                    continue;
+                const int owner = prevObjectId[cellRow * nx + i];
+                if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
+                    continue;
+                const RigidBody& body = bodies[owner];
+                if (!body.free && !body.prescribed)
+                    continue;
+                filled = body.vy +
+                         body.omega * ((i + 0.5f) * dx -
+                                       (body.cx + static_cast<float>(body.x)));
+                haveBody = true;
+            }
+
+            if (!haveBody) {
+                float sum = 0.0f;
+                int count = 0;
+                for (int step2 = -1; step2 <= 1; step2 += 2) {
+                    const int other = j + step2;
+                    if (other >= 0 && other <= ny &&
+                        prevVFluidMask[idxV(i, other)]) {
+                        sum += v[idxV(i, other)];
+                        ++count;
+                    }
+                    const int leftRight = i + step2;
+                    if (leftRight >= 0 && leftRight < nx &&
+                        prevVFluidMask[idxV(leftRight, j)]) {
+                        sum += v[idxV(leftRight, j)];
+                        ++count;
+                    }
+                }
+                filled = count > 0 ? sum / static_cast<float>(count) : 0.0f;
+            }
+            v[id] = filled;
+        }
+    }
+
+    std::vector<float>* fraction = multiphase ? &phase.fraction() : nullptr;
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        for (int i = 0; i < nx; ++i) {
+            const int id = row + i;
+            if (solidMask[id] || !prevSolidMask[id])
+                continue;
+
+            float sumP = 0.0f, sumC = 0.0f;
+            int count = 0;
+            const int neighbours[4] = {i > 0 ? id - 1 : -1,
+                                       i + 1 < nx ? id + 1 : -1,
+                                       j > 0 ? id - nx : -1,
+                                       j + 1 < ny ? id + nx : -1};
+            for (int other : neighbours) {
+                if (other < 0 || prevSolidMask[other])
+                    continue;
+                sumP += p[other];
+                if (fraction)
+                    sumC += (*fraction)[other];
+                ++count;
+            }
+            if (count == 0)
+                continue;
+            p[id] = sumP / static_cast<float>(count);
+            if (fraction)
+                (*fraction)[id] = sumC / static_cast<float>(count);
+        }
+    }
+}
+
+void Solver::bodyForces() {
+    if (!bodiesFree)
+        return;
+
+    const int nx = cfg.nx, ny = cfg.ny;
+    for (RigidBody& body : bodies) {
+        body.forceX = 0.0f;
+        body.forceY = 0.0f;
+        body.torque = 0.0f;
+    }
+
+    const float scale = pressureScale();
+    const float* density = multiphase ? phase.density().data() : nullptr;
+    const float faceX = dy;
+    const float faceY = dx;
+
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        const float y = (j + 0.5f) * dy;
+        for (int i = 1; i < nx; ++i) {
+            const bool left = solidMask[row + i - 1] != 0;
+            const bool right = solidMask[row + i] != 0;
+            if (left == right)
+                continue;
+            const int owner = mesh.objectId[row + (left ? i - 1 : i)];
+            if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
+                continue;
+            RigidBody& body = bodies[owner];
+            if (!body.free)
+                continue;
+
+            const int fluidCell = left ? row + i : row + i - 1;
+            const float sign = left ? 1.0f : -1.0f;
+            const float pressure = p[fluidCell] * scale;
+            const float fx = sign * pressure * faceX;
+
+            const float nu = multiphase
+                                 ? phase.viscosity()[fluidCell] /
+                                       std::max(1e-20f, density[fluidCell])
+                                 : cfg.nu;
+            const float rho = multiphase ? density[fluidCell] : cfg.ro;
+            const float wallV = vWall[idxV(i - 1 + (left ? 1 : 0), j)];
+            const float tangential =
+                0.5f * (v[idxV(left ? i : i - 1, j)] +
+                        v[idxV(left ? i : i - 1, j + 1)]) -
+                wallV;
+            const float fy = rho * nu * tangential / (0.5f * dx) * faceX * sign;
+
+            body.forceX += fx;
+            body.forceY += fy;
+            const float armY = y - (body.cy + static_cast<float>(body.y));
+            const float armX = i * dx - (body.cx + static_cast<float>(body.x));
+            body.torque += armX * fy - armY * fx;
+        }
+    }
+
+    for (int j = 1; j < ny; ++j) {
+        const int row = j * nx;
+        const int rowBot = (j - 1) * nx;
+        for (int i = 0; i < nx; ++i) {
+            const bool top = solidMask[row + i] != 0;
+            const bool bottom = solidMask[rowBot + i] != 0;
+            if (top == bottom)
+                continue;
+            const int owner = mesh.objectId[(top ? row : rowBot) + i];
+            if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
+                continue;
+            RigidBody& body = bodies[owner];
+            if (!body.free)
+                continue;
+
+            const int fluidCell = top ? rowBot + i : row + i;
+            const float sign = top ? 1.0f : -1.0f;
+            const float pressure = p[fluidCell] * scale;
+            const float fy = sign * pressure * faceY;
+
+            const float nu = multiphase
+                                 ? phase.viscosity()[fluidCell] /
+                                       std::max(1e-20f, density[fluidCell])
+                                 : cfg.nu;
+            const float rho = multiphase ? density[fluidCell] : cfg.ro;
+            const int fluidRow = top ? j - 1 : j;
+            const float wallU = uWall[idxU(i, fluidRow)];
+            const float tangential =
+                0.5f * (u[idxU(i, fluidRow)] + u[idxU(i + 1, fluidRow)]) -
+                wallU;
+            const float fx = rho * nu * tangential / (0.5f * dy) * faceY * sign;
+
+            body.forceX += fx;
+            body.forceY += fy;
+            const float armY = j * dy - (body.cy + static_cast<float>(body.y));
+            const float armX =
+                (i + 0.5f) * dx - (body.cx + static_cast<float>(body.x));
+            body.torque += armX * fy - armY * fx;
+        }
+    }
+
+    if (sourcesRide) {
+        const std::vector<FlowSource> list = cfg.resolvedSources();
+        constexpr float degToRad = 3.14159265358979f / 180.0f;
+        for (size_t which = 0; which < list.size(); ++which) {
+            const FlowSource& source = list[which];
+
+            if (which >= sourceLive.size() || !sourceLive[which])
+                continue;
+            if (source.body <= 0 ||
+                static_cast<size_t>(source.body) >= bodies.size())
+                continue;
+            RigidBody& body = bodies[source.body];
+            if (!body.free)
+                continue;
+            const float rho =
+                multiphase
+                    ? source.phase * cfg.rho1 + (1.0f - source.phase) * cfg.rho2
+                    : cfg.ro;
+            const float flow = source.rate * 2.0f * 3.14159265358979f *
+                               source.radius;
+            const float thrust = rho * flow * source.rate;
+            const float theta = static_cast<float>(body.theta);
+            const float aim = source.angle * degToRad + theta;
+            const float tx = -thrust * std::cos(aim);
+            const float ty = -thrust * std::sin(aim);
+            const float cosT = std::cos(theta);
+            const float sinT = std::sin(theta);
+            const float armX = source.x * cosT - source.y * sinT;
+            const float armY = source.x * sinT + source.y * cosT;
+            body.forceX += tx;
+            body.forceY += ty;
+            body.torque += armX * ty - armY * tx;
+        }
+    }
+
+    if (cfg.gravityEnabled) {
+        for (RigidBody& body : bodies) {
+            if (!body.free)
+                continue;
+            const float displaced =
+                bodyGravity ? 0.0f
+                            : (multiphase ? std::min(cfg.rho1, cfg.rho2)
+                                          : cfg.ro) *
+                                  body.area;
+            body.forceX += (body.mass - displaced) * gx;
+            body.forceY += (body.mass - displaced) * gy;
+        }
+    }
+}
+
+void Solver::advanceBodies(float stepDt) {
+    if (!bodiesMove)
+        return;
+
+    const double middle = currentTime + 0.5 * static_cast<double>(stepDt);
+    for (RigidBody& body : bodies) {
+        if (body.prescribed)
+            body.sampleVelocity(middle);
+        else if (body.free)
+            body.integrate(stepDt);
+    }
+    for (RigidBody& body : bodies)
+        if (body.free || body.prescribed)
+            body.advancePose(stepDt);
+}
+
+void Solver::applyBodyPoses() {
+    for (const RigidBody& body : bodies) {
+        if (!body.free && !body.prescribed)
+            continue;
+        Mesh::BodyPose pose;
+        pose.x = body.x;
+        pose.y = body.y;
+        pose.theta = body.theta;
+        mesh.setPose(body.object, pose);
+    }
+}
+
+void Solver::resolveBodyMotion() {
+    bodies.clear();
+    bodiesMove = false;
+    bodiesFree = false;
+    if (cfg.bodyMotion.empty())
+        return;
+
+    std::vector<BodyMotion> motions;
+    std::string error;
+    if (!parseBodyMotion(cfg.bodyMotion, motions, error)) {
+        std::cout << "\n!!! " << error << "\n    No body moves.\n";
+        return;
+    }
+    if (motions.empty())
+        return;
+
+    if (mesh.objects.empty()) {
+        std::cout << "\n!!! bodyMotion was given but the domain holds no body "
+                     "at all, so there is nothing to move.\n";
+        return;
+    }
+    if (!mesh.prepareMotion()) {
+        std::cout << "\n!!! the mask this run started from cannot be moved: it "
+                     "came out of a frame rather than\n    a model, and moving "
+                     "a body means cutting its outline again every step. Give "
+                     "the run\n    a geometryFile or profiles= and the bodies "
+                     "will move.\n";
+        return;
+    }
+
+    std::vector<BodyGeometry> geometry(mesh.objects.size() + 1);
+    for (std::size_t id = 1; id < geometry.size(); ++id) {
+        const Mesh::SolidObject& body = mesh.objects[id - 1];
+        geometry[id].cx = static_cast<float>(body.cx);
+        geometry[id].cy = static_cast<float>(body.cy);
+        geometry[id].radius = static_cast<float>(body.radius);
+        geometry[id].area = static_cast<float>(body.area);
+    }
+
+    const float fluidDensity =
+        multiphase ? std::min(cfg.rho1, cfg.rho2) : cfg.ro;
+    std::vector<std::string> notes;
+    buildRigidBodies(motions, geometry, bodies, fluidDensity, notes);
+    for (const std::string& note : notes)
+        std::cout << "\n!!! " << note << "\n";
+
+    for (const RigidBody& body : bodies) {
+        if (body.free)
+            bodiesFree = true;
+        if (body.free || body.prescribed)
+            bodiesMove = true;
+    }
+    if (!bodiesMove)
+        return;
+
+    if (cfg.bodyCoupling == BodyCoupling::Weak)
+        for (RigidBody& body : bodies) {
+            body.addedMass = 0.0f;
+            body.addedInertia = 0.0f;
+        }
+
+    for (RigidBody& body : bodies)
+        body.sampleVelocity(currentTime);
+
+    for (const RestartData::BodyState& saved : restartBodies) {
+        if (saved.object < 1 ||
+            static_cast<size_t>(saved.object) >= bodies.size())
+            continue;
+        RigidBody& body = bodies[saved.object];
+        body.x = saved.x;
+        body.y = saved.y;
+        body.theta = saved.theta;
+        if (body.free) {
+            body.vx = saved.vx;
+            body.vy = saved.vy;
+            body.omega = saved.omega;
+        }
+    }
+
+    if (!restartBodies.empty()) {
+        applyBodyPoses();
+        mesh.updateSolid();
+        const int cells = cfg.nx * cfg.ny;
+        for (int id = 0; id < cells; ++id) {
+            solidMask[id] = mesh.solid[id] ? 1 : 0;
+            fluidCellMaskF[id] = mesh.solid[id] ? 0.0f : 1.0f;
+        }
+        std::cout << "  the bodies were put back where the frame left them "
+                     "and the outline cut again there,\n  rather than the "
+                     "rasterised mask being inherited.\n";
+    }
+}
+
+void Solver::reportBodies() const {
+    if (!bodiesMove)
+        return;
+
+    constexpr float degToRad = 3.14159265358979f / 180.0f;
+    std::cout << "Bodies that travel:\n";
+    for (const RigidBody& body : bodies) {
+        if (!body.free && !body.prescribed)
+            continue;
+        std::cout << "  object " << body.object << " at (" << body.cx << ", "
+                  << body.cy << ") m, " << body.area << " m^2";
+        if (body.free) {
+            std::cout << ", let go at " << body.mass << " kg/m";
+            if (body.pinX || body.pinY || body.pinRot) {
+                std::cout << ", pinned in";
+                if (body.pinX) std::cout << " x";
+                if (body.pinY) std::cout << " y";
+                if (body.pinRot) std::cout << " rotation";
+            }
+            std::cout << "\n    the fluid it displaces weighs "
+                      << body.addedMass << " kg/m, "
+                      << (body.mass > 0.0f ? body.addedMass / body.mass : 0.0f)
+                      << " of its own mass\n";
+        } else if (!body.keys.empty()) {
+            std::cout << ", on a timetable of " << body.keys.size()
+                      << " keyframes from " << body.keys.front().time << " to "
+                      << body.keys.back().time << " s\n";
+        } else {
+            std::cout << ", travelling at (" << body.vx << ", " << body.vy
+                      << ") m/s, turning " << body.omega / degToRad
+                      << " deg/s\n";
+        }
+    }
+
+    if (bodiesFree) {
+        std::cout << "  coupling: " << bodyCouplingName(cfg.bodyCoupling);
+        switch (cfg.bodyCoupling) {
+        case BodyCoupling::Weak:
+            std::cout << " - one force evaluation a step. Stable only while "
+                         "the body is a good deal\n    heavier than the fluid "
+                         "it pushes aside; under that it oscillates and no "
+                         "smaller\n    step fixes it, because the thing "
+                         "driving it is the fluid's own inertia.\n";
+            break;
+        case BodyCoupling::Strong:
+            std::cout << " - force and motion iterated up to "
+                      << cfg.bodyIterations
+                      << " times a step until they agree.\n";
+            break;
+        default:
+            std::cout << " - the fluid that moves with the body is carried on "
+                         "the left hand side of its\n    own equation of "
+                         "motion, which is where the added-mass instability "
+                         "comes from.\n";
+            break;
+        }
+    }
+
+    std::cout << "  the mask is cut again every step, so what used to be a "
+                 "setup cost is now a per-step one.\n";
+}
+
 void Solver::resolveWallMotion() {
     wallField.assign(mesh.objects.size() + 1, WallField());
     wallsMove = false;
@@ -879,6 +1490,7 @@ void Solver::initFields()
     }
 
     resolveWallMotion();
+    resolveBodyMotion();
     resolveBoundaries();
     buildFaceMasks();
     buildSlipFaces();
@@ -937,6 +1549,13 @@ void Solver::initFields()
     }
     buildSources();
 
+    if (bodiesMove) {
+        prevSolidMask = solidMask;
+        prevUFluidMask = uFluidMask;
+        prevVFluidMask = vFluidMask;
+        prevObjectId = mesh.objectId;
+    }
+
     applySlipFaces();
     applyMirrorFaces();
 
@@ -944,6 +1563,7 @@ void Solver::initFields()
               << multigrid.levelCount()
               << ", backend: " << (multigrid.usingCuda() ? "CUDA" : "CPU")
               << "\n";
+    reportBodies();
     if (multiphase) {
         std::cout << "Two fluids: 1 is rho " << cfg.rho1 << " kg/m^3, nu "
                   << cfg.nu1 << " m^2/s; 2 is rho " << cfg.rho2 << " kg/m^3, nu "
@@ -2344,26 +2964,104 @@ void Solver::run() {
         const float savedDt = dt;
         dt = stepDt;
 
-        switch (cfg.timeScheme) {
-        case TimeScheme::RK2:
-            uPrev = u;
-            vPrev = v;
-            advanceStage();
-            advanceStage();
-            blendWithPrevious(0.5f);
-            break;
-        case TimeScheme::RK3:
-            uPrev = u;
-            vPrev = v;
-            advanceStage();
-            advanceStage();
-            blendWithPrevious(0.75f);
-            advanceStage();
-            blendWithPrevious(1.0f / 3.0f);
-            break;
-        default:
-            advanceStage();
-            break;
+        const auto runStage = [this]() {
+            switch (cfg.timeScheme) {
+            case TimeScheme::RK2:
+                uPrev = u;
+                vPrev = v;
+                advanceStage();
+                advanceStage();
+                blendWithPrevious(0.5f);
+                break;
+            case TimeScheme::RK3:
+                uPrev = u;
+                vPrev = v;
+                advanceStage();
+                advanceStage();
+                blendWithPrevious(0.75f);
+                advanceStage();
+                blendWithPrevious(1.0f / 3.0f);
+                break;
+            default:
+                advanceStage();
+                break;
+            }
+        };
+
+        if (!bodiesMove) {
+            runStage();
+        } else if (!bodiesFree ||
+                   cfg.bodyCoupling != BodyCoupling::Strong) {
+            bodyForces();
+            advanceBodies(stepDt);
+            refreshGeometry();
+            runStage();
+        } else {
+            const std::vector<float> savedU = u;
+            const std::vector<float> savedV = v;
+            const std::vector<float> savedP = p;
+            const std::vector<RigidBody> savedBodies = bodies;
+            bodyForces();
+
+            float change = 0.0f;
+            int taken = 0;
+            for (int pass = 0; pass < cfg.bodyIterations; ++pass) {
+                std::vector<float> forceX(bodies.size());
+                std::vector<float> forceY(bodies.size());
+                std::vector<float> torque(bodies.size());
+                for (size_t id = 0; id < bodies.size(); ++id) {
+                    forceX[id] = bodies[id].forceX;
+                    forceY[id] = bodies[id].forceY;
+                    torque[id] = bodies[id].torque;
+                }
+
+                if (pass > 0) {
+                    u = savedU;
+                    v = savedV;
+                    p = savedP;
+                }
+                std::vector<float> beforeVx(bodies.size());
+                std::vector<float> beforeVy(bodies.size());
+                bodies = savedBodies;
+                for (size_t id = 0; id < bodies.size(); ++id) {
+                    bodies[id].forceX = forceX[id];
+                    bodies[id].forceY = forceY[id];
+                    bodies[id].torque = torque[id];
+                }
+
+                advanceBodies(stepDt);
+                for (size_t id = 0; id < bodies.size(); ++id) {
+                    beforeVx[id] = bodies[id].vx;
+                    beforeVy[id] = bodies[id].vy;
+                }
+                refreshGeometry();
+                runStage();
+                bodyForces();
+                ++taken;
+
+                change = 0.0f;
+                float reference = 0.0f;
+                for (size_t id = 0; id < bodies.size(); ++id) {
+                    if (!bodies[id].free)
+                        continue;
+                    const float total =
+                        bodies[id].mass + bodies[id].addedMass;
+                    if (!(total > 0.0f))
+                        continue;
+                    const float nextVx =
+                        savedBodies[id].vx + stepDt * bodies[id].forceX / total;
+                    const float nextVy =
+                        savedBodies[id].vy + stepDt * bodies[id].forceY / total;
+                    change = std::max(change,
+                                      std::hypot(nextVx - beforeVx[id],
+                                                 nextVy - beforeVy[id]));
+                    reference = std::max(reference,
+                                         std::hypot(nextVx, nextVy));
+                }
+                if (change <= 1e-4f * std::max(reference, 1e-6f))
+                    break;
+            }
+            bodyPasses = taken;
         }
 
         if (multiphase)
@@ -2404,6 +3102,24 @@ void Solver::run() {
                       << ", mg res = " << lastResidual
                       << " (" << multigrid.cyclesUsed() << " cycles)"
                       << std::endl;
+
+            if (bodiesMove) {
+                constexpr float degToRad = 3.14159265358979f / 180.0f;
+                for (const RigidBody& body : bodies) {
+                    if (!body.free && !body.prescribed)
+                        continue;
+                    std::cout << "    body " << body.object << " at ("
+                              << body.cx + body.x << ", " << body.cy + body.y
+                              << ") m, v = (" << body.vx << ", " << body.vy
+                              << ") m/s, turned " << body.theta / degToRad
+                              << " deg";
+                    if (freshCells > 0)
+                        std::cout << ", " << freshCells << " faces uncovered";
+                    if (bodyPasses > 1)
+                        std::cout << ", " << bodyPasses << " coupling passes";
+                    std::cout << "\n";
+                }
+            }
         }
 
         if (step % 10 == 0 && steadyReached()) {
@@ -2681,6 +3397,23 @@ void Solver::saveVTK(int stepNum) const {
           << "restartStep=" << stepNum << "\n"
           << std::setprecision(std::numeric_limits<float>::max_digits10)
           << "restartDt=" << dt << "\n";
+
+    if (bodiesMove) {
+        state << "bodyState=";
+        for (const RigidBody& body : bodies) {
+            if (!body.free && !body.prescribed)
+                continue;
+            state << std::setprecision(
+                         std::numeric_limits<double>::max_digits10)
+                  << body.object << ":" << body.x << "," << body.y << ","
+                  << body.theta << ","
+                  << std::setprecision(
+                         std::numeric_limits<float>::max_digits10)
+                  << body.vx << "," << body.vy << "," << body.omega << ";";
+        }
+        state << "\n";
+    }
+
     const std::string configText = configHeader + state.str();
 
     // The pressure array above already holds p + phiCell scaled by the density,

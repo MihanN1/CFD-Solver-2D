@@ -2,6 +2,7 @@
 #include "Config.hpp"
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 class Mesh {
@@ -31,6 +32,16 @@ public:
         double cx = 0.0;
         double cy = 0.0;
         double radius = 0.0;
+
+        double baseCx = 0.0;
+        double baseCy = 0.0;
+        double area = 0.0;
+    };
+
+    struct BodyPose {
+        double x = 0.0;
+        double y = 0.0;
+        double theta = 0.0;
     };
 
     // presetSolid short-circuits the whole geometry pipeline: a continuation
@@ -67,6 +78,16 @@ public:
 
     void checkPlacement(const Profile& profile);
 
+    bool prepareMotion();
+    bool motionReady() const { return motionPrepared; }
+    void setPose(int object, const BodyPose& pose);
+    const BodyPose& pose(int object) const { return poses[object]; }
+    void updateSolid();
+
+    const std::vector<std::pair<int, int>>& renumbered() const {
+        return lastRenumbered;
+    }
+
     void printInfo() const;
 
     std::string placementError;
@@ -85,6 +106,14 @@ private:
     // pointInsideSection runs across the whole set, so a loop inside another
     // loop comes out as a hole rather than as solid, which is what it is.
     std::vector<std::vector<SectionPoint>> sectionContours;
+
+    std::vector<std::vector<SectionPoint>> baseContours;
+    std::vector<int> contourObject;
+    std::vector<BodyPose> poses;
+    std::vector<std::pair<int, int>> lastRenumbered;
+    bool motionPrepared = false;
+
+    void relabelStable();
 
     void createGrid();
     void clearSolid();

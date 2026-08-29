@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstdio>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -682,6 +683,24 @@ bool loadRestart(const std::filesystem::path& file,
                 out.step = std::atoi(value.c_str());
             else if (key == "restartDt")
                 out.dt = std::strtof(value.c_str(), nullptr);
+            else if (key == "bodyState") {
+                for (size_t pos = 0; pos < value.size();) {
+                    size_t end = value.find(';', pos);
+                    if (end == std::string::npos)
+                        end = value.size();
+                    const std::string entry = value.substr(pos, end - pos);
+                    pos = end + 1;
+                    if (entry.empty())
+                        continue;
+                    RestartData::BodyState state;
+                    const int read = std::sscanf(
+                        entry.c_str(), "%d:%lf,%lf,%lf,%f,%f,%f",
+                        &state.object, &state.x, &state.y, &state.theta,
+                        &state.vx, &state.vy, &state.omega);
+                    if (read == 7)
+                        out.bodies.push_back(state);
+                }
+            }
             else if (key == "formatVersion") {
                 if (std::atoi(value.c_str()) > FRAME_FORMAT_VERSION)
                     std::cout << "  note: this frame was written by a newer "

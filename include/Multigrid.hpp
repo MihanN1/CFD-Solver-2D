@@ -26,7 +26,9 @@ public:
 
     // Builds the level hierarchy and the stencil coefficients for the geometry.
     // Must be called before solve().
-    void setGeometry(const std::vector<uint8_t>& solid);
+
+    void setGeometry(const std::vector<uint8_t>& solid,
+                     bool keepSolution = false);
 
     void setPressureBC(const MultigridBC& bc);
 
@@ -210,7 +212,7 @@ private:
         // asked whether it exists at all before anything is allocated on it.
         static bool cudaDeviceAvailable();
 
-        void setGeometryCuda();
+        void setGeometryCuda(bool keepSolution);
 
         void uploadCoefficientsCuda();
 

@@ -40,6 +40,7 @@ const char* const kKeys[] = {
     "useCuda", "saveInterval", "outputDir", "extraFields",
     "geometryFile", "sliceAngleX", "sliceAngleZ", "sliceRotation",
     "invertSection", "wallMotion", "profiles",
+    "bodyMotion", "bodyCoupling", "bodyIterations",
     "restart", "restartFile", "addTime",
     "gravityMode", "convection", "limiter", "timeScheme",
     "caseType", "lidSpeed", "steadyTolerance",
@@ -430,10 +431,19 @@ bool parseSources(const std::string& text,
             else if (name == "angle") source.angle = static_cast<float>(value);
             else if (name == "phase")
                 source.phase = static_cast<float>(std::min(1.0, std::max(0.0, value)));
+            else if (name == "body" || name == "on") {
+                if (value < 0.0 || value != std::floor(value)) {
+                    error = "body=<object number> says which body the source "
+                            "rides, so it is a whole number from 1, or 0 for "
+                            "one bolted to the domain.";
+                    return false;
+                }
+                source.body = static_cast<int>(value);
+            }
             else {
                 error = "'" + name +
                         "' is not a setting of a source. Use x, y, r, rate, "
-                        "angle or phase.";
+                        "angle, phase or body.";
                 return false;
             }
         }
@@ -761,6 +771,326 @@ bool parseWallMotion(const std::string& text,
     return true;
 }
 
+std::string bodyMotionHelp() {
+    return
+        "\n"
+        "--- How to write bodyMotion --------------------------------------\n"
+        "Shape of the line:   <object>:<setting>=<value>,<setting>=<value>\n"
+        "                     and ';' in front of the next object's number\n"
+        "  Same shape as wallMotion, same object numbers - the ones printed\n"
+        "  with the mesh. The difference is what moves. wallMotion moves the\n"
+        "  SURFACE and leaves the body where it is; bodyMotion moves the\n"
+        "  BODY, and the mask is rebuilt every step.\n"
+        "\n"
+        "  A. You say where it goes:\n"
+        "     vx=<m/s>       the body travels along +x\n"
+        "     vy=<m/s>       the same along +y\n"
+        "     omega=<deg/s>  it turns about its own centre, counter-clockwise\n"
+        "\n"
+        "  B. The flow decides where it goes:\n"
+        "     free=1         the body is let go and the fluid carries it\n"
+        "     mass=<kg/m>    per metre of depth, since this is a 2D slice\n"
+        "     density=<kg/m3>  instead of mass, if the shape is easier to\n"
+        "                    weigh than to mass: m = density * its own area\n"
+        "     inertia=<kg m2/m>  about the centre. Left out it is taken as\n"
+        "                    m*r^2/2, which is what a disc of that rim has\n"
+        "     vx, vy, omega  become the velocity it is let go WITH\n"
+        "     pinX=1 pinY=1 pinRot=1   hold one degree of freedom still. A\n"
+        "                    cylinder free to spin but not to drift is\n"
+        "                    free=1,pinX=1,pinY=1\n"
+        "\n"
+        "  C. Keyframes, for a prescribed path that is not a constant:\n"
+        "     @<t>           opens a keyframe at t seconds; everything after\n"
+        "                    it belongs to that keyframe until the next @.\n"
+        "     Times go forwards. Between two keyframes the velocity is\n"
+        "     interpolated; before the first and after the last it is held.\n"
+        "\n"
+        "Examples:\n"
+        "  1:vx=0.2                    object 1 drifts right at 0.2 m/s\n"
+        "  1:vx=0.2,omega=45           and turns while it goes\n"
+        "  1:free=1,mass=2             let go, 2 kg per metre of depth\n"
+        "  1:free=1,density=2700       the same, weighed as aluminium\n"
+        "  1:free=1,density=2700,pinX=1,pinY=1   pinned, free to spin\n"
+        "  1:@0,vx=0,@1,vx=0.5,@2,vx=0 speeds up, then stops\n"
+        "  1:vx=0.1;2:free=1,mass=5    one of each\n"
+        "\n"
+        "Empty line = every body stays where it is, which is every run\n"
+        "written before this existed.\n"
+        "------------------------------------------------------------------\n";
+}
+
+bool parseBodyMotion(const std::string& text,
+                     std::vector<BodyMotion>& out,
+                     std::string& error) {
+    out.clear();
+    error.clear();
+
+    const std::string body = cleanValue(text);
+    if (body.empty())
+        return true;
+
+    std::vector<std::string> tokens;
+    for (size_t pos = 0; pos < body.size();) {
+        size_t end = body.find_first_of(",;", pos);
+        if (end == std::string::npos)
+            end = body.size();
+        tokens.push_back(trimSpace(body.substr(pos, end - pos)));
+        pos = end + 1;
+    }
+
+    const auto timeText = [](float value) {
+        std::ostringstream out;
+        out << value;
+        return out.str();
+    };
+
+    int current = -1;
+    for (std::string token : tokens) {
+        if (token.empty())
+            continue;
+
+        const size_t colon = token.find(':');
+        const size_t equals = token.find('=');
+        if (colon != std::string::npos &&
+            (equals == std::string::npos || colon < equals)) {
+            const std::string idText = trimSpace(token.substr(0, colon));
+            double id = 0.0;
+            std::string why;
+            if (!parseNumber("object", idText, true, id, why) || id < 1.0) {
+                error = badValue("bodyMotion", body,
+                                 "'" + idText + "' is not an object number; "
+                                 "objects are numbered from 1 and the number "
+                                 "comes first, e.g. 1:vx=0.2");
+                return false;
+            }
+            for (const BodyMotion& done : out) {
+                if (done.object != static_cast<int>(id))
+                    continue;
+                error = badValue("bodyMotion", body,
+                                 "object " + idText + " is listed twice. One "
+                                 "object gets one entry, with everything it "
+                                 "does inside it: write " + idText +
+                                 ":vx=0.2,omega=45, not " + idText +
+                                 ":vx=0.2;" + idText + ":omega=45");
+                return false;
+            }
+            out.push_back(BodyMotion());
+            out.back().object = static_cast<int>(id);
+            current = static_cast<int>(out.size()) - 1;
+            token = trimSpace(token.substr(colon + 1));
+            if (token.empty())
+                continue;
+        }
+
+        if (current < 0) {
+            error = badValue("bodyMotion", body,
+                             "'" + token + "' comes before any object number. "
+                             "The line starts with the object it is about and "
+                             "a colon, so this reads 1:" + token +
+                             " if object 1 is the one meant");
+            return false;
+        }
+
+        BodyMotion& target = out[current];
+
+        if (token[0] == '@') {
+            double when = 0.0;
+            std::string why;
+            if (!parseNumber("keyframe time", token.substr(1), false, when,
+                             why)) {
+                error = badValue("bodyMotion", body,
+                                 "'" + token + "' opens a keyframe, so what "
+                                 "follows the @ is a time in seconds: @0, "
+                                 "@1.5, @2");
+                return false;
+            }
+            if (when < 0.0) {
+                error = badValue("bodyMotion", body,
+                                 "a keyframe at " + token.substr(1) +
+                                 " s is before the run starts");
+                return false;
+            }
+            if (!target.keys.empty() &&
+                static_cast<float>(when) <= target.keys.back().time) {
+                error = badValue("bodyMotion", body,
+                                 "keyframes go forwards in time, and " + token +
+                                 " does not come after @" +
+                                 timeText(target.keys.back().time) +
+                                 ". List them in order");
+                return false;
+            }
+            BodyKeyframe frame;
+            frame.time = static_cast<float>(when);
+            if (!target.keys.empty()) {
+                frame.vx = target.keys.back().vx;
+                frame.vy = target.keys.back().vy;
+                frame.omega = target.keys.back().omega;
+            } else {
+                frame.vx = target.vx;
+                frame.vy = target.vy;
+                frame.omega = target.omega;
+            }
+            target.keys.push_back(frame);
+            continue;
+        }
+
+        const size_t assign = token.find('=');
+        if (assign == std::string::npos || assign == 0) {
+            error = badValue("bodyMotion", body,
+                             "'" + token + "' is not a setting. Every setting "
+                             "is name=value, e.g. vx=0.2, and a keyframe opens "
+                             "with @<seconds>");
+            return false;
+        }
+
+        const std::string name = toLower(trimSpace(token.substr(0, assign)));
+        const std::string value = token.substr(assign + 1);
+
+        if (name == "free") {
+            if (!assignBool(target.free, name, value, error))
+                return false;
+            continue;
+        }
+        if (name == "pinx") {
+            if (!assignBool(target.pinX, name, value, error))
+                return false;
+            continue;
+        }
+        if (name == "piny") {
+            if (!assignBool(target.pinY, name, value, error))
+                return false;
+            continue;
+        }
+        if (name == "pinrot") {
+            if (!assignBool(target.pinRot, name, value, error))
+                return false;
+            continue;
+        }
+
+        double parsed = 0.0;
+        if (!parseNumber(name, value, false, parsed, error))
+            return false;
+
+        const float number = static_cast<float>(parsed);
+        BodyKeyframe* frame =
+            target.keys.empty() ? nullptr : &target.keys.back();
+
+        if (name == "vx") {
+            (frame ? frame->vx : target.vx) = number;
+        } else if (name == "vy") {
+            (frame ? frame->vy : target.vy) = number;
+        } else if (name == "omega" || name == "rot") {
+            (frame ? frame->omega : target.omega) = number;
+        } else if (name == "mass") {
+            if (!(number > 0.0f)) {
+                error = badValue("bodyMotion", body,
+                                 "a body has to weigh something, and mass=" +
+                                 cleanValue(value) + " is not a positive "
+                                 "number");
+                return false;
+            }
+            target.mass = number;
+        } else if (name == "density") {
+            if (!(number > 0.0f)) {
+                error = badValue("bodyMotion", body,
+                                 "density=" + cleanValue(value) + " is not a "
+                                 "positive number, and the mass is worked out "
+                                 "from it");
+                return false;
+            }
+            target.density = number;
+        } else if (name == "inertia") {
+            if (!(number > 0.0f)) {
+                error = badValue("bodyMotion", body,
+                                 "inertia=" + cleanValue(value) + " is not a "
+                                 "positive number. Leave it out and it is "
+                                 "taken as m*r^2/2, which is what a disc of "
+                                 "that rim would have");
+                return false;
+            }
+            target.inertia = number;
+        } else {
+            error = badValue("bodyMotion", body,
+                             "'" + name + "' is not a body setting. The "
+                             "prescribed ones are vx, vy and omega; free=1 "
+                             "hands the trajectory to the flow and then mass "
+                             "or density, inertia, pinX, pinY and pinRot "
+                             "apply; @<seconds> opens a keyframe");
+            return false;
+        }
+    }
+
+    for (const BodyMotion& done : out) {
+        const std::string id = std::to_string(done.object);
+        if (done.free && !done.keys.empty()) {
+            error = badValue("bodyMotion", body,
+                             "object " + id + " is let go and given a "
+                             "timetable at once. free=1 means the flow decides "
+                             "where it goes and keyframes mean you do. Keep "
+                             "the keyframes for a path you prescribe, or keep "
+                             "free=1 and let vx, vy and omega be the velocity "
+                             "it is let go with");
+            return false;
+        }
+        if (done.free && done.mass <= 0.0f && done.density <= 0.0f) {
+            error = badValue("bodyMotion", body,
+                             "object " + id + " is let go without a weight, "
+                             "and the fluid cannot accelerate something whose "
+                             "mass it does not know. Give it mass=<kg per "
+                             "metre of depth> or density=<kg/m3>");
+            return false;
+        }
+        if (!done.free &&
+            (done.mass > 0.0f || done.density > 0.0f || done.inertia > 0.0f ||
+             done.pinX || done.pinY || done.pinRot)) {
+            error = badValue("bodyMotion", body,
+                             "object " + id + " is given a weight or a pin but "
+                             "not free=1, and a body whose path you prescribe "
+                             "goes where you said whatever it weighs. Add "
+                             "free=1 to let the flow move it, or drop the "
+                             "settings only a free body reads");
+            return false;
+        }
+    }
+
+    return true;
+}
+
+bool parseBodyCoupling(const std::string& text, BodyCoupling& out,
+                       std::string& error) {
+    const std::string name = toLower(cleanValue(text));
+    if (name == "weak") {
+        out = BodyCoupling::Weak;
+        return true;
+    }
+    if (name == "added") {
+        out = BodyCoupling::Added;
+        return true;
+    }
+    if (name == "strong") {
+        out = BodyCoupling::Strong;
+        return true;
+    }
+    error = badValue("bodyCoupling", cleanValue(text),
+                     "it is weak, added or strong. weak evaluates the force "
+                     "once a step and goes unstable as soon as the body is not "
+                     "much heavier than the fluid it displaces; added carries "
+                     "an estimate of the fluid that moves with it on the left "
+                     "hand side, which is where that instability comes from, "
+                     "and costs nothing; strong iterates until force and "
+                     "motion agree, which is what a body lighter than the "
+                     "fluid needs");
+    return false;
+}
+
+const char* bodyCouplingName(BodyCoupling coupling) {
+    switch (coupling) {
+    case BodyCoupling::Weak:   return "weak";
+    case BodyCoupling::Strong: return "strong";
+    default:                   return "added";
+    }
+}
+
 std::string Config::canonicalKey(const std::string& key) {
     std::string name = cleanValue(key);
     while (!name.empty() && (name.front() == '-' || name.front() == '/'))
@@ -848,6 +1178,8 @@ bool Config::ask(const std::string& key, const std::string& prompt) {
     // confirmation menu shows the same block.
     if (name == "wallMotion")
         std::cout << wallMotionHelp();
+    if (name == "bodyMotion")
+        std::cout << bodyMotionHelp();
     if (name == "profiles")
         std::cout << profilesHelp();
 
@@ -1063,6 +1395,20 @@ void Config::readFromConsole() {
     if (!ask("wallMotion",
              "Wall behaviour (Enter leaves every wall stationary and no-slip)"))
         return;
+    if (!ask("bodyMotion",
+             "Bodies that travel through the grid (Enter leaves every body "
+             "where it is)"))
+        return;
+    if (bodiesMove()) {
+        if (!ask("bodyCoupling",
+                 "How a free body is coupled to the fluid (weak / added / "
+                 "strong)"))
+            return;
+        if (bodyCoupling == BodyCoupling::Strong &&
+            !ask("bodyIterations",
+                 "Most force/motion iterations inside one step"))
+            return;
+    }
     if (!ask("useCuda",
              "Use cuda? (0 = no, 1 = yes, ignored on a CPU-only build)"))
         return;
@@ -1183,6 +1529,15 @@ void Config::print() const {
     std::cout << "  sliceRotation    = " << sliceRotation << " deg\n";
     std::cout << "  wallMotion       = "
               << (wallMotion.empty() ? "none" : wallMotion) << "\n";
+    std::cout << "  bodyMotion       = "
+              << (bodyMotion.empty() ? "none (nothing travels)" : bodyMotion)
+              << "\n";
+    if (bodiesMove()) {
+        std::cout << "  bodyCoupling     = " << bodyCouplingName(bodyCoupling);
+        if (bodyCoupling == BodyCoupling::Strong)
+            std::cout << ", up to " << bodyIterations << " iterations a step";
+        std::cout << "\n";
+    }
     std::cout << "  profiles         = "
               << (profiles.empty() ? "none (geometryFile only)" : profiles)
               << "\n";
@@ -1322,6 +1677,9 @@ std::string Config::serialize() const {
     out << "outputDir=" << outputDir << "\n"
         << "geometryFile=" << geometryFile << "\n"
         << "wallMotion=" << wallMotion << "\n"
+        << "bodyMotion=" << bodyMotion << "\n"
+        << "bodyCoupling=" << bodyCouplingName(bodyCoupling) << "\n"
+        << "bodyIterations=" << bodyIterations << "\n"
         << "sources=" << sources << "\n"
         << "profiles=" << profiles << "\n"
         << "extraFields=" << extraFields << "\n";
@@ -1619,6 +1977,18 @@ bool Config::setParam(const std::string& key,
         if (ok)
             wallMotion = cleanValue(value);
     }
+    else if (k == "bodyMotion") {
+        std::vector<BodyMotion> parsed;
+        ok = parseBodyMotion(value, parsed, error);
+        if (ok)
+            bodyMotion = cleanValue(value);
+    }
+    else if (k == "bodyCoupling")
+        ok = parseBodyCoupling(value, bodyCoupling, error);
+    else if (k == "bodyIterations")
+        ok = assignInt(bodyIterations, k, value, 1, 64,
+                       "bodyIterations is how many times force and motion may "
+                       "be recomputed inside one step, from 1 to 64", error);
     else if (k == "restart")       ok = assignBool(restart, k, value, error);
     else if (k == "restartFile")  { restartFile = cleanValue(value); ok = true; }
     else if (k == "addTime") ok = assignDouble(addTime, k, value, -kHuge, kHuge,
@@ -1694,6 +2064,8 @@ bool Config::confirm() {
             // printed and a one-line refusal is all there would be to go on.
             if (canonicalKey(key) == "wallMotion")
                 std::cout << wallMotionHelp();
+            if (canonicalKey(key) == "bodyMotion")
+                std::cout << bodyMotionHelp();
         }
         return false;
     }

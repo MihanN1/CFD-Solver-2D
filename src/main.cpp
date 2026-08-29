@@ -377,7 +377,9 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    Mesh mesh(cfg, cfg.restart ? &restart.solid : nullptr);
+    const bool rebuildForBodies = cfg.restart && cfg.bodiesMove();
+    Mesh mesh(cfg,
+              (cfg.restart && !rebuildForBodies) ? &restart.solid : nullptr);
     if (!mesh.valid()) {
         std::cerr << "\n!!! " << mesh.error() << "\n\nNothing has been "
                      "started.\n";

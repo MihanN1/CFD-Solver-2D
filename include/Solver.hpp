@@ -4,6 +4,7 @@
 #include "Mesh.hpp"
 #include "Multigrid.hpp"
 #include "Phase.hpp"
+#include "RigidBody.hpp"
 #include "Restart.hpp"
 #include <vector>
 #include <string>
@@ -12,14 +13,14 @@
 
 class Solver {
 public:
-    Solver(const Config& cfg, const Mesh& mesh);
+    Solver(const Config& cfg, Mesh& mesh);
     void run();
 
     bool setInitialState(RestartData&& state, const std::string& framePrefix);
 
 private:
     const Config& cfg;
-    const Mesh& mesh;
+    Mesh& mesh;
     Multigrid multigrid;
 
     // Fields on staggered grid
@@ -84,6 +85,26 @@ private:
     bool wallsMove = false;
     bool wallsSlip = false;
 
+    std::vector<RigidBody> bodies;
+    bool bodiesMove = false;
+    bool bodiesFree = false;
+    std::vector<uint8_t> prevSolidMask;
+    std::vector<uint8_t> prevUFluidMask, prevVFluidMask;
+    std::vector<int> prevObjectId;
+    std::vector<float> bodyForceScratch;
+    int freshCells = 0;
+    int bodyPasses = 0;
+    bool renumberReported = false;
+
+    void resolveBodyMotion();
+    std::vector<RestartData::BodyState> restartBodies;
+    void refreshGeometry();
+    void fillFreshCells();
+    void bodyForces();
+    void advanceBodies(float stepDt);
+    void applyBodyPoses();
+    void reportBodies() const;
+
     // One buried face of a free-slip wall and the open faces it mirrors, so
     // that the difference the viscous stencil sees across the wall is zero.
     // second == first when the wall has fluid on one side only, which is the
@@ -142,6 +163,8 @@ private:
 
     std::vector<int> sourceCells;
     bool hasSources = false;
+    bool sourcesRide = false;
+    std::vector<uint8_t> sourceLive;
     double sourceInflow = 0.0;
     void buildSources();
     void applySources();

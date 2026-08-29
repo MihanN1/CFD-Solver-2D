@@ -28,6 +28,13 @@ struct RestartData {
 
     std::vector<float> phase;
 
+    struct BodyState {
+        int object = 0;
+        double x = 0.0, y = 0.0, theta = 0.0;
+        float vx = 0.0f, vy = 0.0f, omega = 0.0f;
+    };
+    std::vector<BodyState> bodies;
+
     bool exactState = false;       // false when u/v were rebuilt from cell data
     bool hasConfigText = false;    // false for frames of an older format
 };
