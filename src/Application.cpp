@@ -882,6 +882,19 @@ enum ParameterIndex : std::size_t {
     InletTo,
     InletProfileKind,
     WallMotionLine,
+    BodySelect,
+    BodyBehaviour,
+    BodyRotation,
+    BodySlideX,
+    BodySlideY,
+    BodyVelocityX,
+    BodyVelocityY,
+    BodySpin,
+    BodyMass,
+    BodyDensity,
+    BodyPins,
+    BodyMotionLine,
+    BodyCouplingKind,
     DomainX,
     DomainY,
     CellsX,
@@ -915,12 +928,13 @@ struct ParameterGroupInfo {
     const char* label;
 };
 
-constexpr std::array<ParameterGroupInfo, 12> PARAMETER_GROUPS{{
+constexpr std::array<ParameterGroupInfo, 13> PARAMETER_GROUPS{{
     {WindSpeed, "FLOW"},
     {Phases, "FLUIDS"},
     {SliceX, "GEOMETRY"},
     {CaseKind, "BOUNDARIES"},
     {WallMotionLine, "WALLS"},
+    {BodySelect, "BODIES"},
     {DomainX, "DOMAIN / GRID"},
     {Cfl, "TIME"},
     {Convection, "NUMERICS"},
@@ -943,6 +957,10 @@ const char* parameterKey(std::size_t index) {
         "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed",
         "inletFrom", "inletTo", "inletProfile",
         "wallMotion",
+        "uiBody", "uiBodyBehaviour", "uiBodyRot", "uiBodySlideX",
+        "uiBodySlideY", "uiBodyVx", "uiBodyVy", "uiBodySpin",
+        "uiBodyMass", "uiBodyDensity", "uiBodyPins",
+        "bodyMotion", "bodyCoupling",
         "Lx", "Ly", "nx", "ny",
         "CFL", "totalTime", "steadyTolerance", "addTime",
         "dtUpdateInterval", "dtSafety",
@@ -1025,6 +1043,27 @@ std::string parameterHelp(std::size_t index) {
         return "Cuts the inlet down to a band of its side, as fractions measured from the low end. The rest of that side becomes a wall.";
     case InletProfileKind:
         return "uniform is a flat inlet, parabolic bends it into a parabola carrying the same flow rate.";
+    case BodySelect:
+        return "Which body the rows under it are about. The numbers are the ones the solver prints for the mask, counted the same way - flood filled in scan order. The two text rows at the bottom are what is actually sent; these rows write into them.";
+    case BodyBehaviour:
+        return "static leaves the body alone. drag holds the fluid and pulls it along without the body going anywhere - that is wallMotion. slip lets the fluid past and exerts no drag. travel moves the body itself along a path you give. free lets go of it and the flow decides where it goes.";
+    case BodyRotation:
+    case BodySlideX:
+    case BodySlideY:
+        return "What a dragging surface does to the fluid touching it. The body itself does not move: rot spins the surface about its own centre, slideX and slideY run it along like a conveyor belt.";
+    case BodyVelocityX:
+    case BodyVelocityY:
+    case BodySpin:
+        return "How the body itself moves. Under travel this is the path; under free it is the velocity it is let go with, and the flow takes it from there.";
+    case BodyMass:
+    case BodyDensity:
+        return "What a free body weighs, per metre of depth because this is a 2D slice. Give it a mass, or a density and let the area do the arithmetic - whichever you set last wins. A body much lighter than the fluid it displaces wants coupling = strong.";
+    case BodyPins:
+        return "Degrees of freedom held still while the rest are free. A cylinder free to spin but not to drift is x and y pinned; a body free to fall straight down is spin pinned.";
+    case BodyMotionLine:
+        return "bodyMotion, in the solver's own grammar: <object>:vx=0.2,omega=45;<object>:free=1,mass=2. The rows above write into this and it is what is sent, so editing it by hand does the same thing. @<seconds> opens a keyframe, which the rows above cannot write.";
+    case BodyCouplingKind:
+        return "How a free body is coupled to the fluid. added carries the fluid that moves with the body on the left hand side of its own equation of motion and costs nothing. strong iterates force and motion inside the step until they agree and costs that many pressure solves. weak does neither and is here to be compared against - it goes unstable as soon as the body is not much heavier than what it displaces.";
     case WallMotionLine:
         return "wallMotion, in the solver's own grammar: <object>:rot=90,slideX=0.5;<object>:slip=1. The object numbers are the ones the solver prints for the mask.";
     case Convection:
@@ -1707,6 +1746,7 @@ struct SolverExecutableInfo {
     bool supportsMultipleContours = false;  // more than one closed loop
     bool supportsGravity = false;           // gravityEnabled= Accel= Angle=
     bool supportsWallMotion = false;        // wallMotion=
+    bool supportsBodyMotion = false;
     bool supportsProfiles = false;
     bool supportsExtraFields = false;
     bool supportsSchemes = false;
@@ -1895,6 +1935,7 @@ SolverExecutableInfo inspectSolverExecutable(
     // is the thing that decides whether the argument is accepted.
     info.supportsGravity = binaryContains(executable, "gravityEnabled");
     info.supportsWallMotion = binaryContains(executable, "wallMotion");
+    info.supportsBodyMotion = binaryContains(executable, "bodyMotion");
     info.supportsProfiles = binaryContains(executable, "profiles");
     info.supportsExtraFields = binaryContains(executable, "extraFields");
     info.supportsSchemes = binaryContains(executable, "timeScheme");
@@ -2057,6 +2098,26 @@ public:
                      ControlKind::Choice, {"uniform", "parabolic"}},
               Slider{"Wall motion", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
                      ControlKind::Text},
+              Slider{"Body", "", 1.0, 32.0, 1.0, true, false},
+              Slider{"Behaviour", "", 0.0, 4.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice,
+                     {"static", "drag", "slip", "travel", "free"}},
+              Slider{"Surface spin", "deg/s", -3600.0, 3600.0, 0.0, false, false},
+              Slider{"Surface slide X", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Surface slide Y", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Body velocity X", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Body velocity Y", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Body spin", "deg/s", -3600.0, 3600.0, 0.0, false, false},
+              Slider{"Body mass", "kg/m", 0.0, 100000.0, 0.0, false, false},
+              Slider{"Body density", "kg/m3", 0.0, 25000.0, 0.0, false, false},
+              Slider{"Pinned", "", 0.0, 7.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice,
+                     {"nothing", "x", "y", "x+y", "spin", "x+spin",
+                      "y+spin", "everything"}},
+              Slider{"Body motion", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
+                     ControlKind::Text},
+              Slider{"Coupling", "", 0.0, 2.0, 1.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"weak", "added", "strong"}},
               Slider{"Domain Lx", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Domain Ly", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Cells nx", "", 8.0, 5000.0, 50.0, true, true},
@@ -2955,6 +3016,7 @@ private:
         }
         if (releasedSlider.has_value()) {
             invalidSlider_.reset();
+            syncBodyRows(*releasedSlider);
         }
         draggingParameterScrollbar_ = false;
         draggingHorizontalSlice_ = false;
@@ -3056,6 +3118,7 @@ private:
         invalidSlider_.reset();
         editingSlider_.reset();
         sliderEditText_.clear();
+        syncBodyRows(index);
         return true;
     }
 
@@ -3512,6 +3575,10 @@ private:
         config.supportsWallMotion = solverInfo_.supportsWallMotion;
         config.wallMotion = sliders_[WallMotionLine].text;
 
+        config.supportsBodyMotion = solverInfo_.supportsBodyMotion;
+        config.bodyMotion = sliders_[BodyMotionLine].text;
+        config.bodyCoupling = sliders_[BodyCouplingKind].choice();
+
         config.supportsProfiles = solverInfo_.supportsProfiles;
         config.profiles = sliders_[Profiles].text;
         config.supportsExtraFields = solverInfo_.supportsExtraFields;
@@ -3565,7 +3632,7 @@ private:
 
     std::optional<std::size_t> sliderForValidationError(
         const std::string& error) const {
-        const std::array<std::pair<const char*, ParameterIndex>, 22> mappings{{
+        const std::array<std::pair<const char*, ParameterIndex>, 24> mappings{{
             {"Lx", DomainX}, {"Ly", DomainY}, {"nx", CellsX}, {"ny", CellsY},
             {"U0", WindSpeed}, {"nu", Viscosity}, {"ro", Density},
             {"CFL", Cfl}, {"totalTime", TotalTime},
@@ -3575,7 +3642,8 @@ private:
             {"mgMinCoarseSize", MgMinCoarseSize},
             {"saveInterval", SaveInterval}, {"useCuda", UseCuda},
             {"mixing", MixingKindRow}, {"diffusivity", Diffusivity},
-            {"surfaceTension", SurfaceTension}, {"contactAngle", ContactAngle}
+            {"surfaceTension", SurfaceTension}, {"contactAngle", ContactAngle},
+            {"bodyMotion", BodyMotionLine}, {"bodyCoupling", BodyCouplingKind}
         }};
         for (const auto& mapping : mappings) {
             if (error.rfind(mapping.first, 0) == 0) {
@@ -4334,6 +4402,8 @@ private:
 
         if (config.wallMotion.empty())
             config.supportsWallMotion = false;
+        if (config.bodyMotion.empty())
+            config.supportsBodyMotion = false;
         if (config.profiles.empty())
             config.supportsProfiles = false;
 
@@ -5313,6 +5383,209 @@ private:
         }
     }
 
+
+
+
+    struct BodyEntry {
+        int object = 0;
+        std::string settings;
+    };
+
+    static std::vector<BodyEntry> splitEntries(const std::string& line) {
+        std::vector<BodyEntry> out;
+        std::size_t pos = 0;
+        while (pos < line.size()) {
+            std::size_t colon = line.find(':', pos);
+            if (colon == std::string::npos)
+                break;
+            const std::string number = line.substr(pos, colon - pos);
+            int object = std::atoi(number.c_str());
+            std::size_t next = colon + 1;
+            while (next < line.size()) {
+                const std::size_t mark = line.find(';', next);
+                if (mark == std::string::npos) {
+                    next = line.size();
+                    break;
+                }
+                next = mark;
+                break;
+            }
+            if (object >= 1) {
+                BodyEntry entry;
+                entry.object = object;
+                entry.settings = line.substr(colon + 1, next - colon - 1);
+                out.push_back(entry);
+            }
+            pos = next + 1;
+        }
+        return out;
+    }
+
+    static std::string joinEntries(const std::vector<BodyEntry>& entries) {
+        std::string out;
+        for (const BodyEntry& entry : entries) {
+            if (entry.settings.empty())
+                continue;
+            if (!out.empty())
+                out += ';';
+            out += std::to_string(entry.object) + ':' + entry.settings;
+        }
+        return out;
+    }
+
+    static double settingOf(const std::string& settings,
+                            const std::string& name,
+                            double fallback = 0.0) {
+        std::size_t pos = 0;
+        while (pos < settings.size()) {
+            std::size_t end = settings.find(',', pos);
+            if (end == std::string::npos)
+                end = settings.size();
+            const std::string token = settings.substr(pos, end - pos);
+            const std::size_t eq = token.find('=');
+            if (eq != std::string::npos) {
+                std::string key = token.substr(0, eq);
+                while (!key.empty() && key.front() == ' ')
+                    key.erase(key.begin());
+                while (!key.empty() && key.back() == ' ')
+                    key.pop_back();
+                std::string lower;
+                for (char c : key)
+                    lower += static_cast<char>(
+                        std::tolower(static_cast<unsigned char>(c)));
+                if (lower == name)
+                    return std::atof(token.c_str() + eq + 1);
+            }
+            pos = end + 1;
+        }
+        return fallback;
+    }
+
+    static std::string number(double value) {
+        std::ostringstream out;
+        out << value;
+        return out.str();
+    }
+
+    static std::string entrySettings(const std::string& line, int object) {
+        for (const BodyEntry& entry : splitEntries(line))
+            if (entry.object == object)
+                return entry.settings;
+        return std::string();
+    }
+
+    static void setEntry(std::string& line, int object,
+                         const std::string& settings) {
+        std::vector<BodyEntry> entries = splitEntries(line);
+        bool found = false;
+        for (BodyEntry& entry : entries)
+            if (entry.object == object) {
+                entry.settings = settings;
+                found = true;
+            }
+        if (!found && !settings.empty()) {
+            BodyEntry entry;
+            entry.object = object;
+            entry.settings = settings;
+            entries.push_back(entry);
+        }
+        line = joinEntries(entries);
+    }
+
+    int selectedBody() const {
+        return static_cast<int>(std::lround(sliders_[BodySelect].value));
+    }
+
+    void syncBodyRows(std::size_t index) {
+        if (index == BodySelect) {
+            loadBodyRows();
+            return;
+        }
+        if (index >= BodyBehaviour && index <= BodyPins)
+            storeBodyRows();
+        else if (index == BodyMotionLine || index == WallMotionLine)
+            loadBodyRows();
+    }
+
+    void loadBodyRows() {
+        const int object = selectedBody();
+        const std::string wall =
+            entrySettings(sliders_[WallMotionLine].text, object);
+        const std::string travel =
+            entrySettings(sliders_[BodyMotionLine].text, object);
+
+        int behaviour = 0;
+        if (!travel.empty())
+            behaviour = settingOf(travel, "free", 0.0) >= 0.5 ? 4 : 3;
+        else if (!wall.empty())
+            behaviour = settingOf(wall, "slip", 0.0) >= 0.5 ? 2 : 1;
+
+        sliders_[BodyBehaviour].value = behaviour;
+        sliders_[BodyRotation].value = settingOf(wall, "rot");
+        sliders_[BodySlideX].value = settingOf(wall, "slidex");
+        sliders_[BodySlideY].value = settingOf(wall, "slidey");
+        sliders_[BodyVelocityX].value = settingOf(travel, "vx");
+        sliders_[BodyVelocityY].value = settingOf(travel, "vy");
+        sliders_[BodySpin].value = settingOf(travel, "omega");
+        sliders_[BodyMass].value = settingOf(travel, "mass");
+        sliders_[BodyDensity].value = settingOf(travel, "density");
+        const int pins = (settingOf(travel, "pinx") >= 0.5 ? 1 : 0) |
+                         (settingOf(travel, "piny") >= 0.5 ? 2 : 0) |
+                         (settingOf(travel, "pinrot") >= 0.5 ? 4 : 0);
+        sliders_[BodyPins].value = pins;
+    }
+
+    void storeBodyRows() {
+        const int object = selectedBody();
+        const std::string behaviour = sliders_[BodyBehaviour].choice();
+
+        std::string wall;
+        std::string travel;
+        const auto add = [](std::string& into, const std::string& text) {
+            if (!into.empty())
+                into += ',';
+            into += text;
+        };
+
+        if (behaviour == "drag") {
+            if (sliders_[BodyRotation].value != 0.0)
+                add(wall, "rot=" + number(sliders_[BodyRotation].value));
+            if (sliders_[BodySlideX].value != 0.0)
+                add(wall, "slideX=" + number(sliders_[BodySlideX].value));
+            if (sliders_[BodySlideY].value != 0.0)
+                add(wall, "slideY=" + number(sliders_[BodySlideY].value));
+            if (wall.empty())
+                wall = "rot=0";
+        } else if (behaviour == "slip") {
+            wall = "slip=1";
+        } else if (behaviour == "travel" || behaviour == "free") {
+            if (behaviour == "free")
+                add(travel, "free=1");
+            if (sliders_[BodyVelocityX].value != 0.0)
+                add(travel, "vx=" + number(sliders_[BodyVelocityX].value));
+            if (sliders_[BodyVelocityY].value != 0.0)
+                add(travel, "vy=" + number(sliders_[BodyVelocityY].value));
+            if (sliders_[BodySpin].value != 0.0)
+                add(travel, "omega=" + number(sliders_[BodySpin].value));
+            if (behaviour == "free") {
+                if (sliders_[BodyDensity].value > 0.0)
+                    add(travel,
+                        "density=" + number(sliders_[BodyDensity].value));
+                else if (sliders_[BodyMass].value > 0.0)
+                    add(travel, "mass=" + number(sliders_[BodyMass].value));
+                const int pins =
+                    static_cast<int>(std::lround(sliders_[BodyPins].value));
+                if (pins & 1) add(travel, "pinX=1");
+                if (pins & 2) add(travel, "pinY=1");
+                if (pins & 4) add(travel, "pinRot=1");
+            }
+            if (travel.empty())
+                travel = "vx=0";
+        }
+
+        setEntry(sliders_[WallMotionLine].text, object, wall);
+        setEntry(sliders_[BodyMotionLine].text, object, travel);
+    }
 
     bool phasesOn() const {
         return solverInfo_.supportsPhases &&

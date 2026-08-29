@@ -74,6 +74,11 @@ struct FluidSolverRunConfig {
     // which is what the solver does when the key is absent.
     std::string wallMotion;
 
+    bool supportsBodyMotion = false;
+
+    std::string bodyMotion;
+    std::string bodyCoupling = "added";
+
     bool supportsProfiles = false;
     std::string profiles;
 

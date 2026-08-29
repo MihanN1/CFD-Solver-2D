@@ -206,6 +206,21 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
     if (config.wallMotion.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "wallMotion must not contain CR or LF");
     }
+    if (config.bodyMotion.find_first_of("\r\n") != std::string::npos) {
+        return fail(error, "bodyMotion must not contain CR or LF");
+    }
+    if (config.supportsBodyMotion && !config.bodyMotion.empty()) {
+        if (config.bodyCoupling != "weak" && config.bodyCoupling != "added" &&
+            config.bodyCoupling != "strong") {
+            return fail(error, "bodyCoupling is weak, added or strong");
+        }
+
+        if (config.geometryFile == "empty" && config.profiles.empty()) {
+            return fail(error, "bodyMotion needs a model to move: an empty "
+                               "domain has no body in it, and a body has to "
+                               "have its outline cut again wherever it goes");
+        }
+    }
     if (config.profiles.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "profiles must not contain CR or LF");
     }
@@ -412,6 +427,11 @@ bool buildFluidSolverArguments(
     }
     if (config.supportsWallMotion) {
         arguments.push_back("wallMotion=" + config.wallMotion);
+    }
+    if (config.supportsBodyMotion) {
+        arguments.push_back("bodyMotion=" + config.bodyMotion);
+        if (!config.bodyMotion.empty())
+            arguments.push_back("bodyCoupling=" + config.bodyCoupling);
     }
     if (config.supportsProfiles && !config.profiles.empty()) {
         arguments.push_back("profiles=" + config.profiles);

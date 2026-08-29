@@ -144,6 +144,7 @@ is not there:
 |---|---|
 | `gravityEnabled` `gravityAccel` `gravityAngle` | `gravityEnabled` |
 | `wallMotion` | `wallMotion` |
+| `bodyMotion` `bodyCoupling` | `bodyMotion` |
 | `profiles` | `profiles` |
 | `extraFields` | `extraFields` |
 | `convection` `limiter` `timeScheme` `gravityMode` | `timeScheme` |
@@ -169,6 +170,47 @@ the boundary rows happened to say, which is not what picking a preset means.
 **Stop when steady** is `steadyTolerance`: the run ends early once the largest
 velocity change per second, measured against whatever drives the case, drops
 under it. Zero, the default, runs the whole of **Total time**.
+
+=== BODIES ===
+
+A body selector and a set of rows that edit whichever body it is pointing at,
+rather than one row per body per setting - a table of eight settings across
+however many bodies the mask happens to have does not fit on a screen, and the
+number is not known until the mask is generated.
+
+    BODIES   Body               which one the rows below are about
+             Behaviour          static | drag | slip | travel | free
+             Surface spin       deg/s      \
+             Surface slide X    m/s         > drag: the surface moves, the
+             Surface slide Y    m/s        /  body does not
+             Body velocity X    m/s        \
+             Body velocity Y    m/s         > travel: the body itself moves.
+             Body spin          deg/s      /  Under free, what it starts with
+             Body mass          kg/m       \
+             Body density       kg/m3       > free only
+             Pinned             which degrees of freedom are held
+             Body motion        text, the solver's grammar
+             Coupling           weak | added | strong
+
+The two text rows are the truth and the rows above them are a way of writing
+into one entry of each - exactly as the brush is a way of writing into the
+sources row. Pick a body and the rows read that body's entry back out of the
+text; change a row and it writes that entry back. Editing the text by hand does
+the same thing, and `@<seconds>` keyframes can only be written there, because a
+timetable is not a slider.
+
+**Behaviour** is the one row that decides which of the two strings an entry
+goes into. `drag` and `slip` are `wallMotion` - the surface moves and the body
+stays put. `travel` and `free` are `bodyMotion` - the body itself goes
+somewhere, and the solver cuts its outline again every step.
+
+Held back on finding `bodyMotion` in the executable, like every block since
+0.2. Point it at a 0.6 solver and the whole group is left off the command line.
+
+The validator refuses a body told to travel through an empty domain, because
+moving a body means cutting its outline again and an empty domain has no
+outline to cut. Better a sentence now than a run that starts, prints a refusal
+of its own and then sits perfectly still for ten minutes.
 
 **Phases** turns the FLUIDS group into two fluids with their own densities and
 viscosities, and the setup view into something you can paint on. `phases=1`
