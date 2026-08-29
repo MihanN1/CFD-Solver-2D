@@ -59,6 +59,8 @@ struct FlowSource {
     float rate = 0.0f;
     float angle = 0.0f;
     float phase = 1.0f;
+
+    int body = 0;
 };
 
 bool parseSources(const std::string& text,
@@ -113,6 +115,42 @@ bool parseWallMotion(const std::string& text,
 // that can be copied as they are. One sentence inside a prompt was not enough
 // for anybody who had not read the parser, so the prompt prints this instead.
 std::string wallMotionHelp();
+
+struct BodyKeyframe {
+    float time = 0.0f;
+    float vx = 0.0f;
+    float vy = 0.0f;
+    float omega = 0.0f;   // degrees/s, counter-clockwise
+};
+
+struct BodyMotion {
+    int object = 0;
+    bool free = false;
+    float vx = 0.0f;
+    float vy = 0.0f;
+    float omega = 0.0f;
+    float mass = 0.0f;
+    float inertia = 0.0f;
+    float density = 0.0f;
+    bool pinX = false, pinY = false, pinRot = false;
+    std::vector<BodyKeyframe> keys;
+};
+
+bool parseBodyMotion(const std::string& text,
+                     std::vector<BodyMotion>& out,
+                     std::string& error);
+
+std::string bodyMotionHelp();
+
+enum class BodyCoupling {
+    Weak,
+    Added,
+    Strong
+};
+
+bool parseBodyCoupling(const std::string& text, BodyCoupling& out,
+                       std::string& error);
+const char* bodyCouplingName(BodyCoupling coupling);
 
 struct Config {
     bool restart = false;
@@ -201,6 +239,10 @@ struct Config {
     // Wall behaviour
     std::string wallMotion = "";   // "1:rot=90,slideX=0.5;2:slip=1", empty = static no-slip
 
+    std::string bodyMotion = "";
+    BodyCoupling bodyCoupling = BodyCoupling::Added;
+    int bodyIterations = 4;
+
     // Methods
     void readFromConsole();
 
@@ -236,6 +278,8 @@ struct Config {
     bool emptyDomain() const;
 
     bool multiphase() const { return phases > 1; }
+
+    bool bodiesMove() const { return !bodyMotion.empty(); }
 
     bool hasSurfaceTension() const {
         return multiphase() && mixing == MixingKind::Immiscible &&

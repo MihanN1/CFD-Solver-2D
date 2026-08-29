@@ -505,8 +505,9 @@ void Multigrid::allocateDevice() {
                               static_cast<size_t>(reduceBlocks) * sizeof(float)));
 }
 
-void Multigrid::setGeometryCuda() {
-    allocateDevice();
+void Multigrid::setGeometryCuda(bool keepSolution) {
+    if (!keepSolution || !deviceReady)
+        allocateDevice();
     for (int l = 0; l < levels; ++l) {
         const Level& grid = gridLevels[l];
         DeviceLevel& d = deviceLevels[l];
@@ -530,9 +531,10 @@ void Multigrid::setGeometryCuda() {
         CUDA_CHECK(cudaMemcpy(d.prolongWeight, grid.prolongWeight.data(),
                               static_cast<size_t>(grid.cellCount) * sizeof(float),
                               cudaMemcpyHostToDevice));
-        CUDA_CHECK(cudaMemset(d.pressureAlloc, 0,
-                              (static_cast<size_t>(grid.cellCount)
-                               + 2u * d.halo + 16u) * sizeof(float)));
+        if (!keepSolution)
+            CUDA_CHECK(cudaMemset(d.pressureAlloc, 0,
+                                  (static_cast<size_t>(grid.cellCount)
+                                   + 2u * d.halo + 16u) * sizeof(float)));
     }
 
     deviceReady = true;

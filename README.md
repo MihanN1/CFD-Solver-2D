@@ -22,7 +22,6 @@ Possible future extensions include:
 - Adaptive mesh refinement (AMR)
 - Turbulence models
 - Compressible flow solver
-- Moving objects (NO idea how to do it for now, but ill figure that out)
 - MAY add several other solvers(deforming solver + electronic solver + thermal solver) and merge all of them into one
 - MAY make a full on website where u would download it all, but only if the previous point is done
 
@@ -55,6 +54,12 @@ Possible future extensions include:
 - ✅ Surface tension by height-function curvature, with a contact angle at walls
 - ✅ Two fluids that mix instead, spreading by Fickian diffusion
 - ✅ Moving walls: rotation and sliding, set per object
+- ✅ Bodies that travel through the grid, on a path you give or one the flow
+  decides, with the mask cut again every step
+- ✅ Freshly uncovered cells filled from the surface that swept past them
+- ✅ Fluid-structure interaction with the added mass carried implicitly, and
+  strong coupling for a body lighter than what it displaces
+- ✅ Flow sources that ride a body, in its own frame, thrust and all
 - ✅ Free-slip walls, set per object
 - ✅ Several models at once, each placed where you put it
 - ✅ Extra diagnostic fields written into the frames on request
@@ -226,6 +231,7 @@ CFD-Solver-2D/
 │   ├── ChannelTests.cpp            <- Poiseuille against the exact parabola
 │   ├── CavityTests.cpp             <- the lid driven cavity against Ghia 1982
 │   ├── InletTests.cpp              <- inlet bands, profiles and mass balance
+│   ├── MovingBodyTests.cpp         <- travel, fresh cells, coupling, thrust
 │   ├── SurfaceTensionTests.cpp     <- Laplace jump, spurious currents, rounding
 │   ├── MultiphaseTests.cpp         <- volume kept, a still layer staying still,
 │   │                                  and a dam break against its energy bound
@@ -460,6 +466,9 @@ above 0.1, `nu=0`.
 | `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
 | `invertSection` | switch | 0 | 1 / 0 |
 | `wallMotion` | list | empty | `<object>:rot=90,slideX=0.5;<object>:slip=1` — an object either moves or slips, see below |
+| `bodyMotion` | list | empty | `<object>:vx=0.2,omega=45;<object>:free=1,mass=2` — bodies that travel, see below |
+| `bodyCoupling` | name | `added` | `weak` / `added` / `strong`, only read by a free body |
+| `bodyIterations` | int | 4 | most force/motion passes inside one step, only read by `strong` |
 | `profiles` | list | empty | `<file>@x=1,y=0.5,size=0.3;<file>@x=3,y=0.5` — several models at once, see below |
 | `restart` | switch | 0 | 1 / 0 |
 | `restartFile` | path | empty | a `.vtk` frame or the folder holding them |
@@ -970,6 +979,178 @@ They cost four bytes a cell each and are written for ParaView and the UI to
 read; nothing in the solver reads them back, and a frame carrying them still
 continues exactly like one that does not.
 
+## Bodies that travel
+
+    "Fluid Solver.exe" "profiles=disc.obj@x=0.5,y=0.5,size=0.2" \
+                       "bodyMotion=1:vx=0.4,omega=60" \
+                       Lx=2 Ly=1 nx=96 ny=48 U0=0 \
+                       bcLeft=wall bcRight=wall bcBottom=wall bcTop=wall
+
+`wallMotion` and `bodyMotion` look almost the same and do opposite things.
+`wallMotion` moves the SURFACE: the wall drags the fluid past it like a
+conveyor belt and the body itself never goes anywhere. `bodyMotion` moves the
+BODY, and then the mask is a different mask every step. Empty is every run
+written before this and not one line of the code below executes.
+
+### The mesh stops being a constant
+
+The mask used to be cut once in the Mesh constructor and never touched again,
+and `Solver` held a `const Mesh&` to say so. It does not any more. Every step
+the outline is transformed by the body's pose, rasterised again, flood filled
+again, and handed to the multigrid.
+
+The numbering had to be made to survive that. Bodies are numbered by the scan
+order of the flood fill, so as soon as one moves past another the numbers can
+swap - and `wallMotion=2:rot=90` would quietly start spinning a different
+object halfway through a run. Now each body remembers where it started, and
+after every relabel the blob nearest to where a body was told to be keeps that
+body's number. Every pair is scored by distance and claimed in order of
+distance rather than in object order, so the first body cannot take a blob that
+plainly belongs to the second. If two bodies touch and become one, the run says
+so once and names the numbers that changed hands.
+
+### Freshly uncovered cells, which is where this normally breaks
+
+A cell the body has just left held the inside of a solid one step ago. There is
+no velocity in it to carry forward, and whatever is there is not a velocity -
+it is the mirrored value the no-slip stencil left behind. Leave it and the
+divergence of that one cell is enormous, the projection spreads it over the
+whole field in a single step, and the run looks like it exploded for no reason.
+
+What belongs there is the velocity of the surface that just swept past, because
+that is what the fluid touching it was moving at. Faces the body did not vacate
+itself fall back to the mean of their open neighbours, and the pressure and the
+phase fraction of a freshly opened cell are filled the same way - the pressure
+because the multigrid reads it as its starting guess, the fraction because a
+volume would otherwise appear out of nowhere.
+
+The check is that it works: a disc driven across a closed box at 0.4 m/s holds
+a divergence of 1.9e-06, which is float noise.
+
+### The flux through a moving surface
+
+A face with solid on one side is shut, and a shut face carries the wall's
+velocity in `uWall`. The predictor and the corrector have always written
+`mask * value + uWall` on every face, so putting the body's own velocity there
+is at once the no-slip condition on a moving surface and the flux through it
+that the projection has to account for. There is no separate source term: the
+divergence of the cell next door picks it up because it is in `u*` already.
+
+`wallMotion` deliberately does not take that path. There the surface slides and
+the body stays put, the face is shut at zero, and every run written before this
+one produces the same bits.
+
+### Letting go of it: free=1
+
+    "bodyMotion=1:free=1,density=2700,pinX=1,pinY=1"
+
+Give it a `mass` in kg per metre of depth, or a `density` and let its own area
+do the arithmetic. `inertia` left out is taken as `m*r^2/2`, which is what a
+disc of that rim has. `pinX`, `pinY` and `pinRot` hold one degree of freedom
+still, so a cylinder free to spin but not to drift is `free=1,pinX=1,pinY=1`.
+
+The force is the pressure and the shear integrated over the surface, and the
+surface of a staircase body is exactly the set of faces the mirror pass already
+walks, so it is a sum over faces rather than a contour that has to be
+reconstructed. With gravity in the solve the pressure integral already carries
+the buoyancy and only the weight is left to add; under the reduced formulation
+`p` holds no head at all and the whole submerged weight goes in by hand.
+
+### Why there are three couplings, and why the default is not the obvious one
+
+Compute the force, move the body, recompute the flow, repeat. That is the
+obvious scheme and it is unstable, and not in a way a smaller step fixes.
+
+A body accelerating through a fluid has to accelerate some of the fluid with
+it. That entrained fluid pushes back in proportion to the body's own
+acceleration - an added mass, comparable to the mass of fluid the body
+displaces. Evaluate that force one step late and you have a feedback loop whose
+gain is the ratio of added mass to body mass. Above about one it diverges, and
+halving `dt` does not reduce the gain at all: it is a property of the splitting,
+not of the discretisation.
+
+    bodyCoupling=weak      the obvious scheme, here to be compared against
+    bodyCoupling=added     the added mass on the left hand side (default)
+    bodyCoupling=strong    force and motion iterated until they agree
+
+`added` is one line: divide by `m + m_added` instead of by `m`. That is where
+the gain came from, so that is where it is removed, and it costs nothing.
+`strong` rewinds the flow and the bodies to the start of the step and redoes it
+with the velocity the last pass predicted, until the two agree - a fixed point
+of the whole step rather than of a linearisation of it. It costs `bodyIterations`
+pressure solves and is what a body lighter than the fluid actually needs.
+
+The three are measured against each other on a disc twice as dense as the
+fluid, where the added mass is half the body mass:
+
+    weak -0.6536, added -0.5552, strong -0.5331 m/s
+
+`strong` is the reference. `added` sits 4.1% from it for the price of a
+division; `weak` is 22.6% out, and that is at a density ratio of two. The test
+fails if `added` drifts past 5% of `strong`, and it also fails if `weak` gets
+as close as `added` does - a case where the cheap scheme happens to be right is
+a case that is not testing anything.
+
+### Keyframes
+
+    "bodyMotion=1:@0,vx=0,@1,vx=0.5,@2,vx=0"
+
+`@<t>` opens a keyframe at t seconds and everything after it belongs to that
+keyframe. Times go forwards; between two of them the velocity is interpolated,
+before the first and after the last it is held.
+
+Sampled at the start of each step this is a left Riemann sum and loses half a
+step off every ramp. It is sampled at the middle of the step instead, which
+integrates a straight line exactly - and a pair of keyframes is a straight
+line. A body ramped from 0 to 0.5 m/s over 0.2 s and then held moves 0.15001 m
+in 0.4 s, against 0.15 exactly.
+
+### Sources that ride
+
+    "sources=x=-0.14,y=0,r=0.06,rate=3,angle=180,body=1"
+
+`body=<n>` puts the source in that body's own frame with the origin at its
+centre, so a thruster stays on its nozzle however far the body has travelled or
+turned. The jet is turned into the domain frame every step, and the reaction -
+`rho * Q * v`, the momentum leaving per second - goes onto the body.
+
+A prescribed body feels that force too. It is computed and reported and then
+its trajectory ignores it, which is what "prescribed" means: you said where it
+goes, so that is where it goes, and the arithmetic is there for whatever reads
+it. Under `free=1` the same force is what drives it.
+
+A source that lands entirely inside its own body covers no fluid cell and emits
+nothing, so it pushes nothing either. That is one line and it is the difference
+between a rocket and a reactionless drive.
+
+### Continuing one
+
+A continuation normally takes the mask straight out of the frame, which is
+exact and needs no model at all. A run whose bodies travel cannot: that mask is
+a rasterised copy of wherever they had got to, and moving them on from it means
+cutting the outline again. So that one case rebuilds the geometry from the
+model and puts the bodies back at the pose the frame carries - six numbers per
+body, written into every frame. Split a run in half and the halves end at the
+same pose and the same mask, to the bit.
+
+### Checked against
+
+`MovingBodyTests` runs six cases:
+
+    prescribed    moved 0.200000 m against 0.200000 exact, div 1.907e-06
+    keyframes     moved 0.15001 m against 0.15000 from the ramp it was given
+    numbering     bodies 1 and 2 kept their numbers closing at 0.12 and -0.12 m
+    coupling      weak -0.6536, added -0.5552, strong -0.5331 m/s
+    neutral       0.0017 m/s after 0.3 s against 2.943 falling free (0.06%)
+    thrust        a jet aimed at -x pushed the body to 0.2981 m/s along +x
+
+`neutral` is the one that looks like nothing and is not. A body weighing
+exactly what it displaces, under gravity in the solve, has to have the pressure
+integral over its surface cancel its own weight to five significant figures -
+and it does, to 0.06% of what free fall would have given it. A sign error
+anywhere in the surface integral or the buoyancy shows up there as a body that
+takes off.
+
 ## Walls: moving and slipping
 
 Off by default. A moving wall is a wall whose *surface* has a velocity while
@@ -1271,6 +1452,7 @@ Continue from `solution_200_400.vtk` and the next series is
 | `U0`, `nu` | allowed, but it is a discontinuity in the physics, not a continuation of the same problem |
 | `ro` | free — it only scales the pressure on the way out to Pa, the frame stores the kinematic field |
 | `gravityEnabled`, `gravityAccel`, `gravityAngle` | free — changing them shifts the hydrostatic part of the pressure and leaves the velocity where it was |
+| `bodyMotion` | free, and it is the one key that changes how the frame is read: a run whose bodies travel rebuilds the geometry from the model at the pose the frame carries, rather than inheriting a rasterised copy of the mask. Restart it a hundred times and it is in the same place as the run that was never stopped |
 | `wallMotion` | free — the mask comes out of the frame, so the object numbers still mean the same bodies. Spinning a wall up mid-run is a step change in the boundary condition, not a discontinuity in the state |
 
 Continuing from the last frame of a run and letting it go further produces
@@ -1413,6 +1595,7 @@ executable and the tests link the same objects, so what is tested is what runs.
 | `CavityTests` | the lid driven cavity at Re 100 against the Ghia, Ghia and Shin tables - the first numbers in this project that were not produced by this project |
 | `InletTests` | an inlet cut down to a band of its side: where the open faces actually are, that a parabolic band carries the same flow rate as a flat one, and that what goes in comes back out |
 | `MultiphaseTests` | the volume of fluid 1 after three seconds of being stirred, a layer under gravity that is supposed to be sitting still, a collapsing column against the speed a free fall from its own height would reach, and a step in composition spreading at the rate an error function says it should |
+| `MovingBodyTests` | a body told where to go arriving exactly there with the divergence still at float noise, a ramp integrated exactly, two bodies keeping their numbers while they pass, the three couplings measured against each other, a neutrally buoyant body staying put, and a jet pushing its own body the other way |
 | `SurfaceTensionTests` | the pressure inside a drop against `sigma/R`, the spurious current a drop that should be at rest develops anyway, and a square blob of water refusing to stay square |
 | `ConservationTests` | divergence left after the projection, inflow against outflow, and a fluid at rest under real gravity staying at rest |
 | `ConvectionTests` | every scheme run on the same case, and the ordering of how much of the field each one throws away |
@@ -1437,6 +1620,41 @@ Performance improvements include:
 - optimized memory access patterns;
 - accelerated pressure solver;
 - optimized boundary-condition processing.
+
+0.7 added a cost that had never existed: the mask is cut again every step
+instead of once. Best of five interleaved runs, same case, AVX2 and OpenMP on:
+
+| | 192x96, disc, 0.4 s |
+|---|---|
+| geometry cut once | 0.869 s |
+| geometry cut every step | 1.037 s |
+| what moving it costs | 19.3% |
+
+That is after the rasterizer was rewritten for it, and the rewrite is most of
+the difference. Under callgrind the same case went from 150.6M executed
+instructions to 126.2M, a sixth of the whole run:
+
+- **std::hypot was a fifth of the moving path.** `distanceToSegment` called it
+  once per cell per segment, and it is a libm call that goes to real trouble
+  not to overflow. The comparison it feeds only wants to know which side of the
+  radius the point is on, and squares answer that. Cells sitting within a part
+  in 1e12 of the radius - none of them, ever - still go through hypot, so the
+  mask cannot move. hypot went from 9.4% of the run to not appearing.
+- **A segment is only tested against the rows it reaches.** Each contour is
+  clipped to its own bounding box, and inside that box each row first collects
+  the segments whose y-range covers it. A body's outline crosses a handful of
+  rows per segment, so the per-cell loop went from the whole contour to a few.
+- **The transfer tables stopped being rebuilt.** Which two coarse cells a fine
+  cell interpolates from is a function of the level's shape, and the shape is
+  fixed the moment the hierarchy is built. Only the weights read the mask.
+- **The CUDA backend stopped reallocating.** `setGeometry` on the device freed
+  and re-malloc'd the whole hierarchy and wiped the pressure field, which is
+  fine once at setup and is tens of cudaMalloc pairs per step for a body that
+  moves. It now has a keep-the-solution path that uploads the mask and the
+  coefficients and touches nothing else.
+
+The single-phase path is unchanged and still bit-for-bit what 0.2 wrote: 88
+frames across ten configurations, relative difference exactly 0.000e+00.
 
 0.6 went back over everything the previous three branches added rather than
 only writing the new feature. Best of three runs, same machine, AVX2 and

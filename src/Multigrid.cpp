@@ -218,11 +218,14 @@ void Multigrid::buildTransferWeights(int fineLevel) {
     Level& fine = gridLevels[fineLevel];
 
     fine.prolongWeight.assign(static_cast<size_t>(fine.cellCount), 0.0f);
-    buildTransferTables(fineLevel);
+
+    if (fine.transferX.empty() || fine.transferY.empty())
+        buildTransferTables(fineLevel);
     if (coarseLevel >= levels)
         return;
 
     const Level& coarse = gridLevels[coarseLevel];
+    #pragma omp parallel for schedule(static) if (fine.ny >= PARALLEL_ROWS_MIN)
     for (int j = 0; j < fine.ny; ++j) {
         const Level::Transfer sy = fine.transferY[j];
         for (int i = 0; i < fine.nx; ++i) {
@@ -309,7 +312,8 @@ void Multigrid::buildCoefficients(Level& grid) {
     }
 }
 
-void Multigrid::setGeometry(const std::vector<uint8_t>& solid) {
+void Multigrid::setGeometry(const std::vector<uint8_t>& solid,
+                            bool keepSolution) {
     if (gridLevels.empty())
         buildHierarchy();
 
@@ -350,11 +354,12 @@ void Multigrid::setGeometry(const std::vector<uint8_t>& solid) {
         buildTransferWeights(l);
 
     geometryReady = true;
-    firstSolve = true;
+    if (!keepSolution)
+        firstSolve = true;
 
 #ifdef USE_CUDA
     if (useCuda)
-        setGeometryCuda();
+        setGeometryCuda(keepSolution);
 #endif
 }
 
@@ -511,7 +516,7 @@ void Multigrid::setUseCuda(bool enable) {
                      "No usable CUDA device; the pressure solve runs on the "
                      "CPU.\n");
     if (useCuda && geometryReady)
-        setGeometryCuda();
+        setGeometryCuda(false);
 #else
     (void)enable;
     useCuda = false;
