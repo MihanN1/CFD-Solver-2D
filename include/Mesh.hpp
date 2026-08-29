@@ -84,6 +84,9 @@ public:
     const BodyPose& pose(int object) const { return poses[object]; }
     void updateSolid();
 
+    const std::vector<int>& ownership() const { return cellOwner; }
+    const std::vector<int>& contested() const { return contestedCells; }
+
     const std::vector<std::pair<int, int>>& renumbered() const {
         return lastRenumbered;
     }
@@ -109,11 +112,15 @@ private:
 
     std::vector<std::vector<SectionPoint>> baseContours;
     std::vector<int> contourObject;
+    std::vector<int> cellOwner;
+    std::vector<int> contestedCells;
+    std::vector<int> claimScratch;
     std::vector<BodyPose> poses;
     std::vector<std::pair<int, int>> lastRenumbered;
     bool motionPrepared = false;
 
     void relabelStable();
+    void rasterizeOwned();
 
     void createGrid();
     void clearSolid();

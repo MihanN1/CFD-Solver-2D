@@ -121,6 +121,7 @@ struct BodyKeyframe {
     float vx = 0.0f;
     float vy = 0.0f;
     float omega = 0.0f;   // degrees/s, counter-clockwise
+    bool free = false;
 };
 
 struct BodyMotion {
@@ -242,6 +243,9 @@ struct Config {
     std::string bodyMotion = "";
     BodyCoupling bodyCoupling = BodyCoupling::Added;
     int bodyIterations = 4;
+    bool bodyCollisions = false;
+    float bodyRestitution = 0.2f;
+    bool bodyForceReport = false;
 
     // Methods
     void readFromConsole();
