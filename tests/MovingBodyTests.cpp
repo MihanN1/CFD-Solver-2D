@@ -32,6 +32,41 @@ void writeDisc(const std::filesystem::path& path, double radius, int points) {
     out << "\n";
 }
 
+std::vector<std::pair<double, double>> blobCentres(const RestartData& frame) {
+    const int nx = frame.nx, ny = frame.ny;
+    std::vector<int> label(static_cast<std::size_t>(nx) * ny, 0);
+    std::vector<std::pair<double, double>> out;
+    std::vector<int> pending;
+    for (int seed = 0; seed < nx * ny; ++seed) {
+        if (!frame.solid[seed] || label[seed])
+            continue;
+        const int mark = static_cast<int>(out.size()) + 1;
+        double sumX = 0.0, sumY = 0.0;
+        int count = 0;
+        label[seed] = mark;
+        pending.push_back(seed);
+        while (!pending.empty()) {
+            const int id = pending.back();
+            pending.pop_back();
+            const int i = id % nx, j = id / nx;
+            sumX += (i + 0.5) * frame.dx;
+            sumY += (j + 0.5) * frame.dy;
+            ++count;
+            for (int nj = std::max(j - 1, 0); nj <= std::min(j + 1, ny - 1); ++nj)
+                for (int ni = std::max(i - 1, 0); ni <= std::min(i + 1, nx - 1);
+                     ++ni) {
+                    const int other = nj * nx + ni;
+                    if (frame.solid[other] && !label[other]) {
+                        label[other] = mark;
+                        pending.push_back(other);
+                    }
+                }
+        }
+        out.push_back({sumX / count, sumY / count});
+    }
+    return out;
+}
+
 int solidCells(const RestartData& frame) {
     int total = 0;
     for (uint8_t value : frame.solid)
@@ -159,10 +194,28 @@ int main() {
                         "told: " + std::to_string(first->x) + " and " +
                         std::to_string(second->x));
 
-        char line[200];
+        const std::vector<std::pair<double, double>> blobs =
+            blobCentres(frame);
+        if (blobs.size() != 2)
+            return fail("the two bodies came out as " +
+                        std::to_string(blobs.size()) + " blobs in the mask");
+        for (const RestartData::BodyState* body : {first, second}) {
+            double best = 1e30;
+            for (const std::pair<double, double>& blob : blobs)
+                best = std::min(best, std::fabs(blob.first - (body == first
+                                                    ? 0.5 + body->x
+                                                    : 1.4 + body->x)));
+            if (best > 3.0 * frame.dx)
+                return fail("a body says it is at " +
+                            std::to_string(body->x) +
+                            " but no blob in the mask is within three cells "
+                            "of there");
+        }
+
+        char line[220];
         std::snprintf(line, sizeof(line),
-                      "numbering     bodies 1 and 2 kept their numbers "
-                      "closing at %.4f and %.4f m",
+                      "numbering     bodies 1 and 2 kept their numbers closing "
+                      "at %.4f and %.4f m, mask agrees",
                       first->x, second->x);
         report(line);
     }
@@ -293,19 +346,139 @@ int main() {
                         std::to_string(body->vx) +
                         " m/s, and a rocket goes the other way to its exhaust");
 
-        const double flow = 3.0 * 2.0 * 3.14159265358979 * 0.06;
-        const double thrust = 1.0 * flow * 3.0;
-        const double ceiling = thrust / 2.0 * 0.25;
-        if (body->vx > ceiling)
-            return fail("the body ended up at " + std::to_string(body->vx) +
-                        " m/s, past the " + std::to_string(ceiling) +
-                        " m/s its own jet could ever give it");
+        Config loose = cfg;
+        loose.outputDir = (root / "thrust-loose").string();
+        loose.sources = "x=0.86,y=0.5,r=0.06,rate=3,angle=180";
+        RestartData looseFrame;
+        if (!runCase(loose, looseFrame, error))
+            return fail("the unattached-jet run failed: " + error);
+        const RestartData::BodyState* adrift = bodyOf(looseFrame, 1);
+        if (!adrift)
+            return fail("the unattached-jet run wrote no body state");
+        if (!(body->vx > adrift->vx))
+            return fail("attaching the jet to the body changed nothing: " +
+                        std::to_string(body->vx) + " against " +
+                        std::to_string(adrift->vx) +
+                        " with the same jet bolted to the domain");
+
+        char line[240];
+        std::snprintf(line, sizeof(line),
+                      "thrust        jet on the body %.4f m/s, the same jet "
+                      "bolted down %.4f m/s - the reaction is worth %.4f",
+                      body->vx, adrift->vx, body->vx - adrift->vx);
+        report(line);
+    }
+
+    {
+        Config cfg = movingCase(root / "carried", model);
+        cfg.U0 = 1.0f;
+        cfg.nu = 0.01f;
+        cfg.ro = 500.0f;
+        cfg.totalTime = 0.35;
+        cfg.profiles = model.string() + "@x=0.4,y=0.5,size=0.2";
+        cfg.boundaries = defaultChannelBoundaries();
+        cfg.bodyMotion = "1:free=1,density=700";
+
+        RestartData frame;
+        if (!runCase(cfg, frame, error))
+            return fail("the carried run failed: " + error);
+
+        const RestartData::BodyState* body = bodyOf(frame, 1);
+        if (!body)
+            return fail("the carried run wrote no body state");
+        if (!(body->vx > 0.0f) || !(body->x > 0.0))
+            return fail("a body let go in a flow running at +1 m/s ended up "
+                        "going " + std::to_string(body->vx) +
+                        " m/s: the horizontal force has the wrong sign");
+        if (body->vx > cfg.U0)
+            return fail("a body let go in a flow overtook the flow that is "
+                        "carrying it, at " + std::to_string(body->vx) +
+                        " m/s against " + std::to_string(cfg.U0));
 
         char line[220];
         std::snprintf(line, sizeof(line),
-                      "thrust        a jet aimed at -x pushed the body to "
-                      "%.4f m/s along +x against a ceiling of %.4f",
-                      body->vx, ceiling);
+                      "carried       let go in a 1 m/s flow, reached %.4f m/s "
+                      "downstream and moved %.4f m",
+                      body->vx, body->x);
+        report(line);
+    }
+
+    {
+        Config cfg = movingCase(root / "released", model);
+        cfg.Lx = 1.2f;
+        cfg.Ly = 1.0f;
+        cfg.nx = 72;
+        cfg.ny = 60;
+        cfg.nu = 1e-3f;
+        cfg.ro = 1000.0f;
+        cfg.totalTime = 0.4;
+        cfg.profiles = model.string() + "@x=0.3,y=0.5,size=0.15";
+        cfg.bodyMotion = "1:@0,vx=0.6,@0.15,free=1,density=1200";
+
+        RestartData frame;
+        if (!runCase(cfg, frame, error))
+            return fail("the released run failed: " + error);
+
+        const RestartData::BodyState* body = bodyOf(frame, 1);
+        if (!body)
+            return fail("the released run wrote no body state");
+        if (!(body->vx > 0.0f))
+            return fail("a body let go at 0.6 m/s stopped or reversed: " +
+                        std::to_string(body->vx));
+        if (!(body->vx < 0.6f))
+            return fail("a body let go at 0.6 m/s with nothing pushing it "
+                        "reached " + std::to_string(body->vx) +
+                        " m/s, so the drag is pushing rather than dragging");
+
+        char line[220];
+        std::snprintf(line, sizeof(line),
+                      "released      driven at 0.600, let go at 0.15 s, down "
+                      "to %.4f m/s by 0.4 s",
+                      body->vx);
+        report(line);
+    }
+
+    {
+        double outcome[2] = {0.0, 0.0};
+        for (int pass = 0; pass < 2; ++pass) {
+            Config cfg = movingCase(
+                root / (pass == 0 ? "pass-through" : "bounce"), model);
+            cfg.Lx = 2.0f;
+            cfg.Ly = 1.0f;
+            cfg.nx = 96;
+            cfg.ny = 48;
+            cfg.ro = 1.0f;
+            cfg.nu = 1e-3f;
+            cfg.totalTime = 0.9;
+            cfg.profiles = model.string() + "@x=0.5,y=0.5,size=0.2;" +
+                           model.string() + "@x=1.3,y=0.5,size=0.2";
+
+            cfg.bodyMotion = "1:vx=-0.3;2:free=1,density=50,vx=0.6";
+            cfg.bodyCollisions = pass == 1;
+            cfg.bodyRestitution = 0.8f;
+
+            RestartData frame;
+            if (!runCase(cfg, frame, error))
+                return fail("the collision run failed: " + error);
+            const RestartData::BodyState* body = bodyOf(frame, 2);
+            if (!body)
+                return fail("the collision run wrote no body state");
+            outcome[pass] = body->vx;
+        }
+
+        if (!(outcome[0] > 0.0))
+            return fail("with collisions off the free body did not keep going "
+                        "the way it was sent: " + std::to_string(outcome[0]));
+        if (!(outcome[1] < outcome[0]))
+            return fail("turning collisions on changed nothing: " +
+                        std::to_string(outcome[1]) + " against " +
+                        std::to_string(outcome[0]));
+
+        char line[220];
+        std::snprintf(line, sizeof(line),
+                      "collisions    off %.4f m/s, on %.4f m/s - the second "
+                      "one met something",
+                      outcome[0], outcome[1]);
         report(line);
     }
 

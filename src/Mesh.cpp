@@ -1021,9 +1021,50 @@ void Mesh::updateSolid() {
         }
     }
 
-    rasterizeSection();
-    buildSolid();
+    rasterizeOwned();
     relabelStable();
+}
+
+void Mesh::rasterizeOwned() {
+    const int cells = nx * ny;
+    cellOwner.assign(static_cast<std::size_t>(cells), 0);
+    contestedCells.clear();
+
+    std::vector<std::vector<SectionPoint>> all = std::move(sectionContours);
+    const std::size_t bodies = objects.size();
+    for (std::size_t body = 1; body <= bodies; ++body) {
+        sectionContours.clear();
+        for (std::size_t which = 0; which < all.size(); ++which)
+            if (contourObject[which] == static_cast<int>(body))
+                sectionContours.push_back(all[which]);
+        if (sectionContours.empty())
+            continue;
+
+        rasterizeSection();
+        buildSolid();
+        for (int id = 0; id < cells; ++id) {
+            if (!solid[id])
+                continue;
+            if (cellOwner[id] == 0)
+                cellOwner[id] = static_cast<int>(body);
+            else if (cellOwner[id] != static_cast<int>(body))
+                contestedCells.push_back(id);
+        }
+        if (body == 1)
+            claimScratch = solid;
+        else
+            for (int id = 0; id < cells; ++id)
+                if (solid[id])
+                    claimScratch[id] = 1;
+    }
+
+    sectionContours = std::move(all);
+    if (bodies == 0) {
+        rasterizeSection();
+        buildSolid();
+        return;
+    }
+    solid = claimScratch;
 }
 
 void Mesh::relabelStable() {

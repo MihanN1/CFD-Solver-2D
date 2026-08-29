@@ -41,6 +41,7 @@ const char* const kKeys[] = {
     "geometryFile", "sliceAngleX", "sliceAngleZ", "sliceRotation",
     "invertSection", "wallMotion", "profiles",
     "bodyMotion", "bodyCoupling", "bodyIterations",
+    "bodyCollisions", "bodyRestitution", "bodyForceReport",
     "restart", "restartFile", "addTime",
     "gravityMode", "convection", "limiter", "timeScheme",
     "caseType", "lidSpeed", "steadyTolerance",
@@ -925,10 +926,12 @@ bool parseBodyMotion(const std::string& text,
                 frame.vx = target.keys.back().vx;
                 frame.vy = target.keys.back().vy;
                 frame.omega = target.keys.back().omega;
+                frame.free = target.keys.back().free;
             } else {
                 frame.vx = target.vx;
                 frame.vy = target.vy;
                 frame.omega = target.omega;
+                frame.free = target.free;
             }
             target.keys.push_back(frame);
             continue;
@@ -947,7 +950,9 @@ bool parseBodyMotion(const std::string& text,
         const std::string value = token.substr(assign + 1);
 
         if (name == "free") {
-            if (!assignBool(target.free, name, value, error))
+            bool& flag = target.keys.empty() ? target.free
+                                             : target.keys.back().free;
+            if (!assignBool(flag, name, value, error))
                 return false;
             continue;
         }
@@ -1022,17 +1027,11 @@ bool parseBodyMotion(const std::string& text,
 
     for (const BodyMotion& done : out) {
         const std::string id = std::to_string(done.object);
-        if (done.free && !done.keys.empty()) {
-            error = badValue("bodyMotion", body,
-                             "object " + id + " is let go and given a "
-                             "timetable at once. free=1 means the flow decides "
-                             "where it goes and keyframes mean you do. Keep "
-                             "the keyframes for a path you prescribe, or keep "
-                             "free=1 and let vx, vy and omega be the velocity "
-                             "it is let go with");
-            return false;
-        }
-        if (done.free && done.mass <= 0.0f && done.density <= 0.0f) {
+        bool everFree = done.free;
+        for (const BodyKeyframe& frame : done.keys)
+            if (frame.free)
+                everFree = true;
+        if (everFree && done.mass <= 0.0f && done.density <= 0.0f) {
             error = badValue("bodyMotion", body,
                              "object " + id + " is let go without a weight, "
                              "and the fluid cannot accelerate something whose "
@@ -1040,7 +1039,7 @@ bool parseBodyMotion(const std::string& text,
                              "metre of depth> or density=<kg/m3>");
             return false;
         }
-        if (!done.free &&
+        if (!everFree &&
             (done.mass > 0.0f || done.density > 0.0f || done.inertia > 0.0f ||
              done.pinX || done.pinY || done.pinRot)) {
             error = badValue("bodyMotion", body,
@@ -1408,6 +1407,18 @@ void Config::readFromConsole() {
             !ask("bodyIterations",
                  "Most force/motion iterations inside one step"))
             return;
+        if (!ask("bodyForceReport",
+                 "Also work out the fluid force on bodies whose path you set? "
+                 "(it never changes where they go)"))
+            return;
+        if (!ask("bodyCollisions",
+                 "Do bodies bounce off each other and off the walls? "
+                 "(0 = they pass through)"))
+            return;
+        if (bodyCollisions &&
+            !ask("bodyRestitution",
+                 "How much of the closing speed survives a bounce (0 to 1)"))
+            return;
     }
     if (!ask("useCuda",
              "Use cuda? (0 = no, 1 = yes, ignored on a CPU-only build)"))
@@ -1537,6 +1548,16 @@ void Config::print() const {
         if (bodyCoupling == BodyCoupling::Strong)
             std::cout << ", up to " << bodyIterations << " iterations a step";
         std::cout << "\n";
+        std::cout << "  bodyCollisions   = "
+                  << (bodyCollisions ? "on" : "off, bodies pass through each "
+                                              "other and through the walls")
+                  << "\n";
+        if (bodyCollisions)
+            std::cout << "  bodyRestitution  = " << bodyRestitution
+                      << " of the closing speed survives a bounce\n";
+        if (bodyForceReport)
+            std::cout << "  bodyForceReport  = on, and it still changes "
+                         "nothing about where a set path goes\n";
     }
     std::cout << "  profiles         = "
               << (profiles.empty() ? "none (geometryFile only)" : profiles)
@@ -1680,6 +1701,9 @@ std::string Config::serialize() const {
         << "bodyMotion=" << bodyMotion << "\n"
         << "bodyCoupling=" << bodyCouplingName(bodyCoupling) << "\n"
         << "bodyIterations=" << bodyIterations << "\n"
+        << "bodyCollisions=" << (bodyCollisions ? 1 : 0) << "\n"
+        << "bodyRestitution=" << bodyRestitution << "\n"
+        << "bodyForceReport=" << (bodyForceReport ? 1 : 0) << "\n"
         << "sources=" << sources << "\n"
         << "profiles=" << profiles << "\n"
         << "extraFields=" << extraFields << "\n";
@@ -1985,6 +2009,15 @@ bool Config::setParam(const std::string& key,
     }
     else if (k == "bodyCoupling")
         ok = parseBodyCoupling(value, bodyCoupling, error);
+    else if (k == "bodyForceReport")
+        ok = assignBool(bodyForceReport, k, value, error);
+    else if (k == "bodyCollisions")
+        ok = assignBool(bodyCollisions, k, value, error);
+    else if (k == "bodyRestitution")
+        ok = assignFloat(bodyRestitution, k, value, 0.0f, 1.0f,
+                         "bodyRestitution is how much of the closing speed "
+                         "survives a bounce, from 0 (they stop dead) to 1 "
+                         "(they bounce back at the speed they met)", error);
     else if (k == "bodyIterations")
         ok = assignInt(bodyIterations, k, value, 1, 64,
                        "bodyIterations is how many times force and motion may "

@@ -488,7 +488,7 @@ void Solver::buildSources() {
         if (source.body > 0 &&
             static_cast<size_t>(source.body) < bodies.size()) {
             const RigidBody& body = bodies[source.body];
-            if (body.free || body.prescribed) {
+            if (body.everFree || body.prescribed) {
                 sourcesRide = true;
                 const float theta = static_cast<float>(body.theta);
                 const float cosT = std::cos(theta);
@@ -543,9 +543,15 @@ void Solver::buildSources() {
             sourceCells.push_back(id);
 
     hasSources = totalCells > 0;
-    if (hasSources)
+    if (hasSources && !sourcesReported) {
+        sourcesReported = true;
         std::cout << "Sources: " << list.size() << " over " << totalCells
-                  << " cells, " << sourceInflow << " m^2/s in total.\n";
+                  << " cells, " << sourceInflow << " m^2/s in total.";
+        if (sourcesRide)
+            std::cout << " One of them rides a body, so this is rebuilt every "
+                         "step and only said once.";
+        std::cout << "\n";
+    }
 }
 
 void Solver::applySources() {
@@ -621,7 +627,7 @@ void Solver::buildFaceMasks(){
                     mesh.objectId[row + (solidLeft ? i - 1 : i)];
                 if (owner > 0 && static_cast<size_t>(owner) < bodies.size()) {
                     const RigidBody& body = bodies[owner];
-                    if (body.free || body.prescribed)
+                    if (body.everFree || body.prescribed)
                         uWall[idxU(i, j)] =
                             body.vx -
                             body.omega *
@@ -653,7 +659,7 @@ void Solver::buildFaceMasks(){
                     mesh.objectId[(solidTop ? row : rowBot) + i];
                 if (owner > 0 && static_cast<size_t>(owner) < bodies.size()) {
                     const RigidBody& body = bodies[owner];
-                    if (body.free || body.prescribed)
+                    if (body.everFree || body.prescribed)
                         vWall[idxV(i, j)] =
                             body.vy +
                             body.omega * ((i + 0.5f) * dx -
@@ -675,7 +681,7 @@ void Solver::buildFaceMasks(){
                 if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
                     continue;
                 const RigidBody& body = bodies[owner];
-                if (!body.free && !body.prescribed)
+                if (!body.everFree && !body.prescribed)
                     continue;
                 uWall[idxU(i, j)] +=
                     body.vx -
@@ -692,7 +698,7 @@ void Solver::buildFaceMasks(){
                 if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
                     continue;
                 const RigidBody& body = bodies[owner];
-                if (!body.free && !body.prescribed)
+                if (!body.everFree && !body.prescribed)
                     continue;
                 vWall[idxV(i, j)] +=
                     body.vy +
@@ -939,7 +945,7 @@ void Solver::fillFreshCells() {
                 if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
                     continue;
                 const RigidBody& body = bodies[owner];
-                if (!body.free && !body.prescribed)
+                if (!body.everFree && !body.prescribed)
                     continue;
                 filled = body.vx -
                          body.omega *
@@ -989,7 +995,7 @@ void Solver::fillFreshCells() {
                 if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
                     continue;
                 const RigidBody& body = bodies[owner];
-                if (!body.free && !body.prescribed)
+                if (!body.everFree && !body.prescribed)
                     continue;
                 filled = body.vy +
                          body.omega * ((i + 0.5f) * dx -
@@ -1052,8 +1058,9 @@ void Solver::fillFreshCells() {
 }
 
 void Solver::bodyForces() {
-    if (!bodiesFree)
+    if (!bodiesMove)
         return;
+    const bool reportForces = cfg.bodyForceReport;
 
     const int nx = cfg.nx, ny = cfg.ny;
     for (RigidBody& body : bodies) {
@@ -1079,11 +1086,12 @@ void Solver::bodyForces() {
             if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
                 continue;
             RigidBody& body = bodies[owner];
-            if (!body.free)
+            if (!body.everFree && !reportForces)
                 continue;
 
             const int fluidCell = left ? row + i : row + i - 1;
-            const float sign = left ? 1.0f : -1.0f;
+
+            const float sign = left ? -1.0f : 1.0f;
             const float pressure = p[fluidCell] * scale;
             const float fx = sign * pressure * faceX;
 
@@ -1119,7 +1127,7 @@ void Solver::bodyForces() {
             if (owner <= 0 || static_cast<size_t>(owner) >= bodies.size())
                 continue;
             RigidBody& body = bodies[owner];
-            if (!body.free)
+            if (!body.everFree && !reportForces)
                 continue;
 
             const int fluidCell = top ? rowBot + i : row + i;
@@ -1160,7 +1168,7 @@ void Solver::bodyForces() {
                 static_cast<size_t>(source.body) >= bodies.size())
                 continue;
             RigidBody& body = bodies[source.body];
-            if (!body.free)
+            if (!body.everFree && !body.prescribed)
                 continue;
             const float rho =
                 multiphase
@@ -1185,7 +1193,7 @@ void Solver::bodyForces() {
 
     if (cfg.gravityEnabled) {
         for (RigidBody& body : bodies) {
-            if (!body.free)
+            if (!body.everFree && !body.prescribed)
                 continue;
             const float displaced =
                 bodyGravity ? 0.0f
@@ -1203,20 +1211,138 @@ void Solver::advanceBodies(float stepDt) {
         return;
 
     const double middle = currentTime + 0.5 * static_cast<double>(stepDt);
-    for (RigidBody& body : bodies) {
-        if (body.prescribed)
-            body.sampleVelocity(middle);
-        else if (body.free)
-            body.integrate(stepDt);
-    }
     for (RigidBody& body : bodies)
-        if (body.free || body.prescribed)
+        if (body.prescribed || body.everFree)
+            body.step(middle, stepDt);
+
+    if (bodyCollisions)
+        resolveCollisions(stepDt);
+
+    for (RigidBody& body : bodies)
+        if (body.prescribed || body.everFree)
             body.advancePose(stepDt);
+}
+
+void Solver::resolveCollisions(float stepDt) {
+    const int nx = cfg.nx, ny = cfg.ny;
+    const std::vector<int>& owner = mesh.ownership();
+    if (owner.empty())
+        return;
+
+    const float bounce = -cfg.bodyRestitution;
+    for (RigidBody& body : bodies) {
+        if (!body.free)
+            continue;
+        const float centreX = body.cx + static_cast<float>(body.x);
+        const float centreY = body.cy + static_cast<float>(body.y);
+        const float reach = body.radius;
+        const float nextX = centreX + body.vx * stepDt;
+        const float nextY = centreY + body.vy * stepDt;
+
+        if (nextX - reach < 0.0f && body.vx < 0.0f)
+            body.vx *= bounce;
+        if (nextX + reach > cfg.Lx && body.vx > 0.0f)
+            body.vx *= bounce;
+        if (nextY - reach < 0.0f && body.vy < 0.0f)
+            body.vy *= bounce;
+        if (nextY + reach > cfg.Ly && body.vy > 0.0f)
+            body.vy *= bounce;
+    }
+
+    if (bodies.size() < 3)
+        return;
+
+    const std::size_t count = bodies.size();
+    std::vector<uint8_t> touching(count * count, 0);
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        for (int i = 0; i < nx; ++i) {
+            const int mine = owner[row + i];
+            if (mine == 0)
+                continue;
+            const int neighbours[2] = {i + 1 < nx ? owner[row + i + 1] : 0,
+                                       j + 1 < ny ? owner[row + nx + i] : 0};
+            for (int other : neighbours) {
+                if (other == 0 || other == mine)
+                    continue;
+                if (static_cast<std::size_t>(mine) >= count ||
+                    static_cast<std::size_t>(other) >= count)
+                    continue;
+                touching[mine * count + other] = 1;
+                touching[other * count + mine] = 1;
+            }
+        }
+    }
+    for (int id : mesh.contested()) {
+        const int mine = owner[id];
+        if (mine <= 0 || static_cast<std::size_t>(mine) >= count)
+            continue;
+        for (std::size_t other = 1; other < count; ++other)
+            if (static_cast<int>(other) != mine)
+                touching[mine * count + other] = 1;
+    }
+
+    for (std::size_t a = 1; a < count; ++a) {
+        for (std::size_t b = a + 1; b < count; ++b) {
+            if (!touching[a * count + b])
+                continue;
+            RigidBody& first = bodies[a];
+            RigidBody& second = bodies[b];
+            if (!first.free && !second.free)
+                continue;
+
+            const float ax = first.cx + static_cast<float>(first.x);
+            const float ay = first.cy + static_cast<float>(first.y);
+            const float bx = second.cx + static_cast<float>(second.x);
+            const float by = second.cy + static_cast<float>(second.y);
+            float normalX = bx - ax;
+            float normalY = by - ay;
+            const float length = std::hypot(normalX, normalY);
+            if (!(length > 1e-12f))
+                continue;
+            normalX /= length;
+            normalY /= length;
+
+            const float closing = (second.vx - first.vx) * normalX +
+                                  (second.vy - first.vy) * normalY;
+            if (closing >= 0.0f)
+                continue;
+
+            const float massA =
+                first.free ? first.mass + first.addedMass : 0.0f;
+            const float massB =
+                second.free ? second.mass + second.addedMass : 0.0f;
+            const float invA = massA > 0.0f ? 1.0f / massA : 0.0f;
+            const float invB = massB > 0.0f ? 1.0f / massB : 0.0f;
+            if (!(invA + invB > 0.0f))
+                continue;
+
+            const float impulse =
+                -(1.0f + cfg.bodyRestitution) * closing / (invA + invB);
+            if (first.free) {
+                first.vx -= impulse * invA * normalX;
+                first.vy -= impulse * invA * normalY;
+                first.applyPins();
+            }
+            if (second.free) {
+                second.vx += impulse * invB * normalX;
+                second.vy += impulse * invB * normalY;
+                second.applyPins();
+            }
+
+            if (contactsReported < 3) {
+                ++contactsReported;
+                std::cout << "  bodies " << a << " and " << b
+                          << " met at " << -closing << " m/s and bounced at "
+                          << cfg.bodyRestitution << " of it\n";
+            }
+        }
+    }
 }
 
 void Solver::applyBodyPoses() {
     for (const RigidBody& body : bodies) {
-        if (!body.free && !body.prescribed)
+        if (!body.everFree && !body.prescribed)
             continue;
         Mesh::BodyPose pose;
         pose.x = body.x;
@@ -1273,13 +1399,14 @@ void Solver::resolveBodyMotion() {
         std::cout << "\n!!! " << note << "\n";
 
     for (const RigidBody& body : bodies) {
-        if (body.free)
+        if (body.everFree)
             bodiesFree = true;
-        if (body.free || body.prescribed)
+        if (body.everFree || body.prescribed)
             bodiesMove = true;
     }
     if (!bodiesMove)
         return;
+    bodyCollisions = cfg.bodyCollisions;
 
     if (cfg.bodyCoupling == BodyCoupling::Weak)
         for (RigidBody& body : bodies) {
@@ -1326,7 +1453,7 @@ void Solver::reportBodies() const {
     constexpr float degToRad = 3.14159265358979f / 180.0f;
     std::cout << "Bodies that travel:\n";
     for (const RigidBody& body : bodies) {
-        if (!body.free && !body.prescribed)
+        if (!body.everFree && !body.prescribed)
             continue;
         std::cout << "  object " << body.object << " at (" << body.cx << ", "
                   << body.cy << ") m, " << body.area << " m^2";
@@ -1805,6 +1932,14 @@ void Solver::computeDt(){
             maxCourant = std::max(maxCourant, localMax);
             notANumber = notANumber || localNotANumber;
         }
+    }
+
+    for (const RigidBody& body : bodies) {
+        if (!body.everFree && !body.prescribed)
+            continue;
+        const float surface = std::hypot(body.vx, body.vy) +
+                              std::fabs(body.omega) * body.radius;
+        maxCourant = std::max(maxCourant, surface * std::max(invDx, invDy));
     }
 
     const float dtAdv =
@@ -3106,13 +3241,19 @@ void Solver::run() {
             if (bodiesMove) {
                 constexpr float degToRad = 3.14159265358979f / 180.0f;
                 for (const RigidBody& body : bodies) {
-                    if (!body.free && !body.prescribed)
+                    if (!body.everFree && !body.prescribed)
                         continue;
                     std::cout << "    body " << body.object << " at ("
                               << body.cx + body.x << ", " << body.cy + body.y
                               << ") m, v = (" << body.vx << ", " << body.vy
                               << ") m/s, turned " << body.theta / degToRad
                               << " deg";
+                    if (body.everFree)
+                        std::cout << (body.free ? ", free" : ", held");
+                    if (cfg.bodyForceReport && !body.everFree)
+                        std::cout << ", fluid pushes ("
+                                  << body.forceX << ", " << body.forceY
+                                  << ") N/m, ignored";
                     if (freshCells > 0)
                         std::cout << ", " << freshCells << " faces uncovered";
                     if (bodyPasses > 1)
@@ -3401,7 +3542,7 @@ void Solver::saveVTK(int stepNum) const {
     if (bodiesMove) {
         state << "bodyState=";
         for (const RigidBody& body : bodies) {
-            if (!body.free && !body.prescribed)
+            if (!body.everFree && !body.prescribed)
                 continue;
             state << std::setprecision(
                          std::numeric_limits<double>::max_digits10)

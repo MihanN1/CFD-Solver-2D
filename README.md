@@ -1040,6 +1040,29 @@ divergence of the cell next door picks it up because it is in `u*` already.
 the body stays put, the face is shut at zero, and every run written before this
 one produces the same bits.
 
+### The numbers are the mask's, not the order you listed the models in
+
+Bodies are numbered by the flood fill, which walks the grid in scan order. That
+is **not** the order `profiles=` lists them in, and it is not left to right
+either - the body whose lowest cell sits in the lowest row is found first, so
+two shapes side by side can come out either way round depending on which one
+rasterised a cell lower.
+
+The mesh prints the mapping before the run starts, and reading it is the whole
+job:
+
+```
+  Number of objects = 2 (these numbers are what wallMotion takes)
+    object 1: 98 cells, centre (1.29996, 0.5) m, rim 0.114603 m
+    object 2: 88 cells, centre (0.5, 0.5) m, rim 0.107246 m
+```
+
+Here object 1 is the one on the **right**, even though it is the second entry
+in `profiles=`. Write the line against those centres, not against the order you
+typed. `MovingBodyTests` checks that the mask agrees with what each body says
+about itself, because a pose that has drifted away from the cells it is made of
+is the one failure a pose alone can never show.
+
 ### Letting go of it: free=1
 
     "bodyMotion=1:free=1,density=2700,pinX=1,pinY=1"
@@ -1091,6 +1114,61 @@ fails if `added` drifts past 5% of `strong`, and it also fails if `weak` gets
 as close as `added` does - a case where the cheap scheme happens to be right is
 a case that is not testing anything.
 
+### Letting go part way through, and taking it back
+
+    "bodyMotion=1:@0,vx=0.6,@0.15,free=1,density=1200"
+
+`free` is a keyframe setting like any other, so a body can be driven along a
+path and then released, and released and then taken back under control:
+
+    "bodyMotion=1:@0,vx=0.6,@0.15,free=1,@0.9,free=0,vx=0,density=1200"
+
+The velocity carries across the switch either way, so nothing jumps: a body
+driven at 0.6 m/s and let go at 0.15 s starts its free flight at 0.6 m/s and
+then slows down, because from that moment nothing is pushing it.
+
+    released      driven at 0.600, let go at 0.15 s, down to 0.4887 m/s by 0.4 s
+
+Coming back the other way is a step change in the boundary condition rather
+than a discontinuity in the state, the same as turning `wallMotion` on mid-run.
+
+### A body whose path you set never deviates from it
+
+That is the whole meaning of the word, and it holds whatever the fluid does.
+`bodyForceReport=1` works the force out anyway and puts it in the step line:
+
+```
+    body 1 at (0.419, 0.5) m, v = (0.3, 0) m/s, fluid pushes (0.2347, 0) N/m, ignored
+```
+
+The velocity stays exactly what the timetable says. The force is there to be
+read, to be integrated into a drag coefficient, or to be looked at just before
+the body is released and the same force starts to matter. It is off by default
+because a body on rails does not need it and it costs a pass over the surface
+every step.
+
+### Bodies that bounce
+
+    bodyCollisions=1 bodyRestitution=0.6
+
+Off - the default, and what every run before this branch did - bodies pass
+straight through each other and through the domain walls. That is fine while
+nothing can meet anything, and it is the honest default because turning it on
+changes the answer.
+
+On, contact is read straight off the mask. Each body is rasterised on its own
+before they are put together, which is the only moment the grid knows who
+claimed what: the flood fill that comes next merges anything touching into one
+blob, and that merge is exactly where the information a contact is made of gets
+lost. So contact is exact for any shape rather than a circle drawn round it.
+
+`bodyRestitution` is how much of the closing speed survives: 0 stops dead, 1
+comes back at the speed it arrived. A body whose path you set is unmovable by
+construction, so a free body hitting one takes the whole impulse - which is
+what "prescribed" has meant all along.
+
+    collisions    off 0.3976 m/s, on -0.8686 m/s - the second one met something
+
 ### Keyframes
 
     "bodyMotion=1:@0,vx=0,@1,vx=0.5,@2,vx=0"
@@ -1139,10 +1217,24 @@ same pose and the same mask, to the bit.
 
     prescribed    moved 0.200000 m against 0.200000 exact, div 1.907e-06
     keyframes     moved 0.15001 m against 0.15000 from the ramp it was given
-    numbering     bodies 1 and 2 kept their numbers closing at 0.12 and -0.12 m
-    coupling      weak -0.6536, added -0.5552, strong -0.5331 m/s
+    numbering     closing at 0.12 and -0.12 m, and the mask agrees
+    coupling      weak -0.6539, added -0.5551, strong -0.5328 m/s
     neutral       0.0017 m/s after 0.3 s against 2.943 falling free (0.06%)
-    thrust        a jet aimed at -x pushed the body to 0.2981 m/s along +x
+    thrust        jet on the body 0.5148 m/s, the same jet bolted down 0.0539
+    carried       let go in a 1 m/s flow, reached 0.6637 m/s downstream
+    released      driven at 0.600, let go at 0.15 s, down to 0.4887 by 0.4 s
+    collisions    off 0.3976 m/s, on -0.8686 m/s
+
+`carried` is the one that earns its place least obviously and caught the most.
+Every other force case here is vertical, and the vertical faces and the
+horizontal ones take the outward normal from opposite sides - so a sign error
+in the horizontal force survives a falling test, a buoyancy test and a
+spurious-current test untouched. It showed up as a body let go in a flow
+accelerating away from the flow instead of being carried by it, and as a body
+released mid-run speeding up with nothing pushing it. `thrust` is measured
+against the same jet bolted to the domain rather than against an estimate,
+because the difference between the two runs is exactly the term the feature
+adds and nothing else.
 
 `neutral` is the one that looks like nothing and is not. A body weighing
 exactly what it displaces, under gravity in the solve, has to have the pressure

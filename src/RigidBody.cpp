@@ -12,9 +12,19 @@ float lerp(float a, float b, float t) {
 }
 }
 
+bool RigidBody::freeAt(double when) const {
+    if (keys.empty())
+        return free;
+    const float t = static_cast<float>(when);
+    if (t <= keys.front().time)
+        return keys.front().free;
+    std::size_t upper = 0;
+    while (upper + 1 < keys.size() && keys[upper + 1].time <= t)
+        ++upper;
+    return keys[upper].free;
+}
+
 void RigidBody::sampleVelocity(double when) {
-    if (!prescribed)
-        return;
     if (keys.empty()) {
         vx = baseVx;
         vy = baseVy;
@@ -80,6 +90,17 @@ void RigidBody::advancePose(float dt) {
     theta += static_cast<double>(omega) * dt;
 }
 
+void RigidBody::step(double when, float dt) {
+    const bool letGo = freeAt(when);
+    if (letGo) {
+        integrate(dt);
+    } else {
+        sampleVelocity(when);
+        applyPins();
+    }
+    free = letGo;
+}
+
 void buildRigidBodies(const std::vector<BodyMotion>& motions,
                       const std::vector<BodyGeometry>& geometry,
                       std::vector<RigidBody>& out,
@@ -107,7 +128,11 @@ void buildRigidBodies(const std::vector<BodyMotion>& motions,
 
         RigidBody& body = out[motion.object];
         body.free = motion.free;
-        body.prescribed = !motion.free;
+        body.prescribed = true;
+        body.everFree = motion.free;
+        for (const BodyKeyframe& frame : motion.keys)
+            if (frame.free)
+                body.everFree = true;
         body.pinX = motion.pinX;
         body.pinY = motion.pinY;
         body.pinRot = motion.pinRot;
@@ -126,7 +151,7 @@ void buildRigidBodies(const std::vector<BodyMotion>& motions,
     }
 
     for (RigidBody& body : out) {
-        if (!body.free)
+        if (!body.everFree)
             continue;
         if (body.inertia <= 0.0f)
             body.inertia = 0.5f * body.mass * body.radius * body.radius;

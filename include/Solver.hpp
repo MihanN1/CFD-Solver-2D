@@ -103,6 +103,9 @@ private:
     void bodyForces();
     void advanceBodies(float stepDt);
     void applyBodyPoses();
+    void resolveCollisions(float stepDt);
+    bool bodyCollisions = false;
+    int contactsReported = 0;
     void reportBodies() const;
 
     // One buried face of a free-slip wall and the open faces it mirrors, so
@@ -165,6 +168,7 @@ private:
     bool hasSources = false;
     bool sourcesRide = false;
     std::vector<uint8_t> sourceLive;
+    bool sourcesReported = false;
     double sourceInflow = 0.0;
     void buildSources();
     void applySources();

@@ -7,6 +7,7 @@
 struct RigidBody {
     int object = 0;
     bool free = false;
+    bool everFree = false;
     bool prescribed = false;
 
     float mass = 0.0f;
@@ -27,7 +28,9 @@ struct RigidBody {
     std::vector<BodyKeyframe> keys;
     float baseVx = 0.0f, baseVy = 0.0f, baseOmega = 0.0f;
 
+    bool freeAt(double when) const;
     void sampleVelocity(double when);
+    void step(double when, float dt);
     void integrate(float dt);
     void advancePose(float dt);
     void applyPins();
