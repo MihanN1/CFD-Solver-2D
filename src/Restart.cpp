@@ -648,6 +648,16 @@ bool loadRestart(const std::filesystem::path& file,
                         ok = readFloats(fin, out.v, count);
                     else if (arrayName == "pRaw")
                         ok = readFloats(fin, out.p, count);
+                    else if (arrayName == "stateRho")
+                        ok = readFloats(fin, out.stateRho, count);
+                    else if (arrayName == "stateRhoU")
+                        ok = readFloats(fin, out.stateRhoU, count);
+                    else if (arrayName == "stateRhoV")
+                        ok = readFloats(fin, out.stateRhoV, count);
+                    else if (arrayName == "stateRhoE")
+                        ok = readFloats(fin, out.stateRhoE, count);
+                    else if (arrayName == "stateRhoY")
+                        ok = readFloats(fin, out.stateRhoY, count);
                     else
                         ok = skipBytes(
                             fin, static_cast<std::streamoff>(count * 4));
@@ -779,7 +789,7 @@ bool loadRestart(const std::filesystem::path& file,
                         "Frame has neither a RestartData block nor a usable "
                         "velocity array");
 
-        if (facePack.empty())
+        if (facePack.empty() && out.stateRho.empty())
             std::cout << "  note: this frame carries no face velocities, so "
                          "they are reconstructed from the\n"
                          "        cell averages and the state is projected "

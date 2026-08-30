@@ -43,6 +43,9 @@ const char* const kKeys[] = {
     "bodyMotion", "bodyCoupling", "bodyIterations",
     "bodyCollisions", "bodyRestitution", "bodyForceReport",
     "turbulence", "Cs", "turbIntensity", "turbLengthScale",
+    "regime", "gamma", "R", "gamma2", "R2", "T0", "pInf", "machInlet",
+    "speciesMode", "acousticFields", "acousticWindow", "acousticRef",
+    "microphones", "micInterval",
     "restart", "restartFile", "addTime",
     "gravityMode", "convection", "limiter", "timeScheme",
     "caseType", "lidSpeed", "steadyTolerance",
@@ -323,6 +326,134 @@ bool parseTurbulenceKind(const std::string& text, TurbulenceKind& out,
                      "transport equations, which is what a wall bounded flow "
                      "needs");
     return false;
+}
+
+bool parseRegime(const std::string& text, Regime& out, std::string& error) {
+    const std::string name = toLower(cleanValue(text));
+    if (name == "incompressible" || name == "projection" || name == "low") {
+        out = Regime::Incompressible;
+        return true;
+    }
+    if (name == "compressible" || name == "euler" || name == "gas") {
+        out = Regime::Compressible;
+        return true;
+    }
+    error = badValue("regime", cleanValue(text),
+                     "it is incompressible or compressible. incompressible is "
+                     "the projection solver and every run before this one; "
+                     "compressible is a second solver entirely - density is a "
+                     "variable, there is no pressure solve at all, and the "
+                     "keys the pressure solve needed are refused rather than "
+                     "quietly ignored");
+    return false;
+}
+
+const char* regimeName(Regime regime) {
+    return regime == Regime::Compressible ? "compressible" : "incompressible";
+}
+
+bool parseSpeciesMode(const std::string& text, SpeciesMode& out,
+                      std::string& error) {
+    const std::string name = toLower(cleanValue(text));
+    if (name == "active" || name == "mixture" || name == "1") {
+        out = SpeciesMode::Active;
+        return true;
+    }
+    if (name == "passive" || name == "tracer" || name == "0") {
+        out = SpeciesMode::Passive;
+        return true;
+    }
+    error = badValue("speciesMode", cleanValue(text),
+                     "it is active or passive. active lets the composition set "
+                     "gamma and R, so the speed of sound changes with it; "
+                     "passive carries the fraction along and nothing else");
+    return false;
+}
+
+const char* speciesModeName(SpeciesMode mode) {
+    return mode == SpeciesMode::Passive ? "passive" : "active";
+}
+
+std::string microphoneHelp() {
+    return "microphones is a list of points, semicolon separated:\n"
+           "  x=<m>,y=<m>;x=<m>,y=<m>\n"
+           "Each one records the pressure at that cell every micInterval "
+           "steps, and at the end the run writes microphones.txt next to the "
+           "frames with the trace and a peak frequency for each.";
+}
+
+bool parseMicrophones(const std::string& text,
+                      std::vector<Microphone>& out,
+                      std::string& error) {
+    out.clear();
+    std::string body = cleanValue(text);
+    if (body.empty())
+        return true;
+
+    std::size_t position = 0;
+    while (position <= body.size()) {
+        const std::size_t semicolon = body.find(';', position);
+        std::string entry = body.substr(
+            position, semicolon == std::string::npos ? std::string::npos
+                                                     : semicolon - position);
+        position = semicolon == std::string::npos ? body.size() + 1
+                                                  : semicolon + 1;
+        while (!entry.empty() && std::isspace(
+                   static_cast<unsigned char>(entry.front())))
+            entry.erase(entry.begin());
+        while (!entry.empty() && std::isspace(
+                   static_cast<unsigned char>(entry.back())))
+            entry.pop_back();
+        if (entry.empty())
+            continue;
+
+        Microphone mic;
+        bool sawX = false, sawY = false;
+        std::size_t inner = 0;
+        while (inner <= entry.size()) {
+            const std::size_t comma = entry.find(',', inner);
+            std::string token = entry.substr(
+                inner, comma == std::string::npos ? std::string::npos
+                                                  : comma - inner);
+            inner = comma == std::string::npos ? entry.size() + 1 : comma + 1;
+            const std::size_t assign = token.find('=');
+            if (assign == std::string::npos) {
+                if (token.empty())
+                    continue;
+                error = "'" + token + "' is not a microphone setting. " +
+                        microphoneHelp();
+                return false;
+            }
+            const std::string name = toLower(token.substr(0, assign));
+            const std::string value = token.substr(assign + 1);
+            float number = 0.0f;
+            try {
+                number = std::stof(value);
+            } catch (...) {
+                error = "'" + value + "' is not a number. " + microphoneHelp();
+                return false;
+            }
+            if (name == "x") { mic.x = number; sawX = true; }
+            else if (name == "y") { mic.y = number; sawY = true; }
+            else {
+                error = "'" + name + "' is not a microphone setting. " +
+                        microphoneHelp();
+                return false;
+            }
+        }
+        if (!sawX || !sawY) {
+            error = "a microphone needs both x and y. " + microphoneHelp();
+            return false;
+        }
+        out.push_back(mic);
+    }
+
+    if (out.size() > 64) {
+        error = "64 microphones is already more than anybody reads; this line "
+                "has " + std::to_string(out.size()) + ".";
+        return false;
+    }
+    return true;
 }
 
 const char* turbulenceKindName(TurbulenceKind kind) {
@@ -1732,6 +1863,39 @@ void Config::print() const {
             std::cout << "  bodyForceReport  = on, and it still changes "
                          "nothing about where a set path goes\n";
     }
+    std::cout << "  regime           = " << regimeName(regime);
+    if (compressible())
+        std::cout << " (density is a variable and there is no pressure solve)";
+    std::cout << "\n";
+    if (compressible()) {
+        std::cout << "  gamma            = " << gamma << "\n";
+        std::cout << "  R                = " << R << " J/(kg K)\n";
+        std::cout << "  T0               = " << T0 << " K\n";
+        std::cout << "  pInf             = " << pInf << " Pa\n";
+        std::cout << "  machInlet        = " << machInlet << "\n";
+        if (twoSpecies()) {
+            std::cout << "  gamma2 / R2      = " << gamma2 << " / " << R2
+                      << " J/(kg K)\n";
+            std::cout << "  speciesMode      = "
+                      << speciesModeName(speciesMode) << "\n";
+            if (speciesMode == SpeciesMode::Passive)
+                std::cout << "  !! WARNING: the composition is carried along "
+                             "but does NOT set gamma and R.\n"
+                             "     Both are frozen at the first gas, so the "
+                             "speed of sound, the temperature\n"
+                             "     and every wave speed in the run are air's "
+                             "wherever the second gas is.\n"
+                             "     Use speciesMode=active unless you are "
+                             "deliberately comparing against this.\n";
+        }
+        std::cout << "  acousticFields   = "
+                  << (acousticFields ? "on" : "off") << "\n";
+        if (acousticFields)
+            std::cout << "  acousticWindow   = " << acousticWindow << " s, 0 dB at "
+                      << acousticRef << " Pa\n";
+        std::cout << "  microphones      = "
+                  << (microphones.empty() ? "none" : microphones) << "\n";
+    }
     std::cout << "  turbulence       = " << turbulenceKindName(turbulence);
     if (turbulence == TurbulenceKind::None)
         std::cout << " (only what the grid can hold is solved)";
@@ -1794,6 +1958,73 @@ std::vector<Profile> Config::resolvedProfiles() const {
     return list;
 }
 
+bool Config::regimeConsistent(std::string& error) const {
+    if (!compressible()) {
+        if (acousticFields || !microphones.empty()) {
+            error = "acousticFields and microphones are compressible only. "
+                    "An incompressible run has no acoustics to record: the "
+                    "projection method makes the speed of sound infinite by "
+                    "construction, so a pressure change is everywhere at once "
+                    "and there is nothing travelling to listen to. Add "
+                    "regime=compressible, or drop them.";
+            return false;
+        }
+        return true;
+    }
+
+    if (turbulent()) {
+        error = "turbulence is incompressible only in this build. The "
+                "compressible solver is inviscid Euler - it has no viscous "
+                "term for an eddy viscosity to be added to. Drop "
+                "turbulence=, or drop regime=compressible.";
+        return false;
+    }
+    if (hasSurfaceTension()) {
+        error = "surfaceTension is incompressible only. Two gases share a "
+                "composition rather than an interface, so there is no surface "
+                "for it to pull on. Drop surfaceTension=.";
+        return false;
+    }
+    if (bodiesMove()) {
+        error = "bodyMotion is incompressible only in this build. The "
+                "compressible solver cuts its mask once and keeps it. Drop "
+                "bodyMotion=, or drop regime=compressible.";
+        return false;
+    }
+    if (!sources.empty()) {
+        error = "sources are incompressible only. A source that pushes fluid "
+                "out of itself needs a pressure solve to make room for it, "
+                "and there is not one here. Drop sources=.";
+        return false;
+    }
+    if (multiphase() && mixing == MixingKind::Immiscible) {
+        error = "two gases always mix: there is no interface to carry and no "
+                "scheme here that would carry one. Set mixing=miscible, or "
+                "drop back to phases=1.";
+        return false;
+    }
+    if (gravityEnabled) {
+        error = "gravity is incompressible only in this build. It would be a "
+                "source term in the momentum and the energy of a compressible "
+                "run, and neither is written. Drop gravityEnabled=1.";
+        return false;
+    }
+    if (caseType == CaseType::Cavity) {
+        error = "the cavity preset drives the flow with a sliding lid, which "
+                "is a low speed case by definition. Use caseType=channel or "
+                "caseType=shockTube.";
+        return false;
+    }
+    return true;
+}
+
+std::vector<Microphone> Config::resolvedMicrophones() const {
+    std::vector<Microphone> out;
+    std::string ignored;
+    parseMicrophones(microphones, out, ignored);
+    return out;
+}
+
 std::vector<FlowSource> Config::resolvedSources() const {
     std::vector<FlowSource> list;
     std::string ignored;
@@ -1806,6 +2037,7 @@ std::string Config::serialize() const {
     std::ostringstream out;
 
     out << std::setprecision(std::numeric_limits<float>::max_digits10)
+        << "regime=" << regimeName(regime) << "\n"
         << "Lx=" << Lx << "\n"
         << "Ly=" << Ly << "\n"
         << "nx=" << nx << "\n"
@@ -1892,6 +2124,19 @@ std::string Config::serialize() const {
         << "bodyCollisions=" << (bodyCollisions ? 1 : 0) << "\n"
         << "bodyRestitution=" << bodyRestitution << "\n"
         << "bodyForceReport=" << (bodyForceReport ? 1 : 0) << "\n"
+        << "gamma=" << gamma << "\n"
+        << "R=" << R << "\n"
+        << "gamma2=" << gamma2 << "\n"
+        << "R2=" << R2 << "\n"
+        << "T0=" << T0 << "\n"
+        << "pInf=" << pInf << "\n"
+        << "machInlet=" << machInlet << "\n"
+        << "speciesMode=" << speciesModeName(speciesMode) << "\n"
+        << "acousticFields=" << (acousticFields ? 1 : 0) << "\n"
+        << "acousticWindow=" << acousticWindow << "\n"
+        << "acousticRef=" << acousticRef << "\n"
+        << "microphones=" << microphones << "\n"
+        << "micInterval=" << micInterval << "\n"
         << "turbulence=" << turbulenceKindName(turbulence) << "\n"
         << "Cs=" << Cs << "\n"
         << "turbIntensity=" << turbIntensity << "\n"
@@ -1954,8 +2199,8 @@ bool Config::setParam(const std::string& key,
     else if (k == "gravityMode") {
         int mode = static_cast<int>(gravityMode);
         ok = assignEnumValue(mode, k, value, kGravityModes, error);
-        if (ok && phases > 1 && static_cast<GravityMode>(mode) ==
-                                    GravityMode::Reduced) {
+        if (ok && phases > 1 && !compressible() &&
+            static_cast<GravityMode>(mode) == GravityMode::Reduced) {
             error = badValue(k, cleanValue(value),
                              "at two phases the weight of the fluid is what "
                              "moves it, so it has to be inside the solve. "
@@ -2167,7 +2412,10 @@ bool Config::setParam(const std::string& key,
                 name != "density" && name != "source" &&
                 name != "curvature" && name != "nut" && name != "k" &&
                 name != "omega" && name != "walldistance" &&
-                name != "strain")
+                name != "strain" && name != "temperature" &&
+                name != "mach" && name != "speedofsound" &&
+                name != "entropy" && name != "pfluct" && name != "spl" &&
+                name != "pitch")
                 bad = name;
         }
         if (!bad.empty()) {
@@ -2176,7 +2424,10 @@ bool Config::setParam(const std::string& key,
                                  "' is not a field this build can write. Use "
                                  "vorticity, divergence, speed, objectId, "
                                  "density, source, curvature, nuT, k, omega, "
-                                 "wallDistance or strain, comma separated");
+                                 "wallDistance, strain, and in the "
+                                 "compressible regime temperature, mach, "
+                                 "speedOfSound, entropy, pFluct, SPL or "
+                                 "pitch, comma separated");
             ok = false;
         } else {
             extraFields = wanted;
@@ -2203,6 +2454,63 @@ bool Config::setParam(const std::string& key,
     }
     else if (k == "bodyCoupling")
         ok = parseBodyCoupling(value, bodyCoupling, error);
+    else if (k == "regime")
+        ok = parseRegime(value, regime, error);
+    else if (k == "gamma")
+        ok = assignFloat(gamma, k, value, 1.01f, 3.0f,
+                         "gamma is the ratio of specific heats: 1.4 for air, "
+                         "1.667 for a monatomic gas, 1.3 for steam", error);
+    else if (k == "R")
+        ok = assignFloat(R, k, value, 1.0f, 100000.0f,
+                         "R is the specific gas constant in J/(kg K): 287 for "
+                         "air, 2077 for helium", error);
+    else if (k == "gamma2")
+        ok = assignFloat(gamma2, k, value, 1.01f, 3.0f,
+                         "gamma of the second gas, read only when phases = 2", error);
+    else if (k == "R2")
+        ok = assignFloat(R2, k, value, 1.0f, 100000.0f,
+                         "R of the second gas in J/(kg K), read only when "
+                         "phases = 2", error);
+    else if (k == "T0")
+        ok = assignFloat(T0, k, value, 1.0f, 100000.0f,
+                         "T0 is the reference temperature in kelvin, and it is "
+                         "what the inlet and the initial field are built from", error);
+    else if (k == "pInf")
+        ok = assignFloat(pInf, k, value, 1.0f, 1e12f,
+                         "pInf is the ambient pressure in pascals; 101325 is "
+                         "one atmosphere", error);
+    else if (k == "machInlet")
+        ok = assignFloat(machInlet, k, value, 0.0f, 20.0f,
+                         "machInlet is the inlet speed as a multiple of the "
+                         "speed of sound there", error);
+    else if (k == "speciesMode")
+        ok = parseSpeciesMode(value, speciesMode, error);
+    else if (k == "acousticFields")
+        ok = assignBool(acousticFields, k, value, error);
+    else if (k == "acousticWindow")
+        ok = assignFloat(acousticWindow, k, value, 1e-6f, 1000.0f,
+                         "acousticWindow is how far back the running mean and "
+                         "RMS look, in seconds; it has to be several periods "
+                         "of whatever you are listening for", error);
+    else if (k == "acousticRef")
+        ok = assignFloat(acousticRef, k, value, 1e-12f, 1e6f,
+                         "acousticRef is the pressure that counts as 0 dB; "
+                         "2e-5 Pa is the human hearing threshold everybody "
+                         "quotes SPL against", error);
+    else if (k == "micInterval")
+        ok = assignInt(micInterval, k, value, 1, 1000000,
+                       "micInterval is how many steps pass between samples, "
+                       "and it sets the sampling rate: every step is the "
+                       "highest frequency the run can resolve at all", error);
+    else if (k == "microphones") {
+        std::vector<Microphone> parsed;
+        if (!parseMicrophones(value, parsed, error)) {
+            ok = false;
+        } else {
+            microphones = cleanValue(value);
+            ok = true;
+        }
+    }
     else if (k == "turbulence")
         ok = parseTurbulenceKind(value, turbulence, error);
     else if (k == "Cs")

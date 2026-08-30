@@ -29,6 +29,8 @@ struct RestartData {
 
     std::vector<float> phase;
 
+    std::vector<float> stateRho, stateRhoU, stateRhoV, stateRhoE, stateRhoY;
+
     std::vector<std::pair<std::string, std::vector<float>>> extras;
 
     struct BodyState {
