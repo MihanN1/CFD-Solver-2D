@@ -1,21 +1,60 @@
-MIT License
+License for Free Non-Commercial Use with Paid Modifications Allowed
 
 Copyright (c) 2026 Kravtsov Mikhail and Alan Shvainshtein
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+of this software and associated documentation files (the "Software"), to use,
+copy, modify, merge, publish, and distribute the Software, subject to the
+following conditions:
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+1. Definitions
+   - "Software" means the original source code, binary files, and
+     documentation provided under this license.
+   - "Modification" means any change, addition, or derivative work based on
+     the Software.
+   - "Substantial Modification" means a Modification that adds significant
+     new functionality not present in the original Software, is distributed
+     as a separate product (e.g., plugin, extension, add-on), does not
+     include the source code of the Software, and requires the original
+     Software to operate.
+   - "Commercial Use" means selling, renting, licensing, or otherwise
+     receiving direct financial compensation for the distribution of the
+     Software or any Modification.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
+2. Grant of Rights
+   Subject to the terms of this License, you are granted the following
+   rights:
+   a) To use, copy, and distribute the Software in unmodified form for
+      non-commercial purposes only.
+   b) To create Modifications and distribute them under the conditions set
+      forth in Section 3.
+
+3. Distribution of Modifications
+   a) Commercial use of the original Software, or of any Modification that
+      is not a Substantial Modification (e.g., minor bug fixes, cosmetic
+      changes, rebranding), is strictly prohibited.
+   b) Commercial use of a Substantial Modification is permitted only if
+      ALL of the following conditions are met:
+      i)   The Substantial Modification is distributed as a separate
+           product and does not contain any part of the source code of the
+           original Software.
+      ii)  The Substantial Modification requires the original Software to
+           function, and the original Software remains available free of
+           charge.
+      iii) The documentation and user interface of the Substantial
+           Modification clearly state that it is an add-on to the Software,
+           that the authors of the Software are Kravtsov Mikhail and Alan
+           Shvainshtein, and that the Software itself is free of charge.
+
+4. Copyright Notice
+   The above copyright notice and this permission notice shall be included
+   in all copies or substantial portions of the Software.
+
+5. Disclaimer of Warranty
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS
+   OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
+   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN
+   NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM,
+   DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+   OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
+   USE OR OTHER DEALINGS IN THE SOFTWARE.
