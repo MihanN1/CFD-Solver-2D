@@ -441,6 +441,104 @@ int main() {
     config.turbLengthScale = 0.0;
     config.turbulence = "none";
 
+    if (hasPrefix(arguments, "regime=") || hasPrefix(arguments, "machInlet=")) {
+        return fail("compressible keys were sent to a solver that has only "
+                    "ever had one solver in it");
+    }
+    config.supportsCompressible = true;
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("incompressible regime arguments failed: " + error);
+    }
+    if (!contains(arguments, "regime=incompressible") ||
+        hasPrefix(arguments, "gamma=") ||
+        hasPrefix(arguments, "machInlet=") ||
+        !contains(arguments, "turbulence=none")) {
+        return fail("the incompressible regime sent the gas keys, or stopped "
+                    "sending the turbulence one");
+    }
+
+    config.regime = "compressible";
+    config.gravityEnabled = false;
+    config.machInlet = 2.0;
+    config.gamma = 1.4;
+    config.microphones = "x=0.5,y=0.2";
+    config.acousticFields = true;
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("compressible arguments failed: " + error);
+    }
+    if (!contains(arguments, "regime=compressible") ||
+        !contains(arguments, "machInlet=2") ||
+        !contains(arguments, "acousticFields=1") ||
+        !contains(arguments, "microphones=x=0.5,y=0.2") ||
+        !hasPrefix(arguments, "gamma=") ||
+        !hasPrefix(arguments, "T0=") ||
+        !hasPrefix(arguments, "pInf=") ||
+        !hasPrefix(arguments, "acousticWindow=") ||
+        !hasPrefix(arguments, "micInterval=")) {
+        return fail("the compressible block is incomplete");
+    }
+    if (hasPrefix(arguments, "turbulence=")) {
+        return fail("a turbulence model was sent to the compressible solver, "
+                    "which has no viscous term to add it to");
+    }
+    if (hasPrefix(arguments, "gamma2=") || hasPrefix(arguments, "R2=")) {
+        return fail("the second gas was sent for a single phase run");
+    }
+
+    config.gravityEnabled = true;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("gravity was accepted by the compressible solver");
+    }
+    config.gravityEnabled = false;
+    config.phases = 2;
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("two gas arguments failed: " + error);
+    }
+    if (!hasPrefix(arguments, "gamma2=") || !hasPrefix(arguments, "R2=") ||
+        !contains(arguments, "speciesMode=active")) {
+        return fail("the second gas block is incomplete");
+    }
+    config.phases = 1;
+
+    config.turbulence = "smagorinsky";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a turbulence model was accepted alongside the "
+                    "compressible solver");
+    }
+    config.turbulence = "none";
+    config.caseType = "cavity";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("the cavity preset was accepted for a compressible run");
+    }
+    config.caseType = "channel";
+    config.machInlet = 25.0;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("Mach 25 was accepted");
+    }
+    config.machInlet = 2.0;
+    config.gamma = 0.9;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a gamma below one was accepted, and it makes the speed "
+                    "of sound imaginary");
+    }
+    config.gamma = 1.4;
+    config.micInterval = 0;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a microphone interval of zero steps was accepted");
+    }
+    config.micInterval = 1;
+
+    config.regime = "incompressible";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("acoustics were accepted for a solver with an infinite "
+                    "speed of sound");
+    }
+    config.acousticFields = false;
+    config.microphones.clear();
+    if (!maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("dropping the acoustics did not settle it: " + error);
+    }
+
     std::error_code cleanupError;
     std::filesystem::remove_all(root, cleanupError);
     return 0;

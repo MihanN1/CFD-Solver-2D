@@ -153,6 +153,7 @@ is not there:
 | `phases` `rho1` `nu1` `rho2` `nu2` `phaseInit` … `sources` | `vofScheme` |
 | `mixing` `diffusivity` `surfaceTension` `contactAngle` | `surfaceTension` |
 | `turbulence` `Cs` `turbIntensity` `turbLengthScale` | `turbLengthScale` |
+| `regime` `gamma` `R` `T0` `pInf` `machInlet` … `micInterval` | `machInlet` |
 
 `bc<Side>Speed` is only written when that side is a `movingWall` or the speed is
 not zero. Writing `bcLeftSpeed=0` for an inlet would tell the solver a standstill
@@ -339,6 +340,44 @@ that can actually be known.
 The three that were always there stay named members rather than map entries:
 they are read on every pixel of every redraw and have no business going through
 a hash lookup to get there.
+
+### The panel changes shape with the regime
+
+    GAS / COMPRESSIBLE  Regime              incompressible | compressible
+                        gamma               \
+                        Gas constant R       > the gas
+                        Temperature T0      /
+                        Ambient pressure
+                        Inlet Mach          not m/s: the ratio is the physics
+                        gamma, gas 2        \  two phases only
+                        R, gas 2             > two gases rather than
+                        Species mode        /   two liquids
+    ACOUSTICS           Acoustic fields     SPL, pitch and p' on the grid
+                        Acoustic window     how far back the mean looks
+                        0 dB reference      2e-5 Pa is the usual one
+                        Microphones         x=0.5,y=0.2;... - the accurate half
+                        Mic interval        steps between samples
+
+Picking `compressible` does not grey the pressure-solve rows out, it takes them
+off the panel: viscosity, density, the two fluids, the VOF scheme, surface
+tension, sources, gravity, the whole turbulence group and all five multigrid
+rows go, and the gas rows come in. Picking `incompressible` puts them all back
+exactly as they were - a hidden row keeps its value, it is only not shown and
+not sent.
+
+Rows inside a group come and go the same way. `gamma, gas 2` and `Species mode`
+appear at two phases and not before; `Acoustic window` and `0 dB reference`
+appear once there is something listening; `Mic interval` appears once there is
+a microphone. And `Lid speed`, which has been sitting there since 0.4 doing
+nothing for every case that is not a cavity, now appears only for the cavity.
+
+The mechanics: the panel is one list laid out by walking it, so hiding a row is
+a matter of not advancing the cursor for it and parking it off screen, and a
+group whose rows are all hidden loses its header with them rather than leaving
+a title standing over nothing. Which rows are hidden is a function of five
+other rows, so rather than hang a relayout off every path that can change one
+of them, the signature of those five is read once a frame and the layout redone
+when it moves.
 
 ### The preview is on the solver's grid, not on a better one
 

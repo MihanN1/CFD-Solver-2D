@@ -864,6 +864,20 @@ enum ParameterIndex : std::size_t {
     GravityAccel,
     GravityAngle,
     GravityMode,
+    RegimeKind,
+    Gamma1,
+    GasConstant1,
+    Gamma2,
+    GasConstant2,
+    Temperature0,
+    AmbientPressure,
+    MachInlet,
+    SpeciesModeRow,
+    AcousticFields,
+    AcousticWindow,
+    AcousticRef,
+    MicrophoneLine,
+    MicInterval,
     TurbulenceKindRow,
     SmagorinskyCs,
     TurbIntensity,
@@ -935,9 +949,11 @@ struct ParameterGroupInfo {
     const char* label;
 };
 
-constexpr std::array<ParameterGroupInfo, 14> PARAMETER_GROUPS{{
+constexpr std::array<ParameterGroupInfo, 16> PARAMETER_GROUPS{{
     {WindSpeed, "FLOW"},
     {Phases, "FLUIDS"},
+    {RegimeKind, "GAS / COMPRESSIBLE"},
+    {AcousticFields, "ACOUSTICS"},
     {TurbulenceKindRow, "TURBULENCE"},
     {SliceX, "GEOMETRY"},
     {CaseKind, "BOUNDARIES"},
@@ -959,6 +975,10 @@ const char* parameterKey(std::size_t index) {
         "phaseInit", "phaseLevel", "phaseX", "phaseY", "vofScheme",
         "mixing", "diffusivity", "surfaceTension", "contactAngle", "sources",
         "gravityEnabled", "gravityAccel", "gravityAngle", "gravityMode",
+        "regime", "gamma", "R", "gamma2", "R2", "T0", "pInf", "machInlet",
+        "speciesMode",
+        "acousticFields", "acousticWindow", "acousticRef", "microphones",
+        "micInterval",
         "turbulence", "Cs", "turbIntensity", "turbLengthScale",
         "sliceAngleX", "sliceAngleZ", "sliceRotation", "profiles",
         "caseType", "lidSpeed",
@@ -1024,6 +1044,32 @@ std::string parameterHelp(std::size_t index) {
         return "gravityAccel: magnitude of that body force in m/s2. 9.81 is Earth.";
     case GravityAngle:
         return "gravityAngle: direction in degrees, measured clockwise from straight down.";
+    case RegimeKind:
+        return "incompressible is the projection solver and every run before this one: density is a constant, the pressure comes out of a Poisson solve, and the speed of sound is infinite. compressible is a second solver entirely - density is one of the unknowns, there is no pressure solve at all, and sound travels at a finite speed, which is what lets a shock exist and what lets the run have something to listen to. Picking it puts the multigrid rows out of use and brings the gas rows in.";
+    case Gamma1:
+    case GasConstant1:
+        return "The gas. gamma is the ratio of specific heats - 1.4 for air, 1.667 for helium or argon, about 1.3 for steam - and R is the specific gas constant, 287 for air and 2077 for helium. Together they fix the speed of sound: sqrt(gamma*R*T).";
+    case Gamma2:
+    case GasConstant2:
+        return "The second gas, read only at two phases. Helium in air is the demonstration everybody knows: same pressure, same temperature, sound travels nearly three times faster through it.";
+    case Temperature0:
+        return "T0: the reference temperature in kelvin. The inlet and the initial field are both built from it and the ambient pressure through the gas law, so it sets the density and the speed of sound of the whole run.";
+    case AmbientPressure:
+        return "pInf: the ambient pressure in pascals. 101325 is one atmosphere. It is what an outlet holds the flow to while it is subsonic, and what the initial field is built at.";
+    case MachInlet:
+        return "How fast the inlet blows, as a multiple of the speed of sound there rather than in m/s - because in a compressible run that ratio is the number that decides the physics. Under 1 the boundary still hears the domain and holds the pressure; over 1 nothing travels back out and the whole state is imposed.";
+    case SpeciesModeRow:
+        return "active lets the composition set gamma and R, so the speed of sound, the temperature and every wave speed follow the mixture. passive carries the fraction along and nothing else, with the properties frozen at the first gas - useful only for showing what the thermodynamics is worth, and the solver says so in its own log when it is on.";
+    case AcousticFields:
+        return "Writes the sound out as fields on the grid: the pressure fluctuation, its level in dB and a pitch in Hz for every cell. It costs four arrays and a running average per step, and it is off by default because most runs are not about the noise.";
+    case AcousticWindow:
+        return "How far back the running average looks, in seconds. It has to cover several periods of whatever you are listening for, and it is what separates the sound from the flow: anything slower than this window counts as the flow and is subtracted off.";
+    case AcousticRef:
+        return "The pressure that counts as 0 dB. 2e-5 Pa is the human hearing threshold and what SPL is always quoted against; 1 Pa is the other common choice and shifts every number by 94 dB.";
+    case MicrophoneLine:
+        return "Points that record the pressure every few steps: x=0.5,y=0.2;x=1,y=0.5 in metres. At the end the run writes microphones.txt next to the frames with the whole trace and, for each point, a level and a peak frequency found by scanning the spectrum. This is the accurate half of the acoustics; the fields are the half you can look at.";
+    case MicInterval:
+        return "How many steps pass between microphone samples. 1 is every step and sets the sampling rate to 1/dt, which is the highest frequency the run can resolve at all. Raising it makes the file smaller and the ceiling lower.";
     case TurbulenceKindRow:
         return "none solves what is actually on the grid and nothing else, which is right until the grid stops being able to hold the smallest eddy that matters. smagorinsky is a large eddy model: it adds the viscosity the eddies smaller than a cell would have had, and it wants a grid fine enough that they really are small. kOmegaSST carries two more transported fields and models all of the turbulence rather than the small end of it, which is what a Reynolds number in the millions on a grid you can afford needs.";
     case SmagorinskyCs:
@@ -1772,6 +1818,7 @@ struct SolverExecutableInfo {
     bool supportsWallMotion = false;        // wallMotion=
     bool supportsBodyMotion = false;
     bool supportsTurbulence = false;
+    bool supportsCompressible = false;
     bool supportsProfiles = false;
     bool supportsExtraFields = false;
     bool supportsSchemes = false;
@@ -1962,6 +2009,7 @@ SolverExecutableInfo inspectSolverExecutable(
     info.supportsWallMotion = binaryContains(executable, "wallMotion");
     info.supportsBodyMotion = binaryContains(executable, "bodyMotion");
     info.supportsTurbulence = binaryContains(executable, "turbLengthScale");
+    info.supportsCompressible = binaryContains(executable, "machInlet");
     info.supportsProfiles = binaryContains(executable, "profiles");
     info.supportsExtraFields = binaryContains(executable, "extraFields");
     info.supportsSchemes = binaryContains(executable, "timeScheme");
@@ -2098,6 +2146,26 @@ public:
               Slider{"Gravity angle", "deg", -180.0, 180.0, 0.0, false, false},
               Slider{"Gravity mode", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
                      ControlKind::Choice, {"reduced", "body"}},
+              Slider{"Regime", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"incompressible", "compressible"}},
+              Slider{"gamma", "", 1.01, 3.0, 1.4, false, false},
+              Slider{"Gas constant R", "J/(kg K)", 1.0, 100000.0, 287.05,
+                     false, true},
+              Slider{"gamma, gas 2", "", 1.01, 3.0, 1.667, false, false},
+              Slider{"R, gas 2", "J/(kg K)", 1.0, 100000.0, 2077.0, false,
+                     true},
+              Slider{"Temperature T0", "K", 1.0, 100000.0, 288.15, false, true},
+              Slider{"Ambient pressure", "Pa", 1.0, 1e12, 101325.0, false,
+                     true},
+              Slider{"Inlet Mach", "", 0.0, 20.0, 0.5, false, false},
+              Slider{"Species mode", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"active", "passive"}},
+              Slider{"Acoustic fields", "", 0.0, 1.0, 0.0, true, false, true},
+              Slider{"Acoustic window", "s", 1e-6, 1000.0, 0.02, false, true},
+              Slider{"0 dB reference", "Pa", 1e-12, 1e6, 2e-5, false, true},
+              Slider{"Microphones", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
+                     ControlKind::Text},
+              Slider{"Mic interval", "steps", 1.0, 1000000.0, 1.0, true, true},
               Slider{"Turbulence model", "", 0.0, 2.0, 0.0, true, false, false,
                      0.0, ControlKind::Choice,
                      {"none", "smagorinsky", "kOmegaSST"}},
@@ -2312,6 +2380,7 @@ public:
                 break;
             }
             syncWindowLayout(window.getSize());
+            syncRowVisibility();
 #ifdef _WIN32
             bool receivedFileDrop = false;
             if (fileDropTarget.takeReadFailure()) {
@@ -2375,6 +2444,18 @@ private:
         return false;
     }
 
+    void syncRowVisibility() {
+        std::string signature = sliders_[RegimeKind].choice();
+        signature += sliders_[Phases].value >= 1.5 ? "|2" : "|1";
+        signature += sliders_[AcousticFields].value >= 0.5 ? "|a" : "|-";
+        signature += sliders_[MicrophoneLine].text.empty() ? "|-" : "|m";
+        signature += "|" + sliders_[CaseKind].choice();
+        if (signature == visibilitySignature_)
+            return;
+        visibilitySignature_ = signature;
+        updateLayout(layoutSize_);
+    }
+
     void syncWindowLayout(sf::Vector2u size) {
         if (size.x == 0u || size.y == 0u ||
             (size.x == layoutSize_.x && size.y == layoutSize_.y)) {
@@ -2417,33 +2498,54 @@ private:
         const float parameterBottom =
             std::max(PARAMETER_TOP + 40.0f, height - PARAMETER_BOTTOM_MARGIN);
         const float viewportHeight = parameterBottom - PARAMETER_TOP;
+
+        refreshRowVisibility();
+
+        const auto groupOf = [](std::size_t index) {
+            std::size_t found = 0;
+            for (std::size_t g = 0; g < PARAMETER_GROUPS.size(); ++g)
+                if (PARAMETER_GROUPS[g].firstIndex <= index)
+                    found = g;
+            return found;
+        };
+
+        groupShown_.fill(false);
+        groupFirstShown_.fill(0);
+        std::size_t shownRows = 0;
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            if (rowHidden_[index])
+                continue;
+            ++shownRows;
+            const std::size_t g = groupOf(index);
+            if (!groupShown_[g]) {
+                groupShown_[g] = true;
+                groupFirstShown_[g] = index;
+            }
+        }
+        const std::size_t shownGroups = static_cast<std::size_t>(
+            std::count(groupShown_.begin(), groupShown_.end(), true));
+
         const float contentHeight =
-            static_cast<float>(sliders_.size()) * PARAMETER_ROW_HEIGHT +
-            static_cast<float>(PARAMETER_GROUPS.size()) *
-                PARAMETER_GROUP_HEIGHT;
+            static_cast<float>(shownRows) * PARAMETER_ROW_HEIGHT +
+            static_cast<float>(shownGroups) * PARAMETER_GROUP_HEIGHT;
         maxParameterScroll_ = std::max(0.0f, contentHeight - viewportHeight);
         parameterScrollOffset_ =
             clampFloat(parameterScrollOffset_, 0.0f, maxParameterScroll_);
 
+        float cursor = PARAMETER_TOP + 24.0f - parameterScrollOffset_;
+        groupHeaderY_.fill(-100000.0f);
         for (std::size_t index = 0; index < sliders_.size(); ++index) {
-            const std::size_t groupsBeforeOrAt = static_cast<std::size_t>(
-                std::count_if(
-                    PARAMETER_GROUPS.begin(),
-                    PARAMETER_GROUPS.end(),
-                    [index](const ParameterGroupInfo& group) {
-                        return group.firstIndex <= index;
-                    }));
-            sliders_[index].track = {
-                {
-                    20.0f,
-                    PARAMETER_TOP + 24.0f +
-                        static_cast<float>(index) * PARAMETER_ROW_HEIGHT -
-                        parameterScrollOffset_ +
-                        static_cast<float>(groupsBeforeOrAt) *
-                            PARAMETER_GROUP_HEIGHT
-                },
-                {278.0f, 5.0f}
-            };
+            if (rowHidden_[index]) {
+                sliders_[index].track = {{20.0f, -100000.0f}, {278.0f, 5.0f}};
+                continue;
+            }
+            const std::size_t g = groupOf(index);
+            if (groupShown_[g] && groupFirstShown_[g] == index) {
+                cursor += PARAMETER_GROUP_HEIGHT;
+                groupHeaderY_[g] = cursor - 47.0f;
+            }
+            sliders_[index].track = {{20.0f, cursor}, {278.0f, 5.0f}};
+            cursor += PARAMETER_ROW_HEIGHT;
         }
 
         setupViewport_ = {
@@ -3528,8 +3630,50 @@ private:
         };
     }
 
+    bool compressibleOn() const {
+        return sliders_[RegimeKind].choice() == "compressible";
+    }
+
+    void refreshRowVisibility() {
+        rowHidden_.fill(false);
+        const bool gas = compressibleOn();
+        const bool two = sliders_[Phases].value >= 1.5;
+
+        const std::size_t incompressibleOnly[] = {
+            Viscosity, Density, Density1, Viscosity1, Density2, Viscosity2,
+            VofSchemeKind, MixingKindRow, SurfaceTension, ContactAngle,
+            SourceLine, GravityEnabled, GravityAccel, GravityAngle,
+            GravityMode, CoarseSorOmega, SmootherOmega, MgIterations,
+            MgTolerance, MgMinCoarseSize, TurbulenceKindRow, SmagorinskyCs,
+            TurbIntensity, TurbLengthScale, LidSpeed};
+        const std::size_t compressibleOnly[] = {
+            Gamma1, GasConstant1, Gamma2, GasConstant2, Temperature0,
+            AmbientPressure, MachInlet, SpeciesModeRow, AcousticFields,
+            AcousticWindow, AcousticRef, MicrophoneLine, MicInterval};
+
+        for (std::size_t index : incompressibleOnly)
+            rowHidden_[index] = gas;
+        for (std::size_t index : compressibleOnly)
+            rowHidden_[index] = !gas;
+
+        if (gas) {
+            rowHidden_[Gamma2] = !two;
+            rowHidden_[GasConstant2] = !two;
+            rowHidden_[SpeciesModeRow] = !two;
+            const bool listening = sliders_[AcousticFields].value >= 0.5;
+            rowHidden_[AcousticWindow] =
+                !listening && sliders_[MicrophoneLine].text.empty();
+            rowHidden_[AcousticRef] = rowHidden_[AcousticWindow];
+            rowHidden_[MicInterval] = sliders_[MicrophoneLine].text.empty();
+            rowHidden_[WindSpeed] = true;
+        } else {
+            rowHidden_[LidSpeed] =
+                sliders_[CaseKind].choice() != "cavity";
+        }
+    }
+
     bool parameterRowOnScreen(std::size_t index) const {
-        if (index >= sliders_.size()) {
+        if (index >= sliders_.size() || rowHidden_[index]) {
             return false;
         }
         const sf::FloatRect viewport = parameterViewport();
@@ -3617,6 +3761,23 @@ private:
         config.bodyRestitution = sliders_[BodyRestitution].value;
         config.bodyForceReport = sliders_[BodyForceReport].value >= 0.5;
 
+        config.supportsCompressible = solverInfo_.supportsCompressible;
+        config.regime = sliders_[RegimeKind].choice();
+        config.gamma = sliders_[Gamma1].value;
+        config.gasConstant = sliders_[GasConstant1].value;
+        config.gamma2 = sliders_[Gamma2].value;
+        config.gasConstant2 = sliders_[GasConstant2].value;
+        config.T0 = sliders_[Temperature0].value;
+        config.pInf = sliders_[AmbientPressure].value;
+        config.machInlet = sliders_[MachInlet].value;
+        config.speciesMode = sliders_[SpeciesModeRow].choice();
+        config.acousticFields = sliders_[AcousticFields].value >= 0.5;
+        config.acousticWindow = sliders_[AcousticWindow].value;
+        config.acousticRef = sliders_[AcousticRef].value;
+        config.microphones = sliders_[MicrophoneLine].text;
+        config.micInterval =
+            static_cast<int>(std::lround(sliders_[MicInterval].value));
+
         config.supportsTurbulence = solverInfo_.supportsTurbulence;
         config.turbulence = sliders_[TurbulenceKindRow].choice();
         config.turbulenceCs = sliders_[SmagorinskyCs].value;
@@ -3676,7 +3837,7 @@ private:
 
     std::optional<std::size_t> sliderForValidationError(
         const std::string& error) const {
-        const std::array<std::pair<const char*, ParameterIndex>, 25> mappings{{
+        const std::array<std::pair<const char*, ParameterIndex>, 34> mappings{{
             {"Lx", DomainX}, {"Ly", DomainY}, {"nx", CellsX}, {"ny", CellsY},
             {"U0", WindSpeed}, {"nu", Viscosity}, {"ro", Density},
             {"CFL", Cfl}, {"totalTime", TotalTime},
@@ -3687,6 +3848,11 @@ private:
             {"saveInterval", SaveInterval}, {"useCuda", UseCuda},
             {"mixing", MixingKindRow}, {"diffusivity", Diffusivity},
             {"surfaceTension", SurfaceTension}, {"contactAngle", ContactAngle},
+            {"regime", RegimeKind}, {"gamma", Gamma1}, {"machInlet", MachInlet},
+            {"T0", Temperature0}, {"pInf", AmbientPressure},
+            {"speciesMode", SpeciesModeRow},
+            {"acousticWindow", AcousticWindow},
+            {"microphones", MicrophoneLine}, {"micInterval", MicInterval},
             {"bodyMotion", BodyMotionLine}, {"bodyCoupling", BodyCouplingKind},
             {"bodyRestitution", BodyRestitution}
         }};
@@ -5272,12 +5438,12 @@ private:
 
     void drawParameterGroupHeaders() {
         const sf::FloatRect viewport = parameterViewport();
-        for (const ParameterGroupInfo& group : PARAMETER_GROUPS) {
-            if (group.firstIndex >= sliders_.size()) {
+        for (std::size_t index = 0; index < PARAMETER_GROUPS.size(); ++index) {
+            const ParameterGroupInfo& group = PARAMETER_GROUPS[index];
+            if (group.firstIndex >= sliders_.size() || !groupShown_[index]) {
                 continue;
             }
-            const float y =
-                sliders_[group.firstIndex].track.position.y - 47.0f;
+            const float y = groupHeaderY_[index];
             if (y < viewport.position.y - 18.0f ||
                 y > viewport.position.y + viewport.size.y) {
                 continue;
@@ -7150,6 +7316,12 @@ private:
     double runTargetSeconds_ = 0.0;   // where it is heading
     double runElapsedSeconds_ = 0.0;
     bool windowHidden_ = false;
+    std::string visibilitySignature_;
+    std::array<bool, ParameterCount> rowHidden_{};
+    std::array<bool, PARAMETER_GROUPS.size()> groupShown_{};
+    std::array<std::size_t, PARAMETER_GROUPS.size()> groupFirstShown_{};
+    std::array<float, PARAMETER_GROUPS.size()> groupHeaderY_{};
+
     std::vector<std::uint8_t> previewSolid_;
     std::size_t previewNx_ = 0;
     std::size_t previewNy_ = 0;

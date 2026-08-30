@@ -82,6 +82,22 @@ struct FluidSolverRunConfig {
     double bodyRestitution = 0.2;
     bool bodyForceReport = false;
 
+    bool supportsCompressible = false;
+    std::string regime = "incompressible";
+    double gamma = 1.4;
+    double gasConstant = 287.05;
+    double gamma2 = 1.667;
+    double gasConstant2 = 2077.0;
+    double T0 = 288.15;
+    double pInf = 101325.0;
+    double machInlet = 0.5;
+    std::string speciesMode = "active";
+    bool acousticFields = false;
+    double acousticWindow = 0.02;
+    double acousticRef = 2e-5;
+    std::string microphones;
+    int micInterval = 1;
+
     bool supportsTurbulence = false;
     std::string turbulence = "none";
     double turbulenceCs = 0.17;
