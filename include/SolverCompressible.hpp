@@ -26,14 +26,14 @@ struct GasModel {
 
     void prepare();
 
-    float gammaOf(float y) const {
+    CFD_HD float gammaOf(float y) const {
         if (!species || !active)
             return gamma1;
         const float cp = cp1 + y * (cp2 - cp1);
         const float cv = cv1 + y * (cv2 - cv1);
         return cp / cv;
     }
-    float gasConstantOf(float y) const {
+    CFD_HD float gasConstantOf(float y) const {
         if (!species || !active)
             return R1;
         return R1 + y * (R2 - R1);

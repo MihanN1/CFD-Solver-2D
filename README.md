@@ -280,7 +280,13 @@ CFD-Solver-2D/
 - CMake 3.28+ (what `cmake_minimum_required` asks for; `scripts/make-release.sh`
   installs a newer one into `.toolchain/` when the system copy is older)
 - CUDA Toolkit (optional, for the GPU pressure solver)
-- OpenMP (optional, picked up automatically when present)
+- OpenMP (optional, picked up automatically when present). Every directive in
+  the tree stays inside OpenMP 2.0, because that is all MSVC's classic
+  `/openmp` implements and the Windows release matrix builds with it. In
+  practice that means signed `int` loop counters everywhere and reductions
+  limited to `+ * - & ^ | && ||` - a `max` or `min` reduction is OpenMP 3.1,
+  MSVC rejects it outright with C7660, and where one is wanted the loop keeps a
+  per-thread value and folds it in a `critical` at the end instead.
 - A CPU with AVX2 (optional, the vector kernels; without it every one of them
   falls back to the scalar loop it already carries)
 - ParaView (optional, for looking at the output)
@@ -1344,6 +1350,18 @@ The physics lives in `CompressibleKernels.hpp`, marked so it compiles for both
 the host and the device, and the CPU sweep and the CUDA one call the same
 functions. Two hand-kept copies of a Riemann solver drift apart; there is only
 one here.
+
+The marking is a single macro, `CFD_HD`, which expands to `__host__ __device__`
+under nvcc and to nothing everywhere else. It has to be carried all the way
+down: a `CFD_HD` function that calls an unmarked one compiles on the host and
+silently loses the device path, and nvcc says so with `#20011-D` /
+`#20014-D`. Those diagnostics are warnings, not errors, so a CUDA build that
+looks green can still be wrong - `GasModel::gammaOf` and
+`GasModel::gasConstantOf` are marked for exactly this reason, and the ghost
+kernels reach them through the free `cfd::gammaOf(gas, y)` /
+`cfd::gasConstantOf(gas, y)` wrappers that take the model by reference. If the
+CUDA row ever prints a `#20011-D`, something is calling host code from a
+kernel, and it is worth stopping to find out what.
 
 ### Boundaries are characteristic, and that is not decoration
 

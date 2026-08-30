@@ -236,8 +236,8 @@ CFD_HD inline void mirrorSide(Block& block,
             q.v = -q.v;
         break;
     case BoundaryKind::Inlet: {
-        const float gamma = gas.gammaOf(q.y);
-        const float gasR = gas.gasConstantOf(q.y);
+        const float gamma = gammaOf(gas, q.y);
+        const float gasR = gasConstantOf(gas, q.y);
         const float speedOfSound = sqrtf(gamma * gasR * sides.T0);
         const float speed = sides.mach * speedOfSound;
         const float open =
@@ -266,7 +266,7 @@ CFD_HD inline void mirrorSide(Block& block,
     }
     case BoundaryKind::Outlet:
     default:
-        const float gamma = gas.gammaOf(q.y);
+        const float gamma = gammaOf(gas, q.y);
         const float speedOfSound = sqrtf(gamma * q.p / q.rho);
         const float normal = horizontal ? fabsf(q.u) : fabsf(q.v);
         if (normal < speedOfSound)

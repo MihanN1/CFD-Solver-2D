@@ -105,11 +105,18 @@ void fillSolidCells(Block& block, const GasModel& gas) {
 float blockTimeStep(const Block& block, const GasModel& gas, float cfl) {
     float worst = 0.0f;
 
-    #pragma omp parallel for schedule(static) reduction(max : worst) \
-        if (block.ny >= 64)
-    for (int j = 0; j < block.ny; ++j)
-        for (int i = 0; i < block.nx; ++i)
-            worst = std::max(worst, cellRate(block, gas, i, j));
+    #pragma omp parallel if (block.ny >= 64)
+    {
+        float local = 0.0f;
+
+        #pragma omp for schedule(static) nowait
+        for (int j = 0; j < block.ny; ++j)
+            for (int i = 0; i < block.nx; ++i)
+                local = std::max(local, cellRate(block, gas, i, j));
+
+        #pragma omp critical
+        worst = std::max(worst, local);
+    }
 
     if (!(worst > 0.0f))
         return 0.0f;
