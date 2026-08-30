@@ -68,7 +68,8 @@ float inletVelocityAt(const BoundarySpec& spec, float t);
 
 enum class CaseType {
     Channel,
-    Cavity
+    Cavity,
+    ShockTube
 };
 
 bool parseCaseType(const std::string& text, CaseType& out, std::string& error);
@@ -77,6 +78,7 @@ const char* caseTypeName(CaseType type);
 BoundarySet defaultChannelBoundaries();
 
 BoundarySet cavityBoundaries(float lidSpeed);
+BoundarySet closedBoundaries();
 
 struct DomainExtent {
     float Lx = 1.0f;

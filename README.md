@@ -10,7 +10,8 @@ CFD‑Solver‑2D is an educational/research project that implements a finite‑
 - STL/OBJ loading, central plane section extraction, geometry masking, profile rotation, mirroring, and robust contour reconstruction.
 - Optional gravity as a uniform body force, pointing in any direction.
 - Optional wall behaviour: every body in the mask is found and numbered on its own, and each one can spin, drag its surface, or be made frictionless, independently of the rest.
-- Optional turbulence: Smagorinsky with near-wall damping, or two-equation k-omega SST, both switched on from the configuration and off by default.- A separate SFML desktop application that configures runs, launches the solver and renders the frames it writes.
+- Optional turbulence: Smagorinsky with near-wall damping, or two-equation k-omega SST, both switched on from the configuration and off by default.
+- A second solver, switched on with one key: compressible Euler on the same grid and the same geometry, with HLLC fluxes, shocks, two gases that mix, and the sound the flow makes written out as fields and as microphone traces.- A separate SFML desktop application that configures runs, launches the solver and renders the frames it writes.
 
 The project is designed to simulate external incompressible flow around arbitrary 2D profiles such as cylinders, airfoils, valves, turbine blades, and similar engineering geometries.
 
@@ -20,8 +21,7 @@ The project is designed to simulate external incompressible flow around arbitrar
 
 Possible future extensions include:
 
-- Adaptive mesh refinement (AMR)
-- Compressible flow solver
+- Adaptive mesh refinement (AMR), for the compressible solver
 - MAY add several other solvers(deforming solver + electronic solver + thermal solver) and merge all of them into one
 - MAY make a full on website where u would download it all, but only if the previous point is done
 
@@ -446,7 +446,7 @@ above 0.1, `nu=0`.
 | `surfaceTension` | float, N/m | 0 | 0 is off and the whole curvature pass is skipped |
 | `contactAngle` | float, deg | 90 | measured inside fluid 1 at a wall; < 90 means fluid 1 wets it |
 | `sources` | list | empty | `x=0.5,y=0.2,r=0.05,rate=2,angle=90,phase=1;...` |
-| `caseType` | name | `channel` | `channel` / `cavity`, a preset that writes all four sides at once |
+| `caseType` | name | `channel` | `channel` / `cavity` / `shockTube`, presets that write all four sides at once |
 | `lidSpeed` | float, m/s | 1.0 | how fast the cavity lid slides |
 | `steadyTolerance` | float | 0 | stop early once the field stops changing; 0 runs the whole of `totalTime` |
 | `CFL` | float | 0.5 | > 0, warns above 1 |
@@ -472,6 +472,19 @@ above 0.1, `nu=0`.
 | `bodyCollisions` | switch | 0 | off, bodies pass through each other and through the walls |
 | `bodyRestitution` | float | 0.2 | how much of the closing speed survives a bounce, 0 to 1 |
 | `bodyForceReport` | switch | 0 | work the fluid force out for bodies whose path you set too |
+| `regime` | name | `incompressible` | `incompressible` / `compressible` - which solver runs, see below |
+| `gamma` | float | 1.4 | ratio of specific heats; 1.4 air, 1.667 helium, 1.3 steam |
+| `R` | float, J/(kg K) | 287.05 | specific gas constant; 287 air, 2077 helium |
+| `gamma2` `R2` | float | 1.667 / 2077 | the second gas, read only at `phases=2` |
+| `T0` | float, K | 288.15 | reference temperature the inlet and the initial field are built at |
+| `pInf` | float, Pa | 101325 | ambient pressure; what a subsonic outlet holds the flow to |
+| `machInlet` | float | 0.5 | inlet speed as a multiple of the speed of sound there |
+| `speciesMode` | name | `active` | `active` lets the composition set gamma and R, `passive` freezes them |
+| `acousticFields` | switch | 0 | write the pressure fluctuation, SPL and pitch per cell |
+| `acousticWindow` | float, s | 0.02 | how far back the running average looks |
+| `acousticRef` | float, Pa | 2e-5 | the pressure that counts as 0 dB |
+| `microphones` | list | empty | `x=0.5,y=0.2;x=1,y=0.5` - points that record p(t) |
+| `micInterval` | int, steps | 1 | steps between microphone samples |
 | `turbulence` | name | `none` | `none` / `smagorinsky` / `kOmegaSST`, see below |
 | `Cs` | float | 0.17 | the Smagorinsky constant, 0 to 1; 0.1 is what a channel wants |
 | `turbIntensity` | float | 0.05 | how turbulent the inlet is, as a fraction of its speed; only `kOmegaSST` |
@@ -977,7 +990,8 @@ the end — this is what `ConvectionTests` asserts:
 A frame carries pressure, the solid mask and velocity, and nothing else unless
 asked. `extraFields` adds any of `vorticity`, `divergence`, `speed`,
 `objectId`, `density`, `source`, `curvature`, `nuT`, `wallDistance` and
-`strain` to every frame:
+`strain` to every frame - and in the compressible regime `temperature`,
+`mach`, `speedOfSound`, `entropy`, `pFluct`, `SPL` and `pitch` as well:
 
 ```powershell
 "Fluid Solver.exe" "extraFields=vorticity,speed"
@@ -1285,6 +1299,198 @@ integral over its surface cancel its own weight to five significant figures -
 and it does, to 0.06% of what free fall would have given it. A sign error
 anywhere in the surface integral or the buoyancy shows up there as a body that
 takes off.
+
+## The compressible solver
+
+    "Fluid Solver.exe" regime=compressible machInlet=2.5 \
+                       "profiles=wedge.obj@x=0.75,y=0.07,size=1,attach=1" \
+                       nx=240 ny=120 Lx=1.2 Ly=0.6 \
+                       bcLeft=inlet bcRight=outlet bcBottom=slip bcTop=outlet
+
+`regime=incompressible` is the default and is every run written before this
+one, down to the last bit. `regime=compressible` is not an extension of it. It
+is a second solver, sharing the geometry, the boundaries, the frame format and
+the UI, and sharing none of the numerics.
+
+### Why it had to be a second solver
+
+The projection method is built on `div(u) = 0`. That is not a simplification
+sitting on top of it, it is the assumption the whole method is derived from:
+the pressure exists to enforce it, the Poisson solve computes it, and the
+multigrid exists to make that solve fast. Take the constraint away and there
+is nothing left of the method to keep.
+
+So there is no pressure solve here at all. `Multigrid.cpp` and
+`MultigridCuda.cu` - 1450 lines, half of them CUDA - are not called once in a
+compressible run, and not one line of either changed for this. The riskiest
+code in the project sat this branch out entirely.
+
+What runs instead: the conservative variables rho, rho*u, rho*v, rho*E in the
+cell centres, MUSCL reconstruction of the primitives with the same limiters
+`convection=muscl` uses, an HLLC flux at every face, and SSP-RK3 in time. The
+step size comes from `|u| + c` rather than `|u|` alone, which is the whole
+difference: a sound wave now takes a finite time to cross a cell, and the step
+has to see it.
+
+### It is written on a block, and that was deliberate
+
+`SolverCompressible` never reads `cfg.nx`, `cfg.ny` or a global array. Every
+kernel takes a `Block` - sizes, spacings, origin, field pointers, ghost width -
+and reads everything from it. That costs about five percent more effort to
+write and it is the reason branch 8 will not begin by rewriting branch 7:
+a refined patch is another `Block`, and the same kernels run on it unchanged.
+
+The physics lives in `CompressibleKernels.hpp`, marked so it compiles for both
+the host and the device, and the CPU sweep and the CUDA one call the same
+functions. Two hand-kept copies of a Riemann solver drift apart; there is only
+one here.
+
+### Boundaries are characteristic, and that is not decoration
+
+A wall is a mirrored ghost state, slip or no-slip. An inlet imposes the density
+and the velocity from `machInlet` and `T0` while the flow is subsonic and holds
+the pressure too once it is not - because above Mach 1 nothing travels back out
+of the domain to tell the boundary what the interior wants. An outlet is the
+mirror image: it holds `pInf` while subsonic and says nothing at all once the
+flow leaves faster than sound.
+
+Inside the domain, a face between a solid cell and a fluid one gets the wall
+flux written down rather than solved for: zero mass, zero energy, pressure in
+the normal momentum and nothing else. A mirrored state does give HLLC exactly
+zero mass flux - but only before the reconstruction, which uses each cell's own
+neighbours and breaks the symmetry the cancellation depended on. What leaks
+through is small, and it is mass through a wall, which is the one error that
+has nowhere to go but up.
+
+### Two gases
+
+`phases=2` in this regime means two gases rather than two liquids, and they
+always mix: there is no interface to carry. `gamma2` and `R2` are the second
+gas, and the transported mass fraction sets the mixture's own gamma and R
+through its heat capacities. That is not bookkeeping - it is the answer to the
+question everybody asks first. Helium at the same pressure and temperature
+carries sound 2.9 times faster than air, and it comes out of the run at 2.935
+against the 2.935 the gas constants give, with nothing in the code that knows
+about helium.
+
+`speciesMode=passive` turns that off: the fraction still rides along, but gamma
+and R stay frozen at the first gas. It exists to be compared against, and it is
+easy to leave on by accident, so the solver prints a four line warning about it
+in the configuration it echoes before the run starts.
+
+### The sound it makes
+
+Two independent halves, each switched on by itself.
+
+**`acousticFields=1`** writes the sound onto the grid. Every cell keeps a slow
+running mean of its pressure - `acousticWindow` sets how slow - and the
+fluctuation about it becomes `pFluct`; its RMS becomes `SPL`, in decibels
+against `acousticRef`; and the rate at which the fluctuation changes sign
+becomes `pitch`, in hertz. The mean for the level and the mean for the pitch
+are deliberately different speeds: the level wants a slow one, so everything
+the flow is doing counts as sound, and the pitch wants a fast one, or the sign
+of the fluctuation is decided by whatever the slow mean has not caught up with
+yet and the crossings get counted at the rate the mean drifts.
+
+Zero crossing is a crude pitch estimator and this README is not going to
+pretend otherwise: it reports the rate of the largest thing happening and it is
+fooled by broadband noise. It is also free, it works per cell, and you can look
+at it.
+
+**`microphones=x=0.5,y=0.2;...`** is the accurate half. Each point records the
+pressure every `micInterval` steps and the run writes `microphones.txt` beside
+the frames: the whole trace, then a level and a peak frequency for each point
+found by scanning 512 bins with Goertzel. Not an FFT, because the sample count
+is whatever the time step happened to give and is never a power of two, and
+scanning fixed bins costs bins*samples with no padding, no window artefacts and
+no library.
+
+On a closed 0.34 m tube rung by a pressure step the field reports 179 dB and
+749 Hz, the microphone 177 dB and 1398 Hz, against a 500 Hz fundamental. Two
+different estimators of a signal made of bouncing shocks, and neither is lying.
+
+### What it costs
+
+On 256x128, an empty domain at Mach 0.6, two cores of a 2.1 GHz Xeon:
+
+| | per step | steps for 4 ms of flow | total |
+|---|---|---|---|
+| incompressible, muscl + rk2 | 4.6 ms | 171 (for 600 ms) | - |
+| compressible, one gas | 5.8 ms | 1007 | 5.8 s |
+| compressible, two gases, same properties | 7.6 ms | 1007 | 7.6 s |
+| compressible, air and helium | 16 ms | 3722 | 59 s |
+
+A step costs about a quarter more than an incompressible one, and the step
+itself is six times smaller, because `|u| + c` is six times `|u|` at Mach 0.6.
+That is not an implementation cost, it is what solving for sound means: the
+scheme has to see a wave cross a cell.
+
+The three two-gas numbers are worth separating, because the obvious reading of
+the last one is wrong. Carrying a fifth variable costs **31%** - that is the
+second row against the first, two gases with identical properties. Everything
+past that is the flow, not the code: helium carries sound 2.9 times faster than
+air, so the step shrinks with it, and a real contact discontinuity makes the
+limiter's extremum test unpredictable across most of the domain, which is a
+branch misprediction per face and not something an implementation can decline
+to pay.
+
+At scale the sweep settles at about 150 ns per cell-step - 512x256 gives
+149.7 ns, 256x128 gives 165 ns, and the gap is startup rather than cache. On
+two 2.1 GHz cores that is roughly 105 cycles per Riemann problem, which is what
+seven divisions and two square roots cost when they are latency bound.
+
+OpenMP gives 1.80x on two cores. **AVX2 measures no difference at all**, and
+this README would rather say why than pretend. GCC does vectorise: it reports
+31 vectorised loops and a great deal of SLP inside the kernels, all of it the
+five flux components being done together. What it cannot vectorise is the part
+that costs - the divisions and the square roots are per FACE, one at a time,
+and there is no way for the compiler to find eight faces to do at once through
+a function call. That would need the face loop written with intrinsics so that
+eight Riemann problems are solved side by side and the divisions become one
+`vdivps`, which is where the remaining factor lives and is a job to do with a
+profiler open rather than on the way past.
+
+Two things were worth doing on the way past and were done. The primitives are
+computed once per cell into six arrays rather than at every face - each cell is
+read sixteen times by the reconstruction stencils, and deriving rho, u, v, p, y
+and gamma each time cost a division and a gamma per read. And HLLC took eleven
+divisions in its obvious writing, four of which were the same two reciprocals
+used twice each. Together: 15% off one gas, 25% off two.
+
+The multigrid is not called, so `omega`, `smootherOmega`, `mgIterations`,
+`mgTolerance` and `mgMinCoarseSize` do nothing here. They are still accepted:
+they are part of the argument contract the UI has always sent, and refusing
+them would break every launcher for no gain.
+
+### Keys it refuses
+
+Turbulence, gravity, surface tension, sources, moving bodies and the cavity
+preset are all incompressible-only, and asking for one of them alongside
+`regime=compressible` stops the run before it starts with a sentence saying
+which and why - rather than being quietly ignored, which is the failure mode
+where you find out three hours later that gravity was off. Acoustics the other
+way round: they need a finite speed of sound, and the projection method's is
+infinite by construction.
+
+### Checked against
+
+`CompressibleTests`, four cases, and three of the four have an exact answer
+rather than a measured one.
+
+**Sod's shock tube against the exact Riemann solution.** Not a table - the
+solver in the test iterates the star pressure and samples the fan, so every one
+of 400 cells is compared against arithmetic. Worst error 7.5% in density and
+7.2% in pressure, both of them at the contact discontinuity, which is exactly
+where a limited second order scheme smears.
+
+**An oblique shock on a 15 degree wedge at Mach 2.5.** The theta-beta-M
+relation fixes the shock angle at 36.9 degrees and Rankine-Hugoniot fixes the
+pressure jump at 2.468; the run gives 2.669, 8% high on a grid with 24 cells
+across the wedge.
+
+**Two gases**, above.
+
+**Both halves of the acoustics**, above.
 
 ## Turbulence
 

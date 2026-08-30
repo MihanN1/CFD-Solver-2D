@@ -4,6 +4,7 @@
 #include "Restart.hpp"
 #include "Runtime.hpp"
 #include "Solver.hpp"
+#include "SolverCompressible.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -82,12 +83,17 @@ inline bool runCase(Config cfg,
             error = mesh.error();
             return false;
         }
-        Solver solver(cfg, mesh);
-        if (!framePrefix.empty()) {
-            RestartData empty;
-            (void)empty;
+        if (cfg.compressible()) {
+            CompressibleRun solver(cfg, mesh);
+            solver.run();
+        } else {
+            Solver solver(cfg, mesh);
+            if (!framePrefix.empty()) {
+                RestartData empty;
+                (void)empty;
+            }
+            solver.run();
         }
-        solver.run();
     }
 
     std::filesystem::path newest;

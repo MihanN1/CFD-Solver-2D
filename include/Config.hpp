@@ -49,6 +49,34 @@ bool parseTurbulenceKind(const std::string& text, TurbulenceKind& out,
                          std::string& error);
 const char* turbulenceKindName(TurbulenceKind kind);
 
+enum class Regime {
+    Incompressible,
+    Compressible
+};
+
+bool parseRegime(const std::string& text, Regime& out, std::string& error);
+const char* regimeName(Regime regime);
+
+enum class SpeciesMode {
+    Active,
+    Passive
+};
+
+bool parseSpeciesMode(const std::string& text, SpeciesMode& out,
+                      std::string& error);
+const char* speciesModeName(SpeciesMode mode);
+
+struct Microphone {
+    float x = 0.0f;
+    float y = 0.0f;
+};
+
+bool parseMicrophones(const std::string& text,
+                      std::vector<Microphone>& out,
+                      std::string& error);
+
+std::string microphoneHelp();
+
 enum class MixingKind {
     Immiscible,
     Miscible
@@ -297,6 +325,23 @@ struct Config {
     float turbIntensity = 0.05f;
     float turbLengthScale = 0.0f;
 
+    Regime regime = Regime::Incompressible;
+
+    float gamma = 1.4f;
+    float R = 287.05f;
+    float gamma2 = 1.667f;
+    float R2 = 2077.0f;
+    float T0 = 288.15f;
+    float pInf = 101325.0f;
+    float machInlet = 0.5f;
+    SpeciesMode speciesMode = SpeciesMode::Active;
+
+    bool acousticFields = false;
+    float acousticWindow = 0.02f;
+    float acousticRef = 2e-5f;
+    std::string microphones = "";
+    int micInterval = 1;
+
     // Methods
     void readFromConsole();
 
@@ -344,6 +389,16 @@ struct Config {
     bool miscible() const {
         return multiphase() && mixing == MixingKind::Miscible;
     }
+
+    bool compressible() const { return regime == Regime::Compressible; }
+
+    bool regimeConsistent(std::string& error) const;
+
+    bool twoSpecies() const { return compressible() && phases > 1; }
+
+    std::vector<Microphone> resolvedMicrophones() const;
+
+    bool listening() const { return !microphones.empty(); }
 
     std::vector<FlowSource> resolvedSources() const;
 

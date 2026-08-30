@@ -115,12 +115,28 @@ bool parseCaseType(const std::string& text, CaseType& out, std::string& error) {
     const std::string key = lower(text);
     if (key == "channel") { out = CaseType::Channel; return true; }
     if (key == "cavity")  { out = CaseType::Cavity;  return true; }
-    error = "'" + text + "' is not a case type. Use channel or cavity.";
+    if (key == "shocktube" || key == "sod") {
+        out = CaseType::ShockTube;
+        return true;
+    }
+    error = "'" + text +
+            "' is not a case type. Use channel, cavity or shockTube.";
     return false;
 }
 
 const char* caseTypeName(CaseType type) {
-    return type == CaseType::Cavity ? "cavity" : "channel";
+    switch (type) {
+    case CaseType::Cavity:    return "cavity";
+    case CaseType::ShockTube: return "shockTube";
+    default:                  return "channel";
+    }
+}
+
+BoundarySet closedBoundaries() {
+    BoundarySet set;
+    for (int side = 0; side < 4; ++side)
+        set.side[side].kind = BoundaryKind::Wall;
+    return set;
 }
 
 BoundarySet cavityBoundaries(float lidSpeed) {

@@ -4,6 +4,7 @@
 #include "Restart.hpp"
 #include "Runtime.hpp"
 #include "Solver.hpp"
+#include "SolverCompressible.hpp"
 #include "UpdateCheck.hpp"
 #include "Version.hpp"
 #include <cmath>
@@ -372,6 +373,15 @@ int main(int argc, char** argv) {
                      "is not needed.\n";
     }
 
+    {
+        std::string regimeError;
+        if (!cfg.regimeConsistent(regimeError)) {
+            std::cerr << "\n!!! " << regimeError << "\n\nNothing has been "
+                         "started.\n";
+            return 1;
+        }
+    }
+
     if (cfg.nx < 8 || cfg.ny < 8) {
         std::cerr << "nx and ny must be at least 8.\n";
         return 1;
@@ -401,17 +411,29 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    Solver solver(cfg, mesh);
+    const auto startTime = std::chrono::steady_clock::now();
 
-    if (cfg.restart &&
-        !solver.setInitialState(std::move(restart),
-                                restartPath.stem().string())) {
-        std::cerr << "The state in the frame does not match the grid.\n";
-        return 1;
+    if (cfg.compressible()) {
+        CompressibleRun solver(cfg, mesh);
+        if (cfg.restart &&
+            !solver.setInitialState(std::move(restart),
+                                    restartPath.stem().string())) {
+            std::cerr << "That frame carries no compressible state, so this "
+                         "run has nothing to continue from.\n";
+            return 1;
+        }
+        solver.run();
+    } else {
+        Solver solver(cfg, mesh);
+        if (cfg.restart &&
+            !solver.setInitialState(std::move(restart),
+                                    restartPath.stem().string())) {
+            std::cerr << "The state in the frame does not match the grid.\n";
+            return 1;
+        }
+        solver.run();
     }
 
-    const auto startTime = std::chrono::steady_clock::now();
-    solver.run();
     const auto endTime = std::chrono::steady_clock::now();
 
     const double seconds =
