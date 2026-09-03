@@ -25,7 +25,9 @@ void writeFloat(std::ostream& output, float value) {
     writeWord(output, bits);
 }
 
-void writeFrame(const std::filesystem::path& path, std::size_t pRawCount) {
+void writeFrame(const std::filesystem::path& path,
+                std::size_t pRawCount,
+                bool early = false) {
     std::ofstream output(path, std::ios::binary | std::ios::trunc);
     output << "# vtk DataFile Version 3.0\n"
            << "CFD-Solver-2D output, step 20\n"
@@ -39,6 +41,13 @@ void writeFrame(const std::filesystem::path& path, std::size_t pRawCount) {
            << "LOOKUP_TABLE default\n";
     for (int value = 0; value < 4; ++value) {
         writeFloat(output, static_cast<float>(value));
+    }
+
+    if (early) {
+        output << "\nSCALARS phase float 1\nLOOKUP_TABLE default\n";
+        for (int value = 0; value < 4; ++value) {
+            writeFloat(output, 0.25f * static_cast<float>(value));
+        }
     }
     output << "\nSCALARS solid int 1\nLOOKUP_TABLE default\n";
     for (int value = 0; value < 4; ++value) {
@@ -127,6 +136,17 @@ int main() {
     const maskui::VtkFrame bad = maskui::VtkFrameParser::parse(malformed);
     if (bad.restart.restartCapable) {
         return fail("mismatched RestartData sizes were accepted");
+    }
+
+    const std::filesystem::path phased = root / "solution_22.vtk";
+    writeFrame(phased, 4, true);
+    const maskui::VtkFrame withPhase = maskui::VtkFrameParser::parse(phased);
+    if (withPhase.scalars.find("phase") == withPhase.scalars.end()) {
+        return fail("a scalar written before the mask was dropped, and the "
+                    "solver writes the phase fraction exactly there");
+    }
+    if (std::abs(withPhase.scalars.at("phase").at(3) - 0.75f) > 1e-6f) {
+        return fail("the phase fraction came back with the wrong values");
     }
 
     std::error_code cleanupError;

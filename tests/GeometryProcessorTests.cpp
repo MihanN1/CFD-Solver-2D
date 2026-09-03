@@ -130,6 +130,37 @@ int main() {
         return fail("adapter OBJ does not contain two component groups");
     }
 
+    maskui::MaskParameters aligned;
+    aligned.Lx = 1.0;
+    aligned.Ly = 1.0;
+    aligned.nx = 50;
+    aligned.ny = 50;
+    const std::vector<std::vector<maskui::Vec2>> square{
+        {{0.4, 0.4}, {0.6, 0.4}, {0.6, 0.6}, {0.4, 0.6}}};
+    const maskui::MaskResult box =
+        geometry.rasterizeContours(aligned, square);
+    if (!box.success) {
+        return fail("the aligned square produced no mask: " + box.error);
+    }
+
+    const int expected[4][3] = {
+        {19, 19, 0}, {30, 19, 1}, {19, 30, 1}, {30, 30, 1}};
+    for (const auto& corner : expected) {
+        const std::size_t cell =
+            static_cast<std::size_t>(corner[1]) * aligned.nx + corner[0];
+        if ((box.cells[cell] != 0) != (corner[2] != 0)) {
+            return fail(
+                "the corner cells of a square whose faces land on cell "
+                "boundaries are not the solver's, so the preview is on a "
+                "different grid and its mask will not match the run's");
+        }
+    }
+    if (box.solidCellCount != 143) {
+        return fail("the aligned square covered " +
+                    std::to_string(box.solidCellCount) +
+                    " cells, not the 143 the solver's own grid gives");
+    }
+
     std::error_code cleanupError;
     std::filesystem::remove_all(root, cleanupError);
     return 0;

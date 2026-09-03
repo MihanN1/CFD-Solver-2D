@@ -154,6 +154,9 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
     const bool gas = config.supportsCompressible &&
                      config.regime == "compressible";
 
+    const bool gas = config.supportsCompressible &&
+                     config.regime == "compressible";
+
     if (!validateGrid(config, error) ||
         !requirePositive("Lx", config.Lx, error) ||
         !requirePositive("Ly", config.Ly, error) ||
@@ -357,6 +360,7 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                                    "between 0 and 1");
         }
         if (config.supportsTension && !gas) {
+        if (config.supportsTension && !gas) {
             if (config.mixing != "immiscible" && config.mixing != "miscible")
                 return fail(error, "mixing is immiscible or miscible");
             if (!(config.diffusivity >= 0.0) ||
@@ -374,6 +378,7 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                                    "tension to pull on: set surfaceTension to "
                                    "zero, or make them immiscible");
         }
+        if (!config.gravityEnabled && !gas)
         if (!config.gravityEnabled && !gas)
             return fail(error, "two fluids with gravity off never separate: "
                                "the density difference is the only thing that "

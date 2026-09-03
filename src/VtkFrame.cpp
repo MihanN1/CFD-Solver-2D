@@ -941,11 +941,6 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                 hasSolid = true;
             } else if (type == "float" && componentCount == 1 &&
                        frame.scalars.find(name) == frame.scalars.end()) {
-                if (!allRequiredArraysPresent(
-                        hasPressure, hasSolid, hasVelocity)) {
-                    throw VtkParseError(
-                        "Unknown scalar array before required arrays: " + name);
-                }
                 std::vector<float> values(sampleCount);
                 if (binary) {
                     cursor.beginBinaryPayload(name);
@@ -961,11 +956,6 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
                 frame.scalarNames.push_back(name);
                 frame.scalars.emplace(name, std::move(values));
             } else {
-                if (!allRequiredArraysPresent(
-                        hasPressure, hasSolid, hasVelocity)) {
-                    throw VtkParseError(
-                        "Unknown scalar array before required arrays: " + name);
-                }
                 skipScalarArray(
                     cursor,
                     sampleCount,

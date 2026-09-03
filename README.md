@@ -145,6 +145,7 @@ is not there:
 | `gravityEnabled` `gravityAccel` `gravityAngle` | `gravityEnabled` |
 | `wallMotion` | `wallMotion` |
 | `bodyMotion` `bodyCoupling` | `bodyMotion` |
+| `bodyMotion` `bodyCoupling` | `bodyMotion` |
 | `profiles` | `profiles` |
 | `extraFields` | `extraFields` |
 | `convection` `limiter` `timeScheme` `gravityMode` | `timeScheme` |
@@ -172,6 +173,93 @@ the boundary rows happened to say, which is not what picking a preset means.
 **Stop when steady** is `steadyTolerance`: the run ends early once the largest
 velocity change per second, measured against whatever drives the case, drops
 under it. Zero, the default, runs the whole of **Total time**.
+
+=== BODIES ===
+
+A body selector and a set of rows that edit whichever body it is pointing at,
+rather than one row per body per setting - a table of eight settings across
+however many bodies the mask happens to have does not fit on a screen, and the
+number is not known until the mask is generated.
+
+    BODIES   Body               which one the rows below are about
+             Behaviour          static | drag | slip | travel | free
+             Surface spin       deg/s      \
+             Surface slide X    m/s         > drag: the surface moves, the
+             Surface slide Y    m/s        /  body does not
+             Body velocity X    m/s        \
+             Body velocity Y    m/s         > travel: the body itself moves.
+             Body spin          deg/s      /  Under free, what it starts with
+             Body mass          kg/m       \
+             Body density       kg/m3       > free only
+             Pinned             which degrees of freedom are held
+             Body motion        text, the solver's grammar
+             Coupling           weak | added | strong
+             Collisions         off, bodies pass through each other
+             Bounciness         how much of the closing speed survives
+             Report forces      work the force out for set paths too
+
+The two text rows are the truth and the rows above them are a way of writing
+into one entry of each - exactly as the brush is a way of writing into the
+sources row. Pick a body and the rows read that body's entry back out of the
+text; change a row and it writes that entry back. Editing the text by hand does
+the same thing, and `@<seconds>` keyframes can only be written there, because a
+timetable is not a slider.
+
+**Collisions** is off by default and that is deliberate: turning it on changes
+the answer, and every run written before this branch had bodies passing
+through each other. On, a body that would run into another one or into the
+domain edge bounces instead, and **Bounciness** is how much of the closing
+speed comes back - 0 stops dead, 1 rebounds at the speed it arrived.
+
+**Report forces** works the fluid force out for bodies whose path you set as
+well. It never changes where they go; a set path is a set path. It only puts
+the force in the step line so you can read what the fluid was doing to the
+body - useful just before you release it, and for a drag coefficient. Free
+bodies always have it computed, because that is the thing that moves them.
+
+=== TURBULENCE ===
+
+    TURBULENCE  Turbulence model        none | smagorinsky | kOmegaSST
+                Smagorinsky Cs          the one constant smagorinsky has
+                Turbulence intensity    fraction of the inlet speed
+                Turbulence length       m, the biggest eddy coming in
+
+Four rows, and three of them are read by one model each. `Cs` is only sent for
+`smagorinsky`; the two inlet rows are only sent for `kOmegaSST`; `none` sends
+the model name and nothing else, so a run with the model off puts exactly one
+extra key on the command line and changes nothing about what the solver does.
+
+The whole group is held back on finding `turbLengthScale` in the executable,
+like every block since 0.2. Point it at a 0.7 solver and none of these four
+rows reach the command line.
+
+Refused before the run rather than after: a `Cs` of zero or above one, an
+intensity above one - an inlet more turbulent than it is moving - and a
+negative length scale.
+
+`nuT`, `wallDistance` and `strain` are `extraFields` like any other and show up
+in the **Field** button once the solver has been asked to write them. `k` and
+`omega` arrive on their own in every frame of a `kOmegaSST` run, because the
+solver needs them back to continue.
+
+One trap the UI cannot fix for you: **object numbers come from the mask, not
+from the order the models are listed in.** The flood fill walks the grid in
+scan order, so of two shapes side by side either can end up as number 1. The
+solver prints the mapping with the mesh, before anything runs, and that is what
+the Body row is pointing at.
+
+**Behaviour** is the one row that decides which of the two strings an entry
+goes into. `drag` and `slip` are `wallMotion` - the surface moves and the body
+stays put. `travel` and `free` are `bodyMotion` - the body itself goes
+somewhere, and the solver cuts its outline again every step.
+
+Held back on finding `bodyMotion` in the executable, like every block since
+0.2. Point it at a 0.6 solver and the whole group is left off the command line.
+
+The validator refuses a body told to travel through an empty domain, because
+moving a body means cutting its outline again and an empty domain has no
+outline to cut. Better a sentence now than a run that starts, prints a refusal
+of its own and then sits perfectly still for ten minutes.
 
 === BODIES ===
 
@@ -322,6 +410,20 @@ with a cylinder sitting in the middle of it.
 ## Result fields
 
 A frame carries pressure, the solid mask and velocity. Anything else the solver
+was asked to write - `vorticity`, `divergence`, `speed`, `objectId`, `phase`,
+`nuT`, `k`, `omega`, `wallDistance`, `strain` - is read into a registry keyed by
+the name the frame used, and the **Field** button walks whatever turned up and
+back round to pressure. Nothing in the UI has a list of which fields exist, so a
+field the solver learns to write later shows up without this project changing.
+
+Where a scalar sits in the file is the writer's business, and it took a while to
+admit it. The reader used to refuse any array it did not recognise until it had
+seen all three of pressure, mask and velocity - and the solver writes the phase
+fraction between the pressure and the mask, with `k` and `omega` beside it. So
+every two-fluid frame ever written was rejected on the way in with *Unknown
+scalar array before required arrays: phase*. The order check is gone; a frame
+that never provides the three is still rejected, at the end of the parse where
+that can actually be known.
 was asked to write - `vorticity`, `divergence`, `speed`, `objectId`, `phase`,
 `nuT`, `k`, `omega`, `wallDistance`, `strain` - is read into a registry keyed by
 the name the frame used, and the **Field** button walks whatever turned up and
