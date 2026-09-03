@@ -2,6 +2,7 @@
 #include "Config.hpp"
 #include "Mesh.hpp"
 #include "Restart.hpp"
+#include "RigidBody.hpp"
 
 #include <cstdint>
 #include <string>
@@ -58,6 +59,8 @@ struct Block {
     float* rhoY = nullptr;
 
     const uint8_t* solid = nullptr;
+    const float* solidU = nullptr;
+    const float* solidV = nullptr;
 
     CFD_HD int index(int i, int j) const {
         return (j + ghost) * stride + (i + ghost);
@@ -119,7 +122,9 @@ CompressibleDevice* compressibleCudaCreate(int nx, int ny, int ghost,
                                            bool species);
 void compressibleCudaDestroy(CompressibleDevice* device);
 void compressibleCudaUploadSolid(CompressibleDevice* device,
-                                 const uint8_t* mask);
+                                 const uint8_t* mask,
+                                 const float* velX,
+                                 const float* velY);
 void compressibleCudaUpload(CompressibleDevice* device, int set,
                             const float* const* host);
 void compressibleCudaDownload(CompressibleDevice* device, int set,
@@ -157,6 +162,15 @@ private:
     GasModel gas;
     BlockBoundaries sides;
     std::vector<uint8_t> solidMask;
+    std::vector<float> solidVelX;
+    std::vector<float> solidVelY;
+
+    std::vector<RigidBody> bodies;
+    std::vector<RestartData::BodyState> restartBodies;
+    bool bodiesMove = false;
+    bool bodiesFree = false;
+    bool bodyCollisions = false;
+    int contactsReported = 0;
 
     std::vector<float> rho, rhou, rhov, rhoE, rhoY;
     std::vector<float> rho1, rhou1, rhov1, rhoE1, rhoY1;
@@ -193,6 +207,14 @@ private:
     void updateAcoustics(float stepDt);
     void sampleMicrophones();
     void writeMicrophones() const;
+    void writeMicrophoneAudio() const;
+
+    void resolveBodyMotion();
+    void reportBodies() const;
+    void bodyForces();
+    void advanceBodies(float stepDt);
+    void applyBodyPoses();
+    void refreshSolidMask();
     void saveVTK(int stepNumber) const;
     void reportStep() const;
 

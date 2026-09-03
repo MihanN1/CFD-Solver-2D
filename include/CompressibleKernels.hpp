@@ -338,22 +338,28 @@ CFD_HD inline void solidCell(Block& block,
     q.p = sumP * inv;
     q.y = sumY * inv;
 
+    const int here = j * block.nx + i;
+    const float wallU = block.solidU ? block.solidU[here] : 0.0f;
+    const float wallV = block.solidV ? block.solidV[here] : 0.0f;
+
     if (layer == 0) {
         const float length =
             sqrtf(static_cast<float>(normalX * normalX + normalY * normalY));
         if (length > 0.0f) {
             const float nxDir = normalX / length;
             const float nyDir = normalY / length;
-            const float dot = q.u * nxDir + q.v * nyDir;
-            q.u -= 2.0f * dot * nxDir;
-            q.v -= 2.0f * dot * nyDir;
+            const float relU = q.u - wallU;
+            const float relV = q.v - wallV;
+            const float dot = relU * nxDir + relV * nyDir;
+            q.u = wallU + relU - 2.0f * dot * nxDir;
+            q.v = wallV + relV - 2.0f * dot * nyDir;
         } else {
-            q.u = -q.u;
-            q.v = -q.v;
+            q.u = 2.0f * wallU - q.u;
+            q.v = 2.0f * wallV - q.v;
         }
     } else {
-        q.u = -q.u;
-        q.v = -q.v;
+        q.u = 2.0f * wallU - q.u;
+        q.v = 2.0f * wallV - q.v;
     }
     q.gamma = gammaOf(gas, q.y);
     writeState(block, block.index(i, j), q);
@@ -381,8 +387,18 @@ CFD_HD inline void faceFluxX(const Block& in,
     const bool solidLeft = in.solid && i > 0 && in.solid[j * nx + i - 1];
     const bool solidRight = in.solid && i < nx && in.solid[j * nx + i];
     if (solidLeft || solidRight) {
-        const float wallPressure =
-            solidLeft && solidRight ? 0.0f : (solidLeft ? right.p : left.p);
+        float wallPressure = 0.0f;
+        if (solidLeft != solidRight) {
+            const Primitive& side = solidLeft ? right : left;
+            const float wall =
+                in.solidU ? in.solidU[j * nx + (solidLeft ? i - 1 : i)] : 0.0f;
+            const float approach =
+                solidLeft ? wall - side.u : side.u - wall;
+            const float speedOfSound = sqrtf(side.gamma * side.p / side.rho);
+            wallPressure = side.p + side.rho * speedOfSound * approach;
+            if (!(wallPressure > kFloor))
+                wallPressure = kFloor;
+        }
         face[0] = 0.0f;
         face[1] = wallPressure;
         face[2] = 0.0f;
@@ -417,8 +433,18 @@ CFD_HD inline void faceFluxY(const Block& in,
     const bool solidLow = in.solid && j > 0 && in.solid[(j - 1) * nx + i];
     const bool solidHigh = in.solid && j < ny && in.solid[j * nx + i];
     if (solidLow || solidHigh) {
-        const float wallPressure =
-            solidLow && solidHigh ? 0.0f : (solidLow ? high.p : low.p);
+        float wallPressure = 0.0f;
+        if (solidLow != solidHigh) {
+            const Primitive& side = solidLow ? high : low;
+            const float wall =
+                in.solidV ? in.solidV[(solidLow ? j - 1 : j) * nx + i] : 0.0f;
+            const float approach =
+                solidLow ? wall - side.v : side.v - wall;
+            const float speedOfSound = sqrtf(side.gamma * side.p / side.rho);
+            wallPressure = side.p + side.rho * speedOfSound * approach;
+            if (!(wallPressure > kFloor))
+                wallPressure = kFloor;
+        }
         face[0] = 0.0f;
         face[1] = 0.0f;
         face[2] = wallPressure;

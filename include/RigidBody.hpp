@@ -42,6 +42,17 @@ struct BodyGeometry {
     float area = 0.0f;
 };
 
+void resolveBodyCollisions(std::vector<RigidBody>& bodies,
+                           const std::vector<int>& owner,
+                           const std::vector<int>& contested,
+                           int nx,
+                           int ny,
+                           float Lx,
+                           float Ly,
+                           float restitution,
+                           float stepDt,
+                           int& contactsReported);
+
 void buildRigidBodies(const std::vector<BodyMotion>& motions,
                       const std::vector<BodyGeometry>& geometry,
                       std::vector<RigidBody>& out,

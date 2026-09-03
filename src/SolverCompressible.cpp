@@ -10,8 +10,10 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 
 namespace {
 
@@ -232,6 +234,8 @@ CompressibleRun::CompressibleRun(const Config& configuration, Mesh& meshIn)
     sides.mach = cfg.machInlet;
 
     solidMask.assign(static_cast<std::size_t>(nx) * ny, 0);
+    solidVelX.assign(static_cast<std::size_t>(nx) * ny, 0.0f);
+    solidVelY.assign(static_cast<std::size_t>(nx) * ny, 0.0f);
     for (int id = 0; id < nx * ny; ++id)
         solidMask[id] = mesh.solid[id] ? 1 : 0;
 
@@ -240,8 +244,10 @@ CompressibleRun::CompressibleRun(const Config& configuration, Mesh& meshIn)
 #ifdef USE_CUDA
     if (cfg.useCuda && runtime::settings().useCuda && compressibleCudaAvailable()) {
         device = compressibleCudaCreate(nx, ny, ghost, cfg.twoSpecies());
-        compressibleCudaUploadSolid(device, solidMask.data());
         onDevice = device != nullptr;
+        if (onDevice)
+            compressibleCudaUploadSolid(device, solidMask.data(),
+                                        solidVelX.data(), solidVelY.data());
     }
 #endif
 }
@@ -302,6 +308,8 @@ Block CompressibleRun::view(std::vector<float>& r,
     block.rhoE = re.data();
     block.rhoY = ry.empty() ? nullptr : ry.data();
     block.solid = solidMask.data();
+    block.solidU = solidVelX.data();
+    block.solidV = solidVelY.data();
     return block;
 }
 
@@ -370,6 +378,7 @@ bool CompressibleRun::setInitialState(RestartData&& state,
         state.stateRhoV.size() != cells || state.stateRhoE.size() != cells)
         return false;
 
+    restartBodies = state.bodies;
     Block block = view(rho, rhou, rhov, rhoE, rhoY);
     const bool species = cfg.twoSpecies() && state.stateRhoY.size() == cells;
     for (int j = 0; j < ny; ++j)
@@ -764,6 +773,23 @@ void CompressibleRun::saveVTK(int stepNumber) const {
     configText += "restartDt=" + std::to_string(dt) + "\n";
     configText += "formatVersion=" + std::to_string(FRAME_FORMAT_VERSION) +
                   "\n";
+    if (bodiesMove) {
+        std::ostringstream bodyLine;
+        bodyLine << "bodyState=";
+        for (const RigidBody& body : bodies) {
+            if (!body.everFree && !body.prescribed)
+                continue;
+            bodyLine << std::setprecision(
+                            std::numeric_limits<double>::max_digits10)
+                     << body.object << ":" << body.x << "," << body.y << ","
+                     << body.theta << ","
+                     << std::setprecision(
+                            std::numeric_limits<float>::max_digits10)
+                     << body.vx << "," << body.vy << "," << body.omega << ";";
+        }
+        bodyLine << "\n";
+        configText += bodyLine.str();
+    }
 
     const int arrays = cfg.twoSpecies() ? 6 : 5;
     fout << "FIELD RestartData " << arrays << "\n";
@@ -832,6 +858,8 @@ void CompressibleRun::reportStep() const {
 
 void CompressibleRun::run() {
     initialise();
+    resolveBodyMotion();
+    reportBodies();
 
     std::error_code directoryError;
     std::filesystem::create_directories(outputPath, directoryError);
@@ -871,6 +899,11 @@ void CompressibleRun::run() {
         }
 
         computeStep();
+        if (bodiesMove) {
+            syncFromDevice();
+            advanceBodies(dt);
+            syncToDevice();
+        }
         currentTime += dt;
         ++step;
         ++sinceReport;
@@ -900,8 +933,450 @@ void CompressibleRun::run() {
     saveVTK(step);
     reportStep();
     writeMicrophones();
+    writeMicrophoneAudio();
     progress::finish(!stopped);
 
     std::cout << "\nSimulation finished at t = " << currentTime << " s after "
               << step << " steps.\n";
+}
+
+void CompressibleRun::resolveBodyMotion() {
+    bodies.clear();
+    bodiesMove = false;
+    bodiesFree = false;
+    if (cfg.bodyMotion.empty())
+        return;
+
+    std::vector<BodyMotion> motions;
+    std::string error;
+    if (!parseBodyMotion(cfg.bodyMotion, motions, error)) {
+        std::cout << "\n!!! " << error << "\n    No body moves.\n";
+        return;
+    }
+    if (motions.empty())
+        return;
+
+    if (mesh.objects.empty()) {
+        std::cout << "\n!!! bodyMotion was given but the domain holds no body "
+                     "at all, so there is nothing to move.\n";
+        return;
+    }
+    if (!mesh.prepareMotion()) {
+        std::cout << "\n!!! the mask this run started from cannot be moved: it "
+                     "came out of a frame rather than\n    a model, and moving "
+                     "a body means cutting its outline again every step. Give "
+                     "the run a geometryFile\n    or profiles= and the bodies "
+                     "will move.\n";
+        return;
+    }
+
+    std::vector<BodyGeometry> geometry(mesh.objects.size() + 1);
+    for (std::size_t id = 1; id < geometry.size(); ++id) {
+        const Mesh::SolidObject& body = mesh.objects[id - 1];
+        geometry[id].cx = static_cast<float>(body.cx);
+        geometry[id].cy = static_cast<float>(body.cy);
+        geometry[id].radius = static_cast<float>(body.radius);
+        geometry[id].area = static_cast<float>(body.area);
+    }
+
+    const float fluidDensity = cfg.pInf / (cfg.R * cfg.T0);
+    std::vector<std::string> notes;
+    buildRigidBodies(motions, geometry, bodies, fluidDensity, notes);
+    for (const std::string& note : notes)
+        std::cout << "\n!!! " << note << "\n";
+
+    for (const RigidBody& body : bodies) {
+        if (body.everFree)
+            bodiesFree = true;
+        if (body.everFree || body.prescribed)
+            bodiesMove = true;
+    }
+    if (!bodiesMove)
+        return;
+    bodyCollisions = cfg.bodyCollisions;
+
+    if (cfg.bodyCoupling == BodyCoupling::Weak)
+        for (RigidBody& body : bodies) {
+            body.addedMass = 0.0f;
+            body.addedInertia = 0.0f;
+        }
+
+    for (RigidBody& body : bodies)
+        body.sampleVelocity(currentTime);
+
+    for (const RestartData::BodyState& saved : restartBodies) {
+        if (saved.object < 1 ||
+            static_cast<std::size_t>(saved.object) >= bodies.size())
+            continue;
+        RigidBody& body = bodies[saved.object];
+        body.x = saved.x;
+        body.y = saved.y;
+        body.theta = saved.theta;
+        if (body.free) {
+            body.vx = saved.vx;
+            body.vy = saved.vy;
+            body.omega = saved.omega;
+        }
+    }
+
+    applyBodyPoses();
+    refreshSolidMask();
+}
+
+void CompressibleRun::reportBodies() const {
+    if (!bodiesMove)
+        return;
+
+    constexpr float degToRad = 3.14159265358979f / 180.0f;
+    std::cout << "Bodies that travel:\n";
+    for (const RigidBody& body : bodies) {
+        if (!body.everFree && !body.prescribed)
+            continue;
+        std::cout << "  object " << body.object << " at (" << body.cx << ", "
+                  << body.cy << ") m, ";
+        if (body.free)
+            std::cout << "free, mass " << body.mass << " kg, added "
+                      << body.addedMass << " kg";
+        else
+            std::cout << "on rails";
+        if (body.pinX || body.pinY || body.pinRot) {
+            std::cout << ", pinned in";
+            if (body.pinX) std::cout << " x";
+            if (body.pinY) std::cout << " y";
+            if (body.pinRot) std::cout << " rotation";
+        }
+        std::cout << "\n";
+    }
+    if (bodiesFree)
+        std::cout << "  the force on a free body is the pressure integral "
+                     "over its own faces; the wall\n  ghosts mirror about the "
+                     "body velocity, so a moving body pushes on the gas and "
+                     "the\n  gas pushes back.\n";
+    if (bodyCollisions)
+        std::cout << "  bodyCollisions is on, restitution "
+                  << cfg.bodyRestitution << ".\n";
+    (void)degToRad;
+}
+
+void CompressibleRun::applyBodyPoses() {
+    for (const RigidBody& body : bodies) {
+        if (!body.everFree && !body.prescribed)
+            continue;
+        Mesh::BodyPose pose;
+        pose.x = body.x;
+        pose.y = body.y;
+        pose.theta = body.theta;
+        mesh.setPose(body.object, pose);
+    }
+}
+
+void CompressibleRun::refreshSolidMask() {
+    const std::size_t cells = static_cast<std::size_t>(nx) * ny;
+    std::vector<uint8_t> before = solidMask;
+
+    mesh.updateSolid();
+    for (std::size_t id = 0; id < cells; ++id)
+        solidMask[id] = mesh.solid[id] ? 1 : 0;
+
+    const std::vector<int>& owner = mesh.ownership();
+    std::fill(solidVelX.begin(), solidVelX.end(), 0.0f);
+    std::fill(solidVelY.begin(), solidVelY.end(), 0.0f);
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            const std::size_t flat = static_cast<std::size_t>(j) * nx + i;
+            if (!solidMask[flat])
+                continue;
+            const int id = owner.empty() ? 0 : owner[flat];
+            if (id <= 0 || static_cast<std::size_t>(id) >= bodies.size())
+                continue;
+            const RigidBody& body = bodies[id];
+            const float armX =
+                (i + 0.5f) * dx - (body.cx + static_cast<float>(body.x));
+            const float armY =
+                (j + 0.5f) * dy - (body.cy + static_cast<float>(body.y));
+            solidVelX[flat] = body.vx - body.omega * armY;
+            solidVelY[flat] = body.vy + body.omega * armX;
+        }
+
+    Block block = view(rho, rhou, rhov, rhoE, rhoY);
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            const std::size_t flat = static_cast<std::size_t>(j) * nx + i;
+            if (solidMask[flat] || !before[flat])
+                continue;
+
+            float sumRho = 0.0f, sumP = 0.0f, sumY = 0.0f;
+            int count = 0;
+            const int offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+            for (int k = 0; k < 4; ++k) {
+                const int ni = i + offsets[k][0];
+                const int nj = j + offsets[k][1];
+                if (ni < 0 || ni >= nx || nj < 0 || nj >= ny)
+                    continue;
+                if (solidMask[static_cast<std::size_t>(nj) * nx + ni])
+                    continue;
+                const Primitive n =
+                    primitiveOf(block, gas, block.index(ni, nj));
+                sumRho += n.rho;
+                sumP += n.p;
+                sumY += n.y;
+                ++count;
+            }
+
+            Primitive q;
+            if (count > 0) {
+                const float inv = 1.0f / static_cast<float>(count);
+                q.rho = sumRho * inv;
+                q.p = sumP * inv;
+                q.y = sumY * inv;
+            } else {
+                q.rho = cfg.pInf / (cfg.R * cfg.T0);
+                q.p = cfg.pInf;
+                q.y = 0.0f;
+            }
+            q.u = solidVelX[flat];
+            q.v = solidVelY[flat];
+            q.gamma = gammaOf(gas, q.y);
+            writeState(block, block.index(i, j), q);
+        }
+
+#ifdef USE_CUDA
+    if (onDevice)
+        compressibleCudaUploadSolid(device, solidMask.data(),
+                                    solidVelX.data(), solidVelY.data());
+#endif
+}
+
+void CompressibleRun::bodyForces() {
+    if (!bodiesMove)
+        return;
+
+    for (RigidBody& body : bodies) {
+        body.forceX = 0.0f;
+        body.forceY = 0.0f;
+        body.torque = 0.0f;
+    }
+    if (!bodiesFree)
+        return;
+
+    const std::vector<int>& owner = mesh.ownership();
+    if (owner.empty())
+        return;
+
+    Block block = view(rho, rhou, rhov, rhoE, rhoY);
+    const float faceX = dy;
+    const float faceY = dx;
+
+    const auto push = [&](int solidIndex, float fx, float fy, float px,
+                          float py) {
+        const int id = owner[solidIndex];
+        if (id <= 0 || static_cast<std::size_t>(id) >= bodies.size())
+            return;
+        RigidBody& body = bodies[id];
+        const float armX = px - (body.cx + static_cast<float>(body.x));
+        const float armY = py - (body.cy + static_cast<float>(body.y));
+        body.forceX += fx;
+        body.forceY += fy;
+        body.torque += armX * fy - armY * fx;
+    };
+
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        const float y = (j + 0.5f) * dy;
+        for (int i = 1; i < nx; ++i) {
+            const bool left = solidMask[row + i - 1] != 0;
+            const bool right = solidMask[row + i] != 0;
+            if (left == right)
+                continue;
+            const int fluid = left ? i : i - 1;
+            const Primitive q = primitiveOf(block, gas, block.index(fluid, j));
+            const float force = q.p * faceX * (left ? -1.0f : 1.0f);
+            push(row + (left ? i - 1 : i), force, 0.0f, i * dx, y);
+        }
+    }
+
+    for (int j = 1; j < ny; ++j) {
+        const int row = j * nx;
+        for (int i = 0; i < nx; ++i) {
+            const bool low = solidMask[row - nx + i] != 0;
+            const bool high = solidMask[row + i] != 0;
+            if (low == high)
+                continue;
+            const int fluid = low ? j : j - 1;
+            const Primitive q = primitiveOf(block, gas, block.index(i, fluid));
+            const float force = q.p * faceY * (low ? -1.0f : 1.0f);
+            push((low ? row - nx : row) + i, 0.0f, force, (i + 0.5f) * dx,
+                 j * dy);
+        }
+    }
+}
+
+void CompressibleRun::advanceBodies(float stepDt) {
+    if (!bodiesMove)
+        return;
+
+    if (bodiesFree) {
+        bodyForces();
+        for (RigidBody& body : bodies)
+            if (body.free)
+                body.integrate(stepDt);
+    }
+
+    const double middle = currentTime + 0.5 * static_cast<double>(stepDt);
+    for (RigidBody& body : bodies)
+        if (body.prescribed || body.everFree)
+            body.step(middle, stepDt);
+
+    if (bodyCollisions)
+        resolveBodyCollisions(bodies, mesh.ownership(), mesh.contested(), nx,
+                              ny, cfg.Lx, cfg.Ly, cfg.bodyRestitution, stepDt,
+                              contactsReported);
+
+    for (RigidBody& body : bodies)
+        if (body.prescribed || body.everFree)
+            body.advancePose(stepDt);
+
+    applyBodyPoses();
+    refreshSolidMask();
+}
+
+void CompressibleRun::writeMicrophoneAudio() const {
+    if (!cfg.recordsAudio() || mics.empty() || micTimes.size() < 8)
+        return;
+
+    const double first = micTimes.front();
+    const double span = micTimes.back() - first;
+    if (!(span > 0.0))
+        return;
+
+    const double speed = cfg.micAudioSpeed > 0.0f ? cfg.micAudioSpeed : 1.0;
+    const int rate = cfg.micAudioRate;
+    const double audioSeconds = span / speed;
+    const long long frames =
+        static_cast<long long>(audioSeconds * rate);
+    if (frames < 2)
+        return;
+
+    const std::size_t samples = micTimes.size();
+    std::cout << "\nAudio (" << rate << " Hz, " << audioSeconds
+              << " s per file";
+    if (speed != 1.0)
+        std::cout << ", " << span << " s of flow slowed by " << (1.0 / speed)
+                  << "x";
+    std::cout << "):\n";
+
+    for (std::size_t m = 0; m < mics.size(); ++m) {
+        const std::vector<float>& channel = micSamples[m];
+        if (channel.size() != samples)
+            continue;
+
+        double mean = 0.0;
+        for (float value : channel)
+            mean += value;
+        mean /= static_cast<double>(samples);
+
+        std::vector<double> track(static_cast<std::size_t>(frames), 0.0);
+        std::size_t cursor = 0;
+        for (long long k = 0; k < frames; ++k) {
+            const double windowStart =
+                first + span * static_cast<double>(k) / frames;
+            const double windowEnd =
+                first + span * static_cast<double>(k + 1) / frames;
+
+            while (cursor + 1 < samples && micTimes[cursor] < windowStart)
+                ++cursor;
+
+            double sum = 0.0;
+            int count = 0;
+            for (std::size_t s = cursor;
+                 s < samples && micTimes[s] < windowEnd; ++s) {
+                sum += channel[s] - mean;
+                ++count;
+            }
+            if (count > 0) {
+                track[static_cast<std::size_t>(k)] =
+                    sum / static_cast<double>(count);
+                continue;
+            }
+
+            const double when = 0.5 * (windowStart + windowEnd);
+            std::size_t hi = cursor;
+            while (hi + 1 < samples && micTimes[hi] < when)
+                ++hi;
+            const std::size_t lo = hi > 0 ? hi - 1 : 0;
+            const double t0 = micTimes[lo];
+            const double t1 = micTimes[hi];
+            const double weight =
+                t1 > t0 ? (when - t0) / (t1 - t0) : 0.0;
+            track[static_cast<std::size_t>(k)] =
+                (channel[lo] - mean) +
+                weight * (channel[hi] - channel[lo]);
+        }
+
+        double drift = 0.0;
+        for (double value : track)
+            drift += value;
+        drift /= static_cast<double>(track.size());
+
+        double peak = 0.0;
+        for (double& value : track) {
+            value -= drift;
+            peak = std::max(peak, std::fabs(value));
+        }
+        const double gain = peak > 0.0 ? 0.9 * 32767.0 / peak : 0.0;
+
+        char name[64];
+        std::snprintf(name, sizeof(name), "microphone%zu.wav", m + 1);
+        const std::filesystem::path file = outputPath / name;
+        std::ofstream out(file, std::ios::binary);
+        if (!out.is_open())
+            continue;
+
+        const uint32_t dataBytes = static_cast<uint32_t>(frames * 2);
+        const uint32_t sampleRate = static_cast<uint32_t>(rate);
+        const auto put32 = [&](uint32_t value) {
+            const unsigned char raw[4] = {
+                static_cast<unsigned char>(value & 0xFF),
+                static_cast<unsigned char>((value >> 8) & 0xFF),
+                static_cast<unsigned char>((value >> 16) & 0xFF),
+                static_cast<unsigned char>((value >> 24) & 0xFF)};
+            out.write(reinterpret_cast<const char*>(raw), 4);
+        };
+        const auto put16 = [&](uint16_t value) {
+            const unsigned char raw[2] = {
+                static_cast<unsigned char>(value & 0xFF),
+                static_cast<unsigned char>((value >> 8) & 0xFF)};
+            out.write(reinterpret_cast<const char*>(raw), 2);
+        };
+
+        out.write("RIFF", 4);
+        put32(36 + dataBytes);
+        out.write("WAVE", 4);
+        out.write("fmt ", 4);
+        put32(16);
+        put16(1);
+        put16(1);
+        put32(sampleRate);
+        put32(sampleRate * 2);
+        put16(2);
+        put16(16);
+        out.write("data", 4);
+        put32(dataBytes);
+
+        for (double value : track) {
+            double scaled = value * gain;
+            scaled = std::max(-32768.0, std::min(32767.0, scaled));
+            put16(static_cast<uint16_t>(static_cast<int16_t>(
+                scaled >= 0.0 ? scaled + 0.5 : scaled - 0.5)));
+        }
+        out.close();
+
+        char line[220];
+        std::snprintf(line, sizeof(line),
+                      "  mic %zu -> %s, full scale is %.4g Pa of fluctuation",
+                      m + 1, name, peak);
+        std::cout << line << "\n";
+    }
+    std::cout << "Written next to the frames in "
+              << pathToConsole(outputPath) << "\n";
 }

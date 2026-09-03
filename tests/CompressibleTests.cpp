@@ -1,12 +1,47 @@
 #include "TestHarness.hpp"
 
 #include <cstdio>
+#include <cstdint>
+#include <cstdlib>
+#include <iterator>
 #include <fstream>
 #include <sstream>
 
 using namespace testing;
 
 namespace {
+
+void writeDisc(const std::filesystem::path& path, double radius, int points) {
+    std::ofstream out(path);
+    for (int pass = 0; pass < 2; ++pass) {
+        const double z = pass == 0 ? -0.05 : 0.05;
+        for (int k = 0; k < points; ++k) {
+            const double a = 2.0 * 3.14159265358979 * k / points;
+            out << "v " << radius * std::cos(a) << " " << radius * std::sin(a)
+                << " " << z << "\n";
+        }
+    }
+    for (int k = 0; k < points; ++k) {
+        const int a = k + 1;
+        const int b = (k + 1) % points + 1;
+        out << "f " << a << " " << b << " " << b + points << "\n";
+        out << "f " << a << " " << b + points << " " << a + points << "\n";
+    }
+    out << "f";
+    for (int k = 0; k < points; ++k)
+        out << " " << k + 1;
+    out << "\nf";
+    for (int k = points - 1; k >= 0; --k)
+        out << " " << points + k + 1;
+    out << "\n";
+}
+
+const RestartData::BodyState* bodyOf(const RestartData& frame, int object) {
+    for (const RestartData::BodyState& state : frame.bodies)
+        if (state.object == object)
+            return &state;
+    return nullptr;
+}
 
 const std::vector<float>* fieldOf(const RestartData& frame,
                                   const std::string& name) {
@@ -488,6 +523,218 @@ int main() {
                       "crossings, mic %.0f dB and %.0f Hz by spectrum, "
                       "fundamental %.0f Hz",
                       peakSpl, loudPitch, micSpl, micPeak, fundamental);
+        report(line);
+    }
+
+    {
+        const std::filesystem::path model = root / "disc.obj";
+        writeDisc(model, 0.05, 48);
+
+        Config cfg = gasConfig(root / "piston");
+        cfg.Lx = 1.0f;
+        cfg.Ly = 0.6f;
+        cfg.nx = 128;
+        cfg.ny = 76;
+        cfg.geometryFile = "none";
+        cfg.profiles = model.string() + "@x=0.35,y=0.3,size=0.16";
+        cfg.boundaries = closedBoundaries();
+        cfg.machInlet = 0.0f;
+        cfg.totalTime = 0.0006;
+
+        const double speedOfSound =
+            std::sqrt(static_cast<double>(cfg.gamma) * cfg.R * cfg.T0);
+        const double travel = 0.25 * speedOfSound;
+        cfg.bodyMotion = "1:vx=" + std::to_string(travel);
+
+        RestartData frame;
+        if (!runCase(cfg, frame, error))
+            return fail("the moving body run failed: " + error);
+
+        const RestartData::BodyState* body = bodyOf(frame, 1);
+        if (!body)
+            return fail("a compressible run with a moving body wrote no body "
+                        "state into its frame");
+        const double expected = travel * cfg.totalTime;
+        if (std::fabs(body->x - expected) > 0.02 * expected)
+            return fail("a body told to travel at " + std::to_string(travel) +
+                        " m/s moved " + std::to_string(body->x) +
+                        " m instead of " + std::to_string(expected));
+
+        const std::size_t cells =
+            static_cast<std::size_t>(frame.nx) * frame.ny;
+        if (frame.stateRho.size() != cells)
+            return fail("the moving body frame carries no state");
+
+        if (frame.solid.size() != cells)
+            return fail("the moving body frame carries no mask");
+
+        double centre = 0.0, mass = 0.0;
+        for (int j = 0; j < frame.ny; ++j)
+            for (int i = 0; i < frame.nx; ++i)
+                if (frame.solid[static_cast<std::size_t>(j) * frame.nx + i]) {
+                    centre += i;
+                    mass += 1.0;
+                }
+        if (!(mass > 0.0))
+            return fail("the body left the mask entirely");
+        centre = (centre / mass + 0.5) * (cfg.Lx / frame.nx);
+        if (std::fabs(centre - (0.35 + expected)) > 3.0 * cfg.Lx / frame.nx)
+            return fail("the body state moved but the mask did not follow it: "
+                        "the solid cells are centred at " +
+                        std::to_string(centre) + " m and the body says " +
+                        std::to_string(0.35 + expected));
+
+        double ahead = 0.0, behind = 0.0;
+        int aheadCount = 0, behindCount = 0;
+        for (int j = 0; j < frame.ny; ++j)
+            for (int i = 0; i < frame.nx; ++i) {
+                const std::size_t id =
+                    static_cast<std::size_t>(j) * frame.nx + i;
+                if (frame.solid[id])
+                    continue;
+                const double x = (i + 0.5) * cfg.Lx / frame.nx;
+                const double y = (j + 0.5) * cfg.Ly / frame.ny;
+                if (std::fabs(y - 0.3) > 0.07)
+                    continue;
+                const double gamma = cfg.gamma;
+                const double rhoHere = frame.stateRho[id];
+                const double kinetic =
+                    0.5 *
+                    (static_cast<double>(frame.stateRhoU[id]) *
+                         frame.stateRhoU[id] +
+                     static_cast<double>(frame.stateRhoV[id]) *
+                         frame.stateRhoV[id]) /
+                    rhoHere;
+                const double p =
+                    (gamma - 1.0) * (frame.stateRhoE[id] - kinetic);
+                const double front = 0.35 + expected;
+                if (x > front + 0.06 && x < front + 0.18) {
+                    ahead += p;
+                    ++aheadCount;
+                } else if (x < front - 0.06 && x > front - 0.18) {
+                    behind += p;
+                    ++behindCount;
+                }
+            }
+        if (aheadCount == 0 || behindCount == 0)
+            return fail("the piston test sampled no gas on one side");
+        ahead /= aheadCount;
+        behind /= behindCount;
+        if (!(ahead > behind * 1.02))
+            return fail("a body driven at Mach 0.25 through still gas left " +
+                        std::to_string(ahead) + " Pa in front of it and " +
+                        std::to_string(behind) +
+                        " Pa behind: it is not pushing on the gas at all, so "
+                        "the wall ghosts are not mirroring about its velocity");
+
+        char line[240];
+        std::snprintf(line, sizeof(line),
+                      "moving body   Mach 0.25 piston moved %.4f m against "
+                      "%.4f asked, %.0f Pa ahead against %.0f Pa behind",
+                      body->x, expected, ahead, behind);
+        report(line);
+    }
+
+    {
+        Config cfg = gasConfig(root / "audio");
+        cfg.Lx = 0.34f;
+        cfg.Ly = 0.04f;
+        cfg.nx = 340;
+        cfg.ny = 8;
+        cfg.caseType = CaseType::ShockTube;
+        cfg.boundaries = closedBoundaries();
+        cfg.microphones = "x=0.05,y=0.02";
+        cfg.micInterval = 1;
+        cfg.micAudio = true;
+        cfg.micAudioRate = 44100;
+        cfg.micAudioSpeed = 0.05f;
+        cfg.totalTime = 0.0015;
+
+        RestartData frame;
+        if (!runCase(cfg, frame, error))
+            return fail("the audio run failed: " + error);
+
+        const std::filesystem::path wav =
+            std::filesystem::path(cfg.outputDir) / "microphone1.wav";
+        if (!std::filesystem::exists(wav))
+            return fail("micAudio=1 wrote no microphone1.wav");
+
+        std::ifstream file(wav, std::ios::binary);
+        std::vector<unsigned char> raw(
+            (std::istreambuf_iterator<char>(file)),
+            std::istreambuf_iterator<char>());
+        if (raw.size() < 44)
+            return fail("the wav is " + std::to_string(raw.size()) +
+                        " bytes, which is not even a header");
+
+        const auto read32 = [&](std::size_t at) {
+            return static_cast<uint32_t>(raw[at]) |
+                   (static_cast<uint32_t>(raw[at + 1]) << 8) |
+                   (static_cast<uint32_t>(raw[at + 2]) << 16) |
+                   (static_cast<uint32_t>(raw[at + 3]) << 24);
+        };
+        const auto read16 = [&](std::size_t at) {
+            return static_cast<uint16_t>(
+                static_cast<uint32_t>(raw[at]) |
+                (static_cast<uint32_t>(raw[at + 1]) << 8));
+        };
+
+        if (std::string(raw.begin(), raw.begin() + 4) != "RIFF" ||
+            std::string(raw.begin() + 8, raw.begin() + 12) != "WAVE" ||
+            std::string(raw.begin() + 12, raw.begin() + 16) != "fmt " ||
+            std::string(raw.begin() + 36, raw.begin() + 40) != "data")
+            return fail("the wav header is not a wav header");
+        if (read32(4) != raw.size() - 8)
+            return fail("the RIFF size does not match the file");
+        if (read16(20) != 1 || read16(22) != 1 || read16(34) != 16)
+            return fail("the wav is not 16 bit mono PCM");
+        if (static_cast<int>(read32(24)) != cfg.micAudioRate)
+            return fail("the wav says " + std::to_string(read32(24)) +
+                        " Hz where micAudioRate asked for " +
+                        std::to_string(cfg.micAudioRate));
+        if (read32(28) != read32(24) * 2u || read16(32) != 2)
+            return fail("the wav block alignment contradicts its own format");
+
+        const uint32_t dataBytes = read32(40);
+        if (dataBytes != raw.size() - 44)
+            return fail("the data chunk length does not match what follows");
+
+        const double seconds =
+            cfg.totalTime / static_cast<double>(cfg.micAudioSpeed);
+        const double frames = dataBytes / 2.0;
+        const double asked = seconds * cfg.micAudioRate;
+        if (std::fabs(frames - asked) > 0.02 * asked)
+            return fail(std::to_string(frames) + " frames at " +
+                        std::to_string(cfg.micAudioRate) + " Hz is " +
+                        std::to_string(frames / cfg.micAudioRate) +
+                        " s, where " + std::to_string(cfg.totalTime) +
+                        " s slowed by " +
+                        std::to_string(1.0 / cfg.micAudioSpeed) + " is " +
+                        std::to_string(seconds) + " s");
+
+        double sum = 0.0;
+        int peak = 0;
+        for (std::size_t at = 44; at + 1 < raw.size(); at += 2) {
+            const int16_t value = static_cast<int16_t>(read16(at));
+            sum += value;
+            peak = std::max(peak, std::abs(static_cast<int>(value)));
+        }
+        const double mean = sum / frames;
+        if (std::abs(peak - 29490) > 2)
+            return fail("the wav peaks at " + std::to_string(peak) +
+                        " where peak normalisation to 0.9 of full scale is "
+                        "29490");
+        if (std::fabs(mean) > 0.01 * peak)
+            return fail("the wav carries a DC offset of " +
+                        std::to_string(mean) +
+                        " counts, and a wav is a fluctuation");
+
+        char line[240];
+        std::snprintf(line, sizeof(line),
+                      "audio         %.0f frames at %d Hz is %.3f s of file "
+                      "for %.4f s of flow, peak %d, mean %.1f",
+                      frames, cfg.micAudioRate, frames / cfg.micAudioRate,
+                      cfg.totalTime, peak, mean);
         report(line);
     }
 

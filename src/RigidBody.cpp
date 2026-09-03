@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <iostream>
 #include <string>
+#include <vector>
 
 namespace {
 constexpr float kDegToRad = 3.14159265358979f / 180.0f;
@@ -290,5 +293,129 @@ void buildRigidBodies(const std::vector<BodyMotion>& motions,
         body.addedMass = fluidDensity * body.area;
         body.addedInertia =
             0.125f * fluidDensity * body.area * body.radius * body.radius;
+    }
+}
+
+void resolveBodyCollisions(std::vector<RigidBody>& bodies,
+                           const std::vector<int>& owner,
+                           const std::vector<int>& contested,
+                           int nx,
+                           int ny,
+                           float Lx,
+                           float Ly,
+                           float restitution,
+                           float stepDt,
+                           int& contactsReported) {
+    if (owner.empty())
+        return;
+
+    const float bounce = -restitution;
+    for (RigidBody& body : bodies) {
+        if (!body.free)
+            continue;
+        const float centreX = body.cx + static_cast<float>(body.x);
+        const float centreY = body.cy + static_cast<float>(body.y);
+        const float reach = body.radius;
+        const float nextX = centreX + body.vx * stepDt;
+        const float nextY = centreY + body.vy * stepDt;
+
+        if (nextX - reach < 0.0f && body.vx < 0.0f)
+            body.vx *= bounce;
+        if (nextX + reach > Lx && body.vx > 0.0f)
+            body.vx *= bounce;
+        if (nextY - reach < 0.0f && body.vy < 0.0f)
+            body.vy *= bounce;
+        if (nextY + reach > Ly && body.vy > 0.0f)
+            body.vy *= bounce;
+    }
+
+    if (bodies.size() < 3)
+        return;
+
+    const std::size_t count = bodies.size();
+    std::vector<uint8_t> touching(count * count, 0);
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        for (int i = 0; i < nx; ++i) {
+            const int mine = owner[row + i];
+            if (mine == 0)
+                continue;
+            const int neighbours[2] = {i + 1 < nx ? owner[row + i + 1] : 0,
+                                       j + 1 < ny ? owner[row + nx + i] : 0};
+            for (int other : neighbours) {
+                if (other == 0 || other == mine)
+                    continue;
+                if (static_cast<std::size_t>(mine) >= count ||
+                    static_cast<std::size_t>(other) >= count)
+                    continue;
+                touching[mine * count + other] = 1;
+                touching[other * count + mine] = 1;
+            }
+        }
+    }
+    for (int id : contested) {
+        const int mine = owner[id];
+        if (mine <= 0 || static_cast<std::size_t>(mine) >= count)
+            continue;
+        for (std::size_t other = 1; other < count; ++other)
+            if (static_cast<int>(other) != mine)
+                touching[mine * count + other] = 1;
+    }
+
+    for (std::size_t a = 1; a < count; ++a) {
+        for (std::size_t b = a + 1; b < count; ++b) {
+            if (!touching[a * count + b])
+                continue;
+            RigidBody& first = bodies[a];
+            RigidBody& second = bodies[b];
+            if (!first.free && !second.free)
+                continue;
+
+            const float ax = first.cx + static_cast<float>(first.x);
+            const float ay = first.cy + static_cast<float>(first.y);
+            const float bx = second.cx + static_cast<float>(second.x);
+            const float by = second.cy + static_cast<float>(second.y);
+            float normalX = bx - ax;
+            float normalY = by - ay;
+            const float length = std::hypot(normalX, normalY);
+            if (!(length > 1e-12f))
+                continue;
+            normalX /= length;
+            normalY /= length;
+
+            const float closing = (second.vx - first.vx) * normalX +
+                                  (second.vy - first.vy) * normalY;
+            if (closing >= 0.0f)
+                continue;
+
+            const float massA =
+                first.free ? first.mass + first.addedMass : 0.0f;
+            const float massB =
+                second.free ? second.mass + second.addedMass : 0.0f;
+            const float invA = massA > 0.0f ? 1.0f / massA : 0.0f;
+            const float invB = massB > 0.0f ? 1.0f / massB : 0.0f;
+            if (!(invA + invB > 0.0f))
+                continue;
+
+            const float impulse =
+                -(1.0f + restitution) * closing / (invA + invB);
+            if (first.free) {
+                first.vx -= impulse * invA * normalX;
+                first.vy -= impulse * invA * normalY;
+                first.applyPins();
+            }
+            if (second.free) {
+                second.vx += impulse * invB * normalX;
+                second.vy += impulse * invB * normalY;
+                second.applyPins();
+            }
+
+            if (contactsReported < 3) {
+                ++contactsReported;
+                std::cout << "  bodies " << a << " and " << b
+                          << " met at " << -closing << " m/s and bounced at "
+                          << restitution << " of it\n";
+            }
+        }
     }
 }

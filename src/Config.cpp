@@ -45,7 +45,8 @@ const char* const kKeys[] = {
     "turbulence", "Cs", "turbIntensity", "turbLengthScale",
     "regime", "gamma", "R", "gamma2", "R2", "T0", "pInf", "machInlet",
     "speciesMode", "acousticFields", "acousticWindow", "acousticRef",
-    "microphones", "micInterval",
+    "microphones", "micInterval", "micAudio", "micAudioRate",
+    "micAudioSpeed",
     "restart", "restartFile", "addTime",
     "gravityMode", "convection", "limiter", "timeScheme",
     "caseType", "lidSpeed", "steadyTolerance",
@@ -379,7 +380,12 @@ std::string microphoneHelp() {
            "  x=<m>,y=<m>;x=<m>,y=<m>\n"
            "Each one records the pressure at that cell every micInterval "
            "steps, and at the end the run writes microphones.txt next to the "
-           "frames with the trace and a peak frequency for each.";
+           "frames with the trace and a peak frequency for each.\n"
+           "micAudio=1 writes each one as a .wav as well, so you can play it "
+           "back instead of reading a column of numbers. micAudioRate sets "
+           "the file's sample rate and micAudioSpeed stretches the timebase - "
+           "0.05 plays it twenty times slower, which is how you hear "
+           "something that happened in two milliseconds.";
 }
 
 bool parseMicrophones(const std::string& text,
@@ -1895,6 +1901,20 @@ void Config::print() const {
                       << acousticRef << " Pa\n";
         std::cout << "  microphones      = "
                   << (microphones.empty() ? "none" : microphones) << "\n";
+        if (!microphones.empty()) {
+            std::cout << "  micAudio         = "
+                      << (micAudio ? "on" : "off");
+            if (micAudio) {
+                std::cout << ", " << micAudioRate << " Hz";
+                if (micAudioSpeed != 1.0f)
+                    std::cout << ", played at " << micAudioSpeed
+                              << " of real speed";
+            }
+            std::cout << "\n";
+        }
+        if (micAudio && microphones.empty())
+            std::cout << "\n  !!! micAudio=1 with no microphones= is nothing "
+                         "to record. Add microphones=x=..,y=..\n\n";
     }
     std::cout << "  turbulence       = " << turbulenceKindName(turbulence);
     if (turbulence == TurbulenceKind::None)
@@ -1983,12 +2003,6 @@ bool Config::regimeConsistent(std::string& error) const {
         error = "surfaceTension is incompressible only. Two gases share a "
                 "composition rather than an interface, so there is no surface "
                 "for it to pull on. Drop surfaceTension=.";
-        return false;
-    }
-    if (bodiesMove()) {
-        error = "bodyMotion is incompressible only in this build. The "
-                "compressible solver cuts its mask once and keeps it. Drop "
-                "bodyMotion=, or drop regime=compressible.";
         return false;
     }
     if (!sources.empty()) {
@@ -2137,6 +2151,9 @@ std::string Config::serialize() const {
         << "acousticRef=" << acousticRef << "\n"
         << "microphones=" << microphones << "\n"
         << "micInterval=" << micInterval << "\n"
+        << "micAudio=" << (micAudio ? 1 : 0) << "\n"
+        << "micAudioRate=" << micAudioRate << "\n"
+        << "micAudioSpeed=" << micAudioSpeed << "\n"
         << "turbulence=" << turbulenceKindName(turbulence) << "\n"
         << "Cs=" << Cs << "\n"
         << "turbIntensity=" << turbIntensity << "\n"
@@ -2502,6 +2519,18 @@ bool Config::setParam(const std::string& key,
                        "micInterval is how many steps pass between samples, "
                        "and it sets the sampling rate: every step is the "
                        "highest frequency the run can resolve at all", error);
+    else if (k == "micAudio")
+        ok = assignBool(micAudio, k, value, error);
+    else if (k == "micAudioRate")
+        ok = assignInt(micAudioRate, k, value, 1000, 384000,
+                       "micAudioRate is the sample rate of the .wav files; "
+                       "44100 is what everything plays, and there is no point "
+                       "above twice the highest frequency in the run", error);
+    else if (k == "micAudioSpeed")
+        ok = assignFloat(micAudioSpeed, k, value, 1e-4f, 1000.0f,
+                         "micAudioSpeed stretches the .wav timebase: 1 is "
+                         "real time, 0.05 plays it twenty times slower and "
+                         "drops every frequency by the same factor", error);
     else if (k == "microphones") {
         std::vector<Microphone> parsed;
         if (!parseMicrophones(value, parsed, error)) {

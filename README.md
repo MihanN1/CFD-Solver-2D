@@ -472,7 +472,7 @@ above 0.1, `nu=0`.
 | `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
 | `invertSection` | switch | 0 | 1 / 0 |
 | `wallMotion` | list | empty | `<object>:rot=90,slideX=0.5;<object>:slip=1` — an object either moves or slips, see below |
-| `bodyMotion` | list | empty | `<object>:vx=0.2,omega=45;<object>:free=1,mass=2` — bodies that travel, see below |
+| `bodyMotion` | list | empty | `<object>:vx=0.2,omega=45;<object>:free=1,mass=2` — bodies that travel, in either regime, see below |
 | `bodyCoupling` | name | `added` | `weak` / `added` / `strong`, only read by a free body |
 | `bodyIterations` | int | 4 | most force/motion passes inside one step, only read by `strong` |
 | `bodyCollisions` | switch | 0 | off, bodies pass through each other and through the walls |
@@ -491,6 +491,9 @@ above 0.1, `nu=0`.
 | `acousticRef` | float, Pa | 2e-5 | the pressure that counts as 0 dB |
 | `microphones` | list | empty | `x=0.5,y=0.2;x=1,y=0.5` - points that record p(t) |
 | `micInterval` | int, steps | 1 | steps between microphone samples |
+| `micAudio` | 0/1 | 0 | also write each microphone as a `.wav` |
+| `micAudioRate` | int, Hz | 44100 | sample rate of those files |
+| `micAudioSpeed` | float | 1 | timebase: 1 is real time, 0.05 is twenty times slower |
 | `turbulence` | name | `none` | `none` / `smagorinsky` / `kOmegaSST`, see below |
 | `Cs` | float | 0.17 | the Smagorinsky constant, 0 to 1; 0.1 is what a channel wants |
 | `turbIntensity` | float | 0.05 | how turbulent the inlet is, as a fraction of its speed; only `kOmegaSST` |
@@ -1026,6 +1029,12 @@ conveyor belt and the body itself never goes anywhere. `bodyMotion` moves the
 BODY, and then the mask is a different mask every step. Empty is every run
 written before this and not one line of the code below executes.
 
+Both regimes take it. The compressible solver used to refuse `bodyMotion` on
+the grounds that it cut its mask once and kept it; it re-cuts it every step
+now, the same way, and what a moving wall means to a gas with a finite speed of
+sound is written up under **Bodies travel here too** in the compressible
+section.
+
 ### The mesh stops being a constant
 
 The mask used to be cut once in the Mesh constructor and never touched again,
@@ -1427,6 +1436,43 @@ On a closed 0.34 m tube rung by a pressure step the field reports 179 dB and
 749 Hz, the microphone 177 dB and 1398 Hz, against a 500 Hz fundamental. Two
 different estimators of a signal made of bouncing shocks, and neither is lying.
 
+### And you can listen to it
+
+`micAudio=1` writes `microphone1.wav`, `microphone2.wav` and so on next to the
+frames - one mono 16-bit file per microphone, the same trace `microphones.txt`
+holds, in a format anything will play.
+
+Three things happen to the trace on the way in, and each of them matters.
+
+**The mean comes off.** What is in the file is the fluctuation, not the
+absolute pressure. A 101325 Pa DC offset in a signed 16-bit sample is silence
+with a clipped rail on it.
+
+**It is box-filtered down, not decimated.** The run samples every
+`micInterval` steps, which at a compressible time step is usually somewhere
+between 100 kHz and 10 MHz. Throwing away every sample but the 44100th folds
+everything above 22 kHz straight back down into the audible band as a screech
+that was never in the flow. Each output sample is therefore the average of
+every input sample inside its own window, which is a box low-pass and an
+anti-aliasing filter at the same time, and costs one pass. Where a window
+happens to hold no input sample - a rate above the run's own - it interpolates
+between the two nearest instead.
+
+**It is peak-normalised** to 0.9 of full scale, and the run prints the pascal
+value that ended up there, so the file is audible and you can still say what
+it was.
+
+`micAudioSpeed` stretches the timebase without touching the simulation. 1 is
+real time. 0.05 plays it twenty times slower and divides every frequency by
+twenty with it, which is how you hear two milliseconds of shock tube, and how
+you bring a 40 kHz whistle down to where ears are. Two milliseconds at real
+speed is a click; at 0.05 it is 40 ms and it has a pitch.
+
+    "Fluid Solver.exe" regime=compressible caseType=shockTube ^
+                       nx=340 ny=8 Lx=0.34 Ly=0.04 geometryFile=empty ^
+                       "microphones=x=0.05,y=0.02" micInterval=1 ^
+                       micAudio=1 micAudioSpeed=0.05 totalTime=0.02
+
 ### What it costs
 
 On 256x128, an empty domain at Mach 0.6, two cores of a 2.1 GHz Xeon:
@@ -1480,9 +1526,63 @@ The multigrid is not called, so `omega`, `smootherOmega`, `mgIterations`,
 they are part of the argument contract the UI has always sent, and refusing
 them would break every launcher for no gain.
 
+### Bodies travel here too
+
+`bodyMotion` is not incompressible-only any more, and it did not need a
+different grammar: the same `<object>:vx=0.2,omega=45`, the same keyframes, the
+same interpolations, the same `free=1` with a mass. What changes is what a
+moving wall means when the fluid has a finite speed of sound.
+
+The mask is re-cut from the model every step, exactly as the projection solver
+does it, and then two things happen that only matter here.
+
+**The solid ghosts mirror about the body's velocity, not about zero.** A static
+wall reflects the fluid velocity; a moving one reflects the velocity *relative*
+to itself and adds its own back. That single change is the whole of the
+physics: the reconstruction on the fluid side sees a ghost that is moving, the
+pressure at the wall face rises ahead of it and falls behind, and a body that
+moves fast enough makes a wave in front of it that leaves and keeps going.
+Put a microphone downstream of an accelerating body and it will hear it.
+
+**A cell the body has just left is reseeded** from its fluid neighbours -
+density, pressure and composition averaged, velocity set to the body's own,
+because that is what the gas there was doing a moment ago. Without it a newly
+uncovered cell holds whatever the solid fill last wrote, and a state that was
+never a state is exactly the kind of hole this solver falls into.
+
+The force on a free body is the pressure integral over its own faces, one term
+per fluid-solid face, with the arm taken from the body's centre for the torque.
+There is no viscous part because there is no viscous term; at the speeds this
+solver is for, pressure is the force anyway.
+
+The pressure at a wall face is no longer just the pressure of the cell next to
+it. It is that pressure plus `rho*c*(closing speed)`, where the closing speed
+counts the fluid moving toward the wall and the wall moving toward the fluid
+together - the acoustic piston relation, and the first-order Riemann solution
+at a moving wall. For a wall that does not move and a flow that is not running
+into it, the term is zero and this is exactly what 0.9 already did. For a body
+driven at Mach 0.25 through still air it is the whole point: the test measures
+101479 Pa in front of the disc against 99477 Pa behind it, compression ahead
+and rarefaction in the wake, which is what a piston does.
+
+Two things are worth knowing before trusting a number out of this:
+
+- **Mass is not conserved to the last bit near a moving body.** The wall flux
+  still carries no mass, in the grid frame, and the volume the body sweeps is
+  handled by re-cutting the mask and reseeding. That is the standard cheap
+  moving-immersed-boundary arrangement, and the piston term above is a
+  linearisation, so both are right to first order in the wall Mach number. A
+  body moving at a hundredth of the speed of sound will not show it; a piston
+  at Mach 0.5 will.
+- **On a GPU it costs a round trip per step.** The mask, the body velocities
+  and the reseeded cells all live on the host, so a compressible run with
+  moving bodies syncs the fields down and back every step. The run says nothing
+  about it and it is not wrong, only slower - and only when bodies actually
+  move.
+
 ### Keys it refuses
 
-Turbulence, gravity, surface tension, sources, moving bodies and the cavity
+Turbulence, gravity, surface tension, sources and the cavity
 preset are all incompressible-only, and asking for one of them alongside
 `regime=compressible` stops the run before it starts with a sentence saying
 which and why - rather than being quietly ignored, which is the failure mode
@@ -1492,8 +1592,8 @@ infinite by construction.
 
 ### Checked against
 
-`CompressibleTests`, four cases, and three of the four have an exact answer
-rather than a measured one.
+`CompressibleTests`, six cases, and three of them have an exact answer rather
+than a measured one.
 
 **Sod's shock tube against the exact Riemann solution.** Not a table - the
 solver in the test iterates the star pressure and samples the fan, so every one
@@ -1503,12 +1603,30 @@ where a limited second order scheme smears.
 
 **An oblique shock on a 15 degree wedge at Mach 2.5.** The theta-beta-M
 relation fixes the shock angle at 36.9 degrees and Rankine-Hugoniot fixes the
-pressure jump at 2.468; the run gives 2.669, 8% high on a grid with 24 cells
+pressure jump at 2.468; the run gives 2.648, 7% high on a grid with 24 cells
 across the wedge.
 
 **Two gases**, above.
 
 **Both halves of the acoustics**, above.
+
+**A body driven through still gas.** A 0.16 m disc on rails at Mach 0.25 in a
+1 x 0.6 m box. The test checks three things that can each fail on their own:
+the body state in the frame says it travelled what it was told to; the solid
+cells in that same frame have moved with it, so the mask followed the pose
+rather than the pose drifting away from a mask that stayed put; and the gas
+ahead of it is at a higher pressure than the gas behind - 101479 against
+99477 Pa - which is the only one of the three that fails if the wall stops
+being a moving wall and goes back to being a mirror.
+
+**A wav that is a wav.** `micAudio=1` on a short shock tube, and then the file
+is read back byte by byte: RIFF and WAVE and fmt and data where they belong,
+the RIFF length matching the file, 16 bit mono PCM, the sample rate the one
+that was asked for, the block alignment agreeing with the format, the frame
+count matching `totalTime / micAudioSpeed` to within 2%, the peak at 0.9 of
+full scale because that is what peak normalisation means, and the mean inside
+1% of the peak because a wav is a fluctuation and a DC offset in a 16 bit
+sample is silence with a rail on it.
 
 ## Turbulence
 

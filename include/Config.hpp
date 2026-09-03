@@ -341,6 +341,9 @@ struct Config {
     float acousticRef = 2e-5f;
     std::string microphones = "";
     int micInterval = 1;
+    bool micAudio = false;
+    int micAudioRate = 44100;
+    float micAudioSpeed = 1.0f;
 
     // Methods
     void readFromConsole();
@@ -399,6 +402,7 @@ struct Config {
     std::vector<Microphone> resolvedMicrophones() const;
 
     bool listening() const { return !microphones.empty(); }
+    bool recordsAudio() const { return micAudio && !microphones.empty(); }
 
     std::vector<FlowSource> resolvedSources() const;
 
