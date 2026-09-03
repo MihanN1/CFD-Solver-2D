@@ -144,6 +144,7 @@ is not there:
 |---|---|
 | `gravityEnabled` `gravityAccel` `gravityAngle` | `gravityEnabled` |
 | `wallMotion` | `wallMotion` |
+| `bodyMotion` `bodyCoupling` | `bodyMotion` |
 | `profiles` | `profiles` |
 | `extraFields` | `extraFields` |
 | `convection` `limiter` `timeScheme` `gravityMode` | `timeScheme` |
@@ -151,6 +152,8 @@ is not there:
 | `caseType` `lidSpeed` `steadyTolerance` | `caseType` |
 | `phases` `rho1` `nu1` `rho2` `nu2` `phaseInit` … `sources` | `vofScheme` |
 | `mixing` `diffusivity` `surfaceTension` `contactAngle` | `surfaceTension` |
+| `turbulence` `Cs` `turbIntensity` `turbLengthScale` | `turbLengthScale` |
+| `regime` `gamma` `R` `T0` `pInf` `machInlet` … `micInterval` `micAudio` `micAudioRate` `micAudioSpeed` | `machInlet` |
 
 `bc<Side>Speed` is only written when that side is a `movingWall` or the speed is
 not zero. Writing `bcLeftSpeed=0` for an inlet would tell the solver a standstill
@@ -169,6 +172,93 @@ the boundary rows happened to say, which is not what picking a preset means.
 **Stop when steady** is `steadyTolerance`: the run ends early once the largest
 velocity change per second, measured against whatever drives the case, drops
 under it. Zero, the default, runs the whole of **Total time**.
+
+=== BODIES ===
+
+A body selector and a set of rows that edit whichever body it is pointing at,
+rather than one row per body per setting - a table of eight settings across
+however many bodies the mask happens to have does not fit on a screen, and the
+number is not known until the mask is generated.
+
+    BODIES   Body               which one the rows below are about
+             Behaviour          static | drag | slip | travel | free
+             Surface spin       deg/s      \
+             Surface slide X    m/s         > drag: the surface moves, the
+             Surface slide Y    m/s        /  body does not
+             Body velocity X    m/s        \
+             Body velocity Y    m/s         > travel: the body itself moves.
+             Body spin          deg/s      /  Under free, what it starts with
+             Body mass          kg/m       \
+             Body density       kg/m3       > free only
+             Pinned             which degrees of freedom are held
+             Body motion        text, the solver's grammar
+             Coupling           weak | added | strong
+             Collisions         off, bodies pass through each other
+             Bounciness         how much of the closing speed survives
+             Report forces      work the force out for set paths too
+
+The two text rows are the truth and the rows above them are a way of writing
+into one entry of each - exactly as the brush is a way of writing into the
+sources row. Pick a body and the rows read that body's entry back out of the
+text; change a row and it writes that entry back. Editing the text by hand does
+the same thing, and `@<seconds>` keyframes can only be written there, because a
+timetable is not a slider.
+
+**Collisions** is off by default and that is deliberate: turning it on changes
+the answer, and every run written before this branch had bodies passing
+through each other. On, a body that would run into another one or into the
+domain edge bounces instead, and **Bounciness** is how much of the closing
+speed comes back - 0 stops dead, 1 rebounds at the speed it arrived.
+
+**Report forces** works the fluid force out for bodies whose path you set as
+well. It never changes where they go; a set path is a set path. It only puts
+the force in the step line so you can read what the fluid was doing to the
+body - useful just before you release it, and for a drag coefficient. Free
+bodies always have it computed, because that is the thing that moves them.
+
+=== TURBULENCE ===
+
+    TURBULENCE  Turbulence model        none | smagorinsky | kOmegaSST
+                Smagorinsky Cs          the one constant smagorinsky has
+                Turbulence intensity    fraction of the inlet speed
+                Turbulence length       m, the biggest eddy coming in
+
+Four rows, and three of them are read by one model each. `Cs` is only sent for
+`smagorinsky`; the two inlet rows are only sent for `kOmegaSST`; `none` sends
+the model name and nothing else, so a run with the model off puts exactly one
+extra key on the command line and changes nothing about what the solver does.
+
+The whole group is held back on finding `turbLengthScale` in the executable,
+like every block since 0.2. Point it at a 0.7 solver and none of these four
+rows reach the command line.
+
+Refused before the run rather than after: a `Cs` of zero or above one, an
+intensity above one - an inlet more turbulent than it is moving - and a
+negative length scale.
+
+`nuT`, `wallDistance` and `strain` are `extraFields` like any other and show up
+in the **Field** button once the solver has been asked to write them. `k` and
+`omega` arrive on their own in every frame of a `kOmegaSST` run, because the
+solver needs them back to continue.
+
+One trap the UI cannot fix for you: **object numbers come from the mask, not
+from the order the models are listed in.** The flood fill walks the grid in
+scan order, so of two shapes side by side either can end up as number 1. The
+solver prints the mapping with the mesh, before anything runs, and that is what
+the Body row is pointing at.
+
+**Behaviour** is the one row that decides which of the two strings an entry
+goes into. `drag` and `slip` are `wallMotion` - the surface moves and the body
+stays put. `travel` and `free` are `bodyMotion` - the body itself goes
+somewhere, and the solver cuts its outline again every step.
+
+Held back on finding `bodyMotion` in the executable, like every block since
+0.2. Point it at a 0.6 solver and the whole group is left off the command line.
+
+The validator refuses a body told to travel through an empty domain, because
+moving a body means cutting its outline again and an empty domain has no
+outline to cut. Better a sentence now than a run that starts, prints a refusal
+of its own and then sits perfectly still for ten minutes.
 
 **Phases** turns the FLUIDS group into two fluids with their own densities and
 viscosities, and the setup view into something you can paint on. `phases=1`
@@ -232,15 +322,101 @@ with a cylinder sitting in the middle of it.
 ## Result fields
 
 A frame carries pressure, the solid mask and velocity. Anything else the solver
-was asked to write - `vorticity`, `divergence`, `speed`, `objectId` - is read
-into a registry keyed by the name the frame used, and the **Field** button walks
-whatever turned up and back round to pressure. Nothing in the UI has a list of
-which fields exist, so a field the solver learns to write later shows up without
-this project changing.
+was asked to write - `vorticity`, `divergence`, `speed`, `objectId`, `phase`,
+`nuT`, `k`, `omega`, `wallDistance`, `strain` - is read into a registry keyed by
+the name the frame used, and the **Field** button walks whatever turned up and
+back round to pressure. Nothing in the UI has a list of which fields exist, so a
+field the solver learns to write later shows up without this project changing.
+
+Where a scalar sits in the file is the writer's business, and it took a while to
+admit it. The reader used to refuse any array it did not recognise until it had
+seen all three of pressure, mask and velocity - and the solver writes the phase
+fraction between the pressure and the mask, with `k` and `omega` beside it. So
+every two-fluid frame ever written was rejected on the way in with *Unknown
+scalar array before required arrays: phase*. The order check is gone; a frame
+that never provides the three is still rejected, at the end of the parse where
+that can actually be known.
 
 The three that were always there stay named members rather than map entries:
 they are read on every pixel of every redraw and have no business going through
 a hash lookup to get there.
+
+### The panel changes shape with the regime
+
+    GAS / COMPRESSIBLE  Regime              incompressible | compressible
+                        gamma               \
+                        Gas constant R       > the gas
+                        Temperature T0      /
+                        Ambient pressure
+                        Inlet Mach          not m/s: the ratio is the physics
+                        gamma, gas 2        \  two phases only
+                        R, gas 2             > two gases rather than
+                        Species mode        /   two liquids
+    ACOUSTICS           Acoustic fields     SPL, pitch and p' on the grid
+                        Acoustic window     how far back the mean looks
+                        0 dB reference      2e-5 Pa is the usual one
+                        Microphones         x=0.5,y=0.2;... - the accurate half
+                        Mic interval        steps between samples
+                        Write .wav          one file per microphone
+                        Audio rate          44100 is what everything plays
+                        Audio speed         0.05 plays it twenty times slower
+
+The body rows stay on the panel in either regime. They used to be refused
+alongside `regime=compressible` because the solver cut its mask once and kept
+it; it re-cuts it every step now, so a body travels through a compressible run
+the same way it travels through an incompressible one and the UI stopped
+arguing about it.
+
+Picking `compressible` does not grey the pressure-solve rows out, it takes them
+off the panel: viscosity, density, the two fluids, the VOF scheme, surface
+tension, sources, gravity, the whole turbulence group and all five multigrid
+rows go, and the gas rows come in. Picking `incompressible` puts them all back
+exactly as they were - a hidden row keeps its value, it is only not shown and
+not sent.
+
+Rows inside a group come and go the same way. `gamma, gas 2` and `Species mode`
+appear at two phases and not before; `Acoustic window` and `0 dB reference`
+appear once there is something listening; `Mic interval` and `Write .wav`
+appear once there is a microphone, and `Audio rate` and `Audio speed` only
+once the wav is actually asked for. And `Lid speed`, which has been sitting there since 0.4 doing
+nothing for every case that is not a cavity, now appears only for the cavity.
+
+The mechanics: the panel is one list laid out by walking it, so hiding a row is
+a matter of not advancing the cursor for it and parking it off screen, and a
+group whose rows are all hidden loses its header with them rather than leaving
+a title standing over nothing. Which rows are hidden is a function of five
+other rows, so rather than hang a relayout off every path that can change one
+of them, the signature of those five is read once a frame and the layout redone
+when it moves.
+
+### The preview is on the solver's grid, not on a better one
+
+The UI cuts the section itself, writes it out as `section-adapter.obj`, and
+then compares the mask the solver rasterised out of that file against the one
+it drew for the preview. They used to disagree, by three cells out of 2500, on
+a cube.
+
+The solver keeps its grid spacing in `float`: `dx = float(Lx)/nx`. The preview
+computed it in `double`. For `Lx = 1, nx = 50` that is 0.019999999552965164
+against 0.02, and by `i = 30` the two disagree about where the cell centre is
+by a part in 10^8.
+
+That is nothing at all right up until a face of the model lands on a cell
+boundary, which for anything axis aligned it does on purpose. Then the four
+corner cells of the rectangle sit at exactly one cell circumradius from the
+outline - the distance at which the rasteriser decides a cell is on the
+boundary - and a part in 10^8 is the whole difference between a solid cell and
+an empty one.
+
+So the preview now divides in `float` too. Being more accurate than the thing
+you are previewing is not an improvement.
+
+The answer this produces is not symmetrical: `float(1)/50` is a hair UNDER
+0.02, so a cell centre drifts towards the origin as its index grows, and the
+far corners land just inside the circumradius while the near ones land just
+outside. Three corners solid, one not. It looks like a bug and it is the
+solver's own answer, which is the only answer a preview is allowed to have.
+GeometryProcessorTests pins all four.
 
 ## Frame loading
 
@@ -265,11 +441,56 @@ Enable `BUILD_TESTING` in CMake GUI if wanted, then build the test targets and r
 CTest. `SolverCompatibilityTests` is added only when `CFD_SOLVER_EXE` points to an
 existing solver executable.
 
+## Keyboard
+
+The window used to answer to the mouse and nothing else, which is fine until
+you have typed a number in and want it back.
+
+| | |
+|---|---|
+| `Ctrl+Z` | undo |
+| `Ctrl+Y`, `Ctrl+Shift+Z` | redo |
+| `Ctrl+C` | copy the focused row's value; with nothing focused, the whole configuration |
+| `Ctrl+X` | copy it and put the row back to its default |
+| `Ctrl+V` | paste into the focused row; a whole configuration if that is what the clipboard holds |
+| `Ctrl+F` | find a parameter |
+| `Ctrl+S`, `Ctrl+O` | save and load a `.cfdui` |
+
+Inside a value box `Ctrl+C`, `Ctrl+X` and `Ctrl+V` work on the text being
+typed rather than on the row, and `Ctrl+A` clears it.
+
+**Undo is one stack over the whole setup state** - every slider, every text
+row, the painted field and the invert flag - rather than one stack per widget.
+A snapshot goes on before anything that changes a value: grabbing a slider,
+committing a typed number, a step button, a paint stroke, a paste, Reset
+defaults, loading a file, and every keyframe the Layout view drops. The paint
+Undo button is the same stack, so undoing a brush stroke and undoing a slider
+are the same key. Consecutive identical states collapse, so holding a slider
+still still costs one entry, and the stack is capped at 64.
+
+**`Ctrl+F` filters rather than jumps.** Typing hides every row whose label and
+whose solver key both fail to contain what you typed, across all groups and
+regardless of the tab, so `mach`, `omp` or `wav` leaves the panel holding two
+or three rows. Enter keeps the filter and focuses the first match; Escape
+clears it. While a filter is up the tab strip is replaced by the search box,
+because a tab and a filter fighting over which rows are visible is a bug
+waiting to be reported.
+
 ## Parameter panel
 
 The setup parameter panel is one scrollable list. It contains all current
 solver-facing numerical controls rather than hiding the multigrid/timestep
 controls on a separate Basic/Advanced page.
+
+**A strip of tabs sits above it**: All, Flow, Shape, Grid, Run. They are not a
+different panel - they are the same list with the groups that do not belong to
+the tab hidden, exactly the mechanism the regime already uses - so a row keeps
+its value, its scroll position and its place in the `.cfdui` file when it is
+not on screen. `All` is the old behaviour and is still the default.
+
+Rows are also easier to read down: they alternate a faint band, the row the
+keyboard is acting on is filled and has an accent edge down its left side, and
+clicking anywhere on a row focuses it.
 
 - Mouse wheel over the left parameter panel scrolls the controls.
 - The visible scrollbar can be dragged or clicked.
@@ -291,6 +512,42 @@ controls on a separate Basic/Advanced page.
 - `outputDir`, `geometryFile`, transformed slice arguments, and `invertSection`
   are generated from the GUI workflow rather than exposed as ordinary sliders.
 
+
+## Layout: picking bodies off the screen
+
+The BODIES group could always describe a body's motion; it could never point
+at one. **Layout**, next to Paint in the setup viewport, draws the domain as
+the solver will see it - the section rasterised onto the run's own grid, flood
+filled into the same 8-connected objects the solver numbers, in the same scan
+order, so the number under the cursor is the number `bodyMotion` means.
+
+- **Click a body** to select it. That sets the Body row in the panel too, so
+  the existing mass, pins and coupling controls follow the selection.
+- **Drag it** to place it, **right-drag** or **Q**/**E** to turn it.
+- **K** drops a keyframe at the time cursor. **Delete** removes the one under
+  the cursor. **Tab** cycles bodies, **,** and **.** step the cursor, **I**
+  cycles the interpolation.
+- The timeline under the canvas carries a tick per keyframe for the selected
+  body, and the canvas draws the path it will take with a dot at each pose.
+
+What it writes is the interesting part. A keyframe in a user's head is a
+*pose*: this body, here, at this moment. `bodyMotion` is *velocities*. So the
+UI keeps the poses in its own row, `uiBodyTrack` - `@t=..,x=..,y=..,rot=..`
+per keyframe, per object, saved in the `.cfdui` and never sent anywhere - and
+every time it changes, `bodyMotion` is rewritten from it: each consecutive pair
+of poses becomes the constant velocity that carries the body from one to the
+other, plus a final keyframe of zeroes so it stops rather than sailing on.
+`interp=` and `ease=` ride along on the pose that opens each segment.
+
+Editing `bodyMotion` by hand still works and still wins - it is what is sent.
+It just means the Layout view no longer knows where the body is supposed to be,
+because the poses it was drawing are no longer the ones the solver will follow.
+
+The conversion is its own translation unit, `BodyTrack.cpp`, so it is testable
+without a window: `BodyTrackTests` covers the round trip, the sort, the
+replacement of a keyframe at the same instant, the interpolation surviving the
+trip to `bodyMotion`, the clamp outside the track, and two poses at the same
+instant not turning into a division by zero.
 
 ## Current UI revision — 2026-08-21
 

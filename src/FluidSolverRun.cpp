@@ -151,6 +151,9 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                              std::string& error) {
     error.clear();
 
+    const bool gas = config.supportsCompressible &&
+                     config.regime == "compressible";
+
     if (!validateGrid(config, error) ||
         !requirePositive("Lx", config.Lx, error) ||
         !requirePositive("Ly", config.Ly, error) ||
@@ -206,6 +209,118 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
     if (config.wallMotion.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "wallMotion must not contain CR or LF");
     }
+    if (config.bodyMotion.find_first_of("\r\n") != std::string::npos) {
+        return fail(error, "bodyMotion must not contain CR or LF");
+    }
+    if (config.supportsBodyMotion && !config.bodyMotion.empty()) {
+        if (config.bodyCoupling != "weak" && config.bodyCoupling != "added" &&
+            config.bodyCoupling != "strong") {
+            return fail(error, "bodyCoupling is weak, added or strong");
+        }
+        if (!(config.bodyRestitution >= 0.0) ||
+            !(config.bodyRestitution <= 1.0)) {
+            return fail(error, "bodyRestitution is how much of the closing "
+                               "speed survives a bounce, so it lives between "
+                               "0 and 1");
+        }
+
+        if (config.geometryFile == "empty" && config.profiles.empty()) {
+            return fail(error, "bodyMotion needs a model to move: an empty "
+                               "domain has no body in it, and a body has to "
+                               "have its outline cut again wherever it goes");
+        }
+    }
+    if (config.supportsCompressible) {
+        if (config.regime != "incompressible" &&
+            config.regime != "compressible") {
+            return fail(error, "regime is incompressible or compressible");
+        }
+    }
+    if (gas) {
+        if (!(config.gamma > 1.0) || !(config.gamma <= 3.0))
+            return fail(error, "gamma is the ratio of specific heats and lives "
+                               "above 1: 1.4 for air, 1.667 for helium");
+        if (!(config.gasConstant > 0.0) || !std::isfinite(config.gasConstant))
+            return fail(error, "R has to be a positive number of J/(kg K)");
+        if (!(config.T0 > 0.0) || !std::isfinite(config.T0))
+            return fail(error, "T0 is in kelvin, so it cannot be zero or "
+                               "below");
+        if (!(config.pInf > 0.0) || !std::isfinite(config.pInf))
+            return fail(error, "pInf has to be a positive pressure");
+        if (!(config.machInlet >= 0.0) || !(config.machInlet <= 20.0))
+            return fail(error, "machInlet is a Mach number between 0 and 20");
+        if (config.speciesMode != "active" && config.speciesMode != "passive")
+            return fail(error, "speciesMode is active or passive");
+        if (!(config.acousticWindow > 0.0) ||
+            !std::isfinite(config.acousticWindow))
+            return fail(error, "acousticWindow is a positive number of "
+                               "seconds");
+        if (!(config.acousticRef > 0.0) || !std::isfinite(config.acousticRef))
+            return fail(error, "the 0 dB reference has to be a positive "
+                               "pressure");
+        if (config.micInterval < 1)
+            return fail(error, "micInterval is at least one step");
+        if (config.micAudioRate < 1000 || config.micAudioRate > 384000)
+            return fail(error, "micAudioRate is between 1000 and 384000 Hz");
+        if (!(config.micAudioSpeed > 0.0) ||
+            !std::isfinite(config.micAudioSpeed))
+            return fail(error, "micAudioSpeed is a positive multiple of real "
+                               "time: 1 is real time, 0.05 is twenty times "
+                               "slower");
+        if (config.micAudio && config.microphones.empty())
+            return fail(error, "micAudio writes what the microphones heard, "
+                               "so it needs at least one microphone");
+        if (config.microphones.find_first_of("\r\n") != std::string::npos)
+            return fail(error, "microphones must not contain CR or LF");
+        if (config.turbulence != "none")
+            return fail(error, "the compressible solver is inviscid Euler and "
+                               "has no viscous term for an eddy viscosity to "
+                               "be added to. Set the turbulence model to none, "
+                               "or the regime back to incompressible");
+        if (config.gravityEnabled)
+            return fail(error, "gravity is not written for the compressible "
+                               "solver: it would be a source term in both the "
+                               "momentum and the energy, and neither is there");
+        if (config.surfaceTension > 0.0)
+            return fail(error, "two gases share a composition rather than an "
+                               "interface, so there is no surface for tension "
+                               "to pull on");
+        if (!config.sources.empty())
+            return fail(error, "a source needs a pressure solve to make room "
+                               "for what it pushes out, and the compressible "
+                               "solver has not got one");
+        if (config.caseType == "cavity")
+            return fail(error, "the cavity is driven by a sliding lid, which "
+                               "is a low speed case by definition. Use channel "
+                               "or shockTube");
+    } else if (config.acousticFields || !config.microphones.empty()) {
+        return fail(error, "acoustics need the compressible solver: the "
+                           "projection method makes the speed of sound "
+                           "infinite, so there is nothing travelling to "
+                           "listen to");
+    }
+    if (config.supportsTurbulence && config.turbulence != "none") {
+        if (config.turbulence != "smagorinsky" &&
+            config.turbulence != "kOmegaSST") {
+            return fail(error, "turbulence is none, smagorinsky or kOmegaSST");
+        }
+        if (!(config.turbulenceCs > 0.0) || !(config.turbulenceCs <= 1.0)) {
+            return fail(error, "Cs is the Smagorinsky constant and lives "
+                               "between 0 and 1; 0.17 is the value it was "
+                               "derived at and 0.1 is what channels want");
+        }
+        if (!(config.turbIntensity >= 0.0) ||
+            !(config.turbIntensity <= 1.0)) {
+            return fail(error, "turbIntensity is a fraction of the inlet "
+                               "speed, so it lives between 0 and 1: 0.05 is "
+                               "five percent");
+        }
+        if (!(config.turbLengthScale >= 0.0) ||
+            !std::isfinite(config.turbLengthScale)) {
+            return fail(error, "turbLengthScale cannot be negative; zero lets "
+                               "the solver take a tenth of the domain height");
+        }
+    }
     if (config.profiles.find_first_of("\r\n") != std::string::npos) {
         return fail(error, "profiles must not contain CR or LF");
     }
@@ -241,7 +356,7 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                                    "fractions of the domain, so they live "
                                    "between 0 and 1");
         }
-        if (config.supportsTension) {
+        if (config.supportsTension && !gas) {
             if (config.mixing != "immiscible" && config.mixing != "miscible")
                 return fail(error, "mixing is immiscible or miscible");
             if (!(config.diffusivity >= 0.0) ||
@@ -259,7 +374,7 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                                    "tension to pull on: set surfaceTension to "
                                    "zero, or make them immiscible");
         }
-        if (!config.gravityEnabled)
+        if (!config.gravityEnabled && !gas)
             return fail(error, "two fluids with gravity off never separate: "
                                "the density difference is the only thing that "
                                "would move them, and nothing here reads it. "
@@ -412,6 +527,72 @@ bool buildFluidSolverArguments(
     }
     if (config.supportsWallMotion) {
         arguments.push_back("wallMotion=" + config.wallMotion);
+    }
+    if (config.supportsBodyMotion) {
+        arguments.push_back("bodyMotion=" + config.bodyMotion);
+        if (!config.bodyMotion.empty()) {
+            arguments.push_back("bodyCoupling=" + config.bodyCoupling);
+            arguments.push_back(
+                "bodyCollisions=" + std::string(config.bodyCollisions ? "1" : "0"));
+            if (config.bodyCollisions)
+                arguments.push_back("bodyRestitution=" +
+                                    serializeDouble(config.bodyRestitution));
+            arguments.push_back(
+                "bodyForceReport=" +
+                std::string(config.bodyForceReport ? "1" : "0"));
+        }
+    }
+    const bool gasRun = config.supportsCompressible &&
+                        config.regime == "compressible";
+    if (config.supportsCompressible) {
+        arguments.push_back("regime=" + config.regime);
+        if (gasRun) {
+            arguments.push_back("gamma=" + serializeDouble(config.gamma));
+            arguments.push_back("R=" + serializeDouble(config.gasConstant));
+            arguments.push_back("T0=" + serializeDouble(config.T0));
+            arguments.push_back("pInf=" + serializeDouble(config.pInf));
+            arguments.push_back("machInlet=" +
+                                serializeDouble(config.machInlet));
+            if (config.phases > 1) {
+                arguments.push_back("gamma2=" + serializeDouble(config.gamma2));
+                arguments.push_back("R2=" +
+                                    serializeDouble(config.gasConstant2));
+                arguments.push_back("speciesMode=" + config.speciesMode);
+            }
+            arguments.push_back(
+                "acousticFields=" +
+                std::string(config.acousticFields ? "1" : "0"));
+            if (config.acousticFields || !config.microphones.empty()) {
+                arguments.push_back("acousticWindow=" +
+                                    serializeDouble(config.acousticWindow));
+                arguments.push_back("acousticRef=" +
+                                    serializeDouble(config.acousticRef));
+            }
+            arguments.push_back("microphones=" + config.microphones);
+            if (!config.microphones.empty()) {
+                arguments.push_back("micInterval=" +
+                                    std::to_string(config.micInterval));
+                arguments.push_back("micAudio=" +
+                                    std::string(config.micAudio ? "1" : "0"));
+                if (config.micAudio) {
+                    arguments.push_back("micAudioRate=" +
+                                        std::to_string(config.micAudioRate));
+                    arguments.push_back("micAudioSpeed=" +
+                                        serializeDouble(config.micAudioSpeed));
+                }
+            }
+        }
+    }
+    if (config.supportsTurbulence && !gasRun) {
+        arguments.push_back("turbulence=" + config.turbulence);
+        if (config.turbulence == "smagorinsky")
+            arguments.push_back("Cs=" + serializeDouble(config.turbulenceCs));
+        if (config.turbulence == "kOmegaSST") {
+            arguments.push_back("turbIntensity=" +
+                                serializeDouble(config.turbIntensity));
+            arguments.push_back("turbLengthScale=" +
+                                serializeDouble(config.turbLengthScale));
+        }
     }
     if (config.supportsProfiles && !config.profiles.empty()) {
         arguments.push_back("profiles=" + config.profiles);

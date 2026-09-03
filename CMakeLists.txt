@@ -102,6 +102,7 @@ if(MSVC)
 endif()
 
 add_library(mask_ui_core STATIC
+    src/BodyTrack.cpp
     src/ExplorerTarget.cpp
     src/FluidSolverRun.cpp
     src/GeometryProcessor.cpp
@@ -323,6 +324,7 @@ if(BUILD_TESTING)
         SectionAdapterTests
         GeometryProcessorTests
         ContinuationTests
+        BodyTrackTests
     )
         add_mask_ui_test(${MASK_UI_TEST})
     endforeach()

@@ -3,6 +3,7 @@
 #include "ExplorerTarget.hpp"
 #include "FluidSolverRun.hpp"
 #include "NumericInput.hpp"
+#include "BodyTrack.hpp"
 #include "GeometryProcessor.hpp"
 #include "SectionAdapter.hpp"
 #include "TrayIcon.hpp"
@@ -10,6 +11,7 @@
 #include "VelocityOverlay.hpp"
 
 #include <SFML/Graphics.hpp>
+#include <SFML/Window/Clipboard.hpp>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -67,7 +69,9 @@ namespace maskui {
 namespace {
 
 constexpr float LEFT_PANEL_WIDTH = 330.0f;
-constexpr float PARAMETER_TOP = 122.0f;
+constexpr float PARAMETER_TOP = 156.0f;
+constexpr float PARAMETER_STRIP_TOP = 104.0f;
+constexpr float PARAMETER_STRIP_HEIGHT = 28.0f;
 constexpr float PARAMETER_BOTTOM_MARGIN = 126.0f;
 constexpr float PARAMETER_ROW_HEIGHT = 44.0f;
 constexpr float PARAMETER_GROUP_HEIGHT = 25.0f;
@@ -864,6 +868,27 @@ enum ParameterIndex : std::size_t {
     GravityAccel,
     GravityAngle,
     GravityMode,
+    RegimeKind,
+    Gamma1,
+    GasConstant1,
+    Gamma2,
+    GasConstant2,
+    Temperature0,
+    AmbientPressure,
+    MachInlet,
+    SpeciesModeRow,
+    AcousticFields,
+    AcousticWindow,
+    AcousticRef,
+    MicrophoneLine,
+    MicInterval,
+    MicAudio,
+    MicAudioRate,
+    MicAudioSpeed,
+    TurbulenceKindRow,
+    SmagorinskyCs,
+    TurbIntensity,
+    TurbLengthScale,
     SliceX,
     SliceZ,
     SliceRotation,
@@ -882,6 +907,23 @@ enum ParameterIndex : std::size_t {
     InletTo,
     InletProfileKind,
     WallMotionLine,
+    BodySelect,
+    BodyBehaviour,
+    BodyRotation,
+    BodySlideX,
+    BodySlideY,
+    BodyVelocityX,
+    BodyVelocityY,
+    BodySpin,
+    BodyMass,
+    BodyDensity,
+    BodyPins,
+    BodyMotionLine,
+    BodyTrackLine,
+    BodyCouplingKind,
+    BodyCollisions,
+    BodyRestitution,
+    BodyForceReport,
     DomainX,
     DomainY,
     CellsX,
@@ -915,12 +957,21 @@ struct ParameterGroupInfo {
     const char* label;
 };
 
-constexpr std::array<ParameterGroupInfo, 12> PARAMETER_GROUPS{{
+constexpr std::array<ParameterGroupInfo, 16> PARAMETER_GROUPS{{
+constexpr std::array<ParameterGroupInfo, 16> PARAMETER_GROUPS{{
     {WindSpeed, "FLOW"},
     {Phases, "FLUIDS"},
+    {RegimeKind, "GAS / COMPRESSIBLE"},
+    {AcousticFields, "ACOUSTICS"},
+    {TurbulenceKindRow, "TURBULENCE"},
+    {RegimeKind, "GAS / COMPRESSIBLE"},
+    {AcousticFields, "ACOUSTICS"},
+    {TurbulenceKindRow, "TURBULENCE"},
     {SliceX, "GEOMETRY"},
     {CaseKind, "BOUNDARIES"},
     {WallMotionLine, "WALLS"},
+    {BodySelect, "BODIES"},
+    {BodySelect, "BODIES"},
     {DomainX, "DOMAIN / GRID"},
     {Cfl, "TIME"},
     {Convection, "NUMERICS"},
@@ -930,6 +981,19 @@ constexpr std::array<ParameterGroupInfo, 12> PARAMETER_GROUPS{{
     {CacheMegabytes, "UI"}
 }};
 
+struct ParameterTabInfo {
+    const char* label;
+    std::array<int, 6> groups;
+};
+
+constexpr std::array<ParameterTabInfo, 5> PARAMETER_TABS{{
+    {"All",   {{-1, -1, -1, -1, -1, -1}}},
+    {"Flow",  {{0, 1, 2, 3, 4, -1}}},
+    {"Shape", {{5, 6, 7, 8, -1, -1}}},
+    {"Grid",  {{9, 10, 11, 12, -1, -1}}},
+    {"Run",   {{13, 14, 15, -1, -1, -1}}}
+}};
+
 const char* parameterKey(std::size_t index) {
     static constexpr std::array<const char*, ParameterCount> keys{{
         "U0", "nu", "ro",
@@ -937,12 +1001,22 @@ const char* parameterKey(std::size_t index) {
         "phaseInit", "phaseLevel", "phaseX", "phaseY", "vofScheme",
         "mixing", "diffusivity", "surfaceTension", "contactAngle", "sources",
         "gravityEnabled", "gravityAccel", "gravityAngle", "gravityMode",
+        "regime", "gamma", "R", "gamma2", "R2", "T0", "pInf", "machInlet",
+        "speciesMode",
+        "acousticFields", "acousticWindow", "acousticRef", "microphones",
+        "micInterval", "micAudio", "micAudioRate", "micAudioSpeed",
+        "turbulence", "Cs", "turbIntensity", "turbLengthScale",
         "sliceAngleX", "sliceAngleZ", "sliceRotation", "profiles",
         "caseType", "lidSpeed",
         "bcLeft", "bcRight", "bcBottom", "bcTop",
         "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed",
         "inletFrom", "inletTo", "inletProfile",
         "wallMotion",
+        "uiBody", "uiBodyBehaviour", "uiBodyRot", "uiBodySlideX",
+        "uiBodySlideY", "uiBodyVx", "uiBodyVy", "uiBodySpin",
+        "uiBodyMass", "uiBodyDensity", "uiBodyPins",
+        "bodyMotion", "uiBodyTrack", "bodyCoupling",
+        "bodyCollisions", "bodyRestitution", "bodyForceReport",
         "Lx", "Ly", "nx", "ny",
         "CFL", "totalTime", "steadyTolerance", "addTime",
         "dtUpdateInterval", "dtSafety",
@@ -996,6 +1070,46 @@ std::string parameterHelp(std::size_t index) {
         return "gravityAccel: magnitude of that body force in m/s2. 9.81 is Earth.";
     case GravityAngle:
         return "gravityAngle: direction in degrees, measured clockwise from straight down.";
+    case RegimeKind:
+        return "incompressible is the projection solver and every run before this one: density is a constant, the pressure comes out of a Poisson solve, and the speed of sound is infinite. compressible is a second solver entirely - density is one of the unknowns, there is no pressure solve at all, and sound travels at a finite speed, which is what lets a shock exist and what lets the run have something to listen to. Picking it puts the multigrid rows out of use and brings the gas rows in.";
+    case Gamma1:
+    case GasConstant1:
+        return "The gas. gamma is the ratio of specific heats - 1.4 for air, 1.667 for helium or argon, about 1.3 for steam - and R is the specific gas constant, 287 for air and 2077 for helium. Together they fix the speed of sound: sqrt(gamma*R*T).";
+    case Gamma2:
+    case GasConstant2:
+        return "The second gas, read only at two phases. Helium in air is the demonstration everybody knows: same pressure, same temperature, sound travels nearly three times faster through it.";
+    case Temperature0:
+        return "T0: the reference temperature in kelvin. The inlet and the initial field are both built from it and the ambient pressure through the gas law, so it sets the density and the speed of sound of the whole run.";
+    case AmbientPressure:
+        return "pInf: the ambient pressure in pascals. 101325 is one atmosphere. It is what an outlet holds the flow to while it is subsonic, and what the initial field is built at.";
+    case MachInlet:
+        return "How fast the inlet blows, as a multiple of the speed of sound there rather than in m/s - because in a compressible run that ratio is the number that decides the physics. Under 1 the boundary still hears the domain and holds the pressure; over 1 nothing travels back out and the whole state is imposed.";
+    case SpeciesModeRow:
+        return "active lets the composition set gamma and R, so the speed of sound, the temperature and every wave speed follow the mixture. passive carries the fraction along and nothing else, with the properties frozen at the first gas - useful only for showing what the thermodynamics is worth, and the solver says so in its own log when it is on.";
+    case AcousticFields:
+        return "Writes the sound out as fields on the grid: the pressure fluctuation, its level in dB and a pitch in Hz for every cell. It costs four arrays and a running average per step, and it is off by default because most runs are not about the noise.";
+    case AcousticWindow:
+        return "How far back the running average looks, in seconds. It has to cover several periods of whatever you are listening for, and it is what separates the sound from the flow: anything slower than this window counts as the flow and is subtracted off.";
+    case AcousticRef:
+        return "The pressure that counts as 0 dB. 2e-5 Pa is the human hearing threshold and what SPL is always quoted against; 1 Pa is the other common choice and shifts every number by 94 dB.";
+    case MicrophoneLine:
+        return "Points that record the pressure every few steps: x=0.5,y=0.2;x=1,y=0.5 in metres. At the end the run writes microphones.txt next to the frames with the whole trace and, for each point, a level and a peak frequency found by scanning the spectrum. This is the accurate half of the acoustics; the fields are the half you can look at.";
+    case MicAudio:
+        return "Writes what each microphone heard as microphone1.wav, microphone2.wav and so on, next to the frames, so you can play it instead of reading a column of numbers. The trace is de-meaned, box-filtered down to the file's rate rather than plain decimated - dropping samples out of a megahertz signal folds everything above the new Nyquist back into the audible band as a screech that was never there - and peak-normalised, with the pascal value that ended up at full scale printed when the run stops.";
+    case MicAudioRate:
+        return "Sample rate of those .wav files. 44100 is what everything plays. There is nothing to gain above twice the highest frequency in the run, and the run's own ceiling is 1/(micInterval*dt).";
+    case MicAudioSpeed:
+        return "Stretches the timebase of the .wav. 1 is real time. 0.05 plays it twenty times slower, which drops every frequency by twenty as well - that is how you hear something that happened in two milliseconds, or how you bring a 40 kHz whistle down to where your ears are. It does not change the simulation, only the file.";
+    case MicInterval:
+        return "How many steps pass between microphone samples. 1 is every step and sets the sampling rate to 1/dt, which is the highest frequency the run can resolve at all. Raising it makes the file smaller and the ceiling lower.";
+    case TurbulenceKindRow:
+        return "none solves what is actually on the grid and nothing else, which is right until the grid stops being able to hold the smallest eddy that matters. smagorinsky is a large eddy model: it adds the viscosity the eddies smaller than a cell would have had, and it wants a grid fine enough that they really are small. kOmegaSST carries two more transported fields and models all of the turbulence rather than the small end of it, which is what a Reynolds number in the millions on a grid you can afford needs.";
+    case SmagorinskyCs:
+        return "Cs: the one constant Smagorinsky has. 0.17 is what it comes out at for isotropic turbulence, 0.1 is what channels and anything with a wall in it want, and near a wall it gets damped down from there anyway.";
+    case TurbIntensity:
+        return "How turbulent the inlet is, as a fraction of its speed. 0.01 is a wind tunnel, 0.05 is a pipe, 0.1 is behind something. Only kOmegaSST reads it: it sets k = 1.5*(I*U)^2 coming in.";
+    case TurbLengthScale:
+        return "The size of the biggest eddy coming in through the inlet, in metres. A tenth of the pipe or the duct is the usual guess, and zero lets the solver take a tenth of Ly. Only kOmegaSST reads it: with the intensity above it sets omega coming in.";
     case SliceX:
     case SliceZ:
     case SliceRotation:
@@ -1025,6 +1139,35 @@ std::string parameterHelp(std::size_t index) {
         return "Cuts the inlet down to a band of its side, as fractions measured from the low end. The rest of that side becomes a wall.";
     case InletProfileKind:
         return "uniform is a flat inlet, parabolic bends it into a parabola carrying the same flow rate.";
+    case BodySelect:
+        return "Which body the rows under it are about. The numbers are the ones the solver prints for the mask, counted the same way - flood filled in scan order. The two text rows at the bottom are what is actually sent; these rows write into them.";
+    case BodyBehaviour:
+        return "static leaves the body alone. drag holds the fluid and pulls it along without the body going anywhere - that is wallMotion. slip lets the fluid past and exerts no drag. travel moves the body itself along a path you give. free lets go of it and the flow decides where it goes.";
+    case BodyRotation:
+    case BodySlideX:
+    case BodySlideY:
+        return "What a dragging surface does to the fluid touching it. The body itself does not move: rot spins the surface about its own centre, slideX and slideY run it along like a conveyor belt.";
+    case BodyVelocityX:
+    case BodyVelocityY:
+    case BodySpin:
+        return "How the body itself moves. Under travel this is the path; under free it is the velocity it is let go with, and the flow takes it from there.";
+    case BodyMass:
+    case BodyDensity:
+        return "What a free body weighs, per metre of depth because this is a 2D slice. Give it a mass, or a density and let the area do the arithmetic - whichever you set last wins. A body much lighter than the fluid it displaces wants coupling = strong.";
+    case BodyPins:
+        return "Degrees of freedom held still while the rest are free. A cylinder free to spin but not to drift is x and y pinned; a body free to fall straight down is spin pinned.";
+    case BodyTrackLine:
+        return "The keyframed poses the Layout view writes: one @t=..,x=..,y=..,rot=..,interp=..,ease=.. block per keyframe, per object. It is the UI's own record, it never reaches the solver, and every time it changes the Body motion row above is rewritten from it - each pair of poses becomes the velocity that carries the body from one to the next. Editing Body motion by hand still works; it just means the Layout view no longer knows where the body is meant to be.";
+    case BodyMotionLine:
+        return "bodyMotion, in the solver's own grammar: <object>:vx=0.2,omega=45;<object>:free=1,mass=2. The rows above write into this and it is what is sent, so editing it by hand does the same thing. @<seconds> opens a keyframe, which the rows above cannot write.";
+    case BodyCollisions:
+        return "Off, bodies pass straight through each other and through the walls - which is what every run before this did and is fine while nothing can meet anything. On, a body that would run into another one or into the domain edge bounces instead. Contact is read off the mask, so it is exact for any shape and not a circle around it.";
+    case BodyRestitution:
+        return "How much of the closing speed survives a bounce. 0 is a body that hits and stops dead, 1 is one that comes back at the speed it arrived. A body whose path you set is unmovable by construction, so a free body hitting one takes the whole impulse.";
+    case BodyForceReport:
+        return "Work out the fluid force on bodies whose path you set as well. It never changes where they go - a set path is a set path - it only puts the force in the step line so you can read what the fluid was doing to it. Free bodies always have it computed, because that is what moves them.";
+    case BodyCouplingKind:
+        return "How a free body is coupled to the fluid. added carries the fluid that moves with the body on the left hand side of its own equation of motion and costs nothing. strong iterates force and motion inside the step until they agree and costs that many pressure solves. weak does neither and is here to be compared against - it goes unstable as soon as the body is not much heavier than what it displaces.";
     case WallMotionLine:
         return "wallMotion, in the solver's own grammar: <object>:rot=90,slideX=0.5;<object>:slip=1. The object numbers are the ones the solver prints for the mask.";
     case Convection:
@@ -1707,6 +1850,12 @@ struct SolverExecutableInfo {
     bool supportsMultipleContours = false;  // more than one closed loop
     bool supportsGravity = false;           // gravityEnabled= Accel= Angle=
     bool supportsWallMotion = false;        // wallMotion=
+    bool supportsBodyMotion = false;
+    bool supportsTurbulence = false;
+    bool supportsCompressible = false;
+    bool supportsBodyMotion = false;
+    bool supportsTurbulence = false;
+    bool supportsCompressible = false;
     bool supportsProfiles = false;
     bool supportsExtraFields = false;
     bool supportsSchemes = false;
@@ -1895,6 +2044,12 @@ SolverExecutableInfo inspectSolverExecutable(
     // is the thing that decides whether the argument is accepted.
     info.supportsGravity = binaryContains(executable, "gravityEnabled");
     info.supportsWallMotion = binaryContains(executable, "wallMotion");
+    info.supportsBodyMotion = binaryContains(executable, "bodyMotion");
+    info.supportsTurbulence = binaryContains(executable, "turbLengthScale");
+    info.supportsCompressible = binaryContains(executable, "machInlet");
+    info.supportsBodyMotion = binaryContains(executable, "bodyMotion");
+    info.supportsTurbulence = binaryContains(executable, "turbLengthScale");
+    info.supportsCompressible = binaryContains(executable, "machInlet");
     info.supportsProfiles = binaryContains(executable, "profiles");
     info.supportsExtraFields = binaryContains(executable, "extraFields");
     info.supportsSchemes = binaryContains(executable, "timeScheme");
@@ -2031,6 +2186,36 @@ public:
               Slider{"Gravity angle", "deg", -180.0, 180.0, 0.0, false, false},
               Slider{"Gravity mode", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
                      ControlKind::Choice, {"reduced", "body"}},
+              Slider{"Regime", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"incompressible", "compressible"}},
+              Slider{"gamma", "", 1.01, 3.0, 1.4, false, false},
+              Slider{"Gas constant R", "J/(kg K)", 1.0, 100000.0, 287.05,
+                     false, true},
+              Slider{"gamma, gas 2", "", 1.01, 3.0, 1.667, false, false},
+              Slider{"R, gas 2", "J/(kg K)", 1.0, 100000.0, 2077.0, false,
+                     true},
+              Slider{"Temperature T0", "K", 1.0, 100000.0, 288.15, false, true},
+              Slider{"Ambient pressure", "Pa", 1.0, 1e12, 101325.0, false,
+                     true},
+              Slider{"Inlet Mach", "", 0.0, 20.0, 0.5, false, false},
+              Slider{"Species mode", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"active", "passive"}},
+              Slider{"Acoustic fields", "", 0.0, 1.0, 0.0, true, false, true},
+              Slider{"Acoustic window", "s", 1e-6, 1000.0, 0.02, false, true},
+              Slider{"0 dB reference", "Pa", 1e-12, 1e6, 2e-5, false, true},
+              Slider{"Microphones", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
+                     ControlKind::Text},
+              Slider{"Mic interval", "steps", 1.0, 1000000.0, 1.0, true, true},
+              Slider{"Write .wav", "", 0.0, 1.0, 0.0, true, false, true},
+              Slider{"Audio rate", "Hz", 1000.0, 384000.0, 44100.0, true,
+                     false},
+              Slider{"Audio speed", "x real", 1e-4, 1000.0, 1.0, false, true},
+              Slider{"Turbulence model", "", 0.0, 2.0, 0.0, true, false, false,
+                     0.0, ControlKind::Choice,
+                     {"none", "smagorinsky", "kOmegaSST"}},
+              Slider{"Smagorinsky Cs", "", 0.01, 1.0, 0.17, false, false},
+              Slider{"Turbulence intensity", "", 0.0, 1.0, 0.05, false, false},
+              Slider{"Turbulence length", "m", 0.0, 100.0, 0.0, false, false},
               Slider{"Slice X", "deg", -180.0, 180.0, 90.0, true, false},
               Slider{"Slice Z", "deg", -180.0, 180.0, 90.0, true, false},
               Slider{"Slice rotation", "deg", -180.0, 180.0, 0.0, false, false},
@@ -2057,6 +2242,31 @@ public:
                      ControlKind::Choice, {"uniform", "parabolic"}},
               Slider{"Wall motion", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
                      ControlKind::Text},
+              Slider{"Body", "", 1.0, 32.0, 1.0, true, false},
+              Slider{"Behaviour", "", 0.0, 4.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice,
+                     {"static", "drag", "slip", "travel", "free"}},
+              Slider{"Surface spin", "deg/s", -3600.0, 3600.0, 0.0, false, false},
+              Slider{"Surface slide X", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Surface slide Y", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Body velocity X", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Body velocity Y", "m/s", -200.0, 200.0, 0.0, false, false},
+              Slider{"Body spin", "deg/s", -3600.0, 3600.0, 0.0, false, false},
+              Slider{"Body mass", "kg/m", 0.0, 100000.0, 0.0, false, false},
+              Slider{"Body density", "kg/m3", 0.0, 25000.0, 0.0, false, false},
+              Slider{"Pinned", "", 0.0, 7.0, 0.0, true, false, false, 0.0,
+                     ControlKind::Choice,
+                     {"nothing", "x", "y", "x+y", "spin", "x+spin",
+                      "y+spin", "everything"}},
+              Slider{"Body motion", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
+                     ControlKind::Text},
+              Slider{"Body track", "", 0.0, 1.0, 0.0, false, false, false, 0.0,
+                     ControlKind::Text},
+              Slider{"Coupling", "", 0.0, 2.0, 1.0, true, false, false, 0.0,
+                     ControlKind::Choice, {"weak", "added", "strong"}},
+              Slider{"Collisions", "", 0.0, 1.0, 0.0, true, false, true},
+              Slider{"Bounciness", "", 0.0, 1.0, 0.2, false, false},
+              Slider{"Report forces", "", 0.0, 1.0, 0.0, true, false, true},
               Slider{"Domain Lx", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Domain Ly", "m", 0.01, 100.0, 1.0, false, true},
               Slider{"Cells nx", "", 8.0, 5000.0, 50.0, true, true},
@@ -2216,6 +2426,8 @@ public:
                 break;
             }
             syncWindowLayout(window.getSize());
+            syncRowVisibility();
+            syncRowVisibility();
 #ifdef _WIN32
             bool receivedFileDrop = false;
             if (fileDropTarget.takeReadFailure()) {
@@ -2279,6 +2491,19 @@ private:
         return false;
     }
 
+    void syncRowVisibility() {
+        std::string signature = sliders_[RegimeKind].choice();
+        signature += sliders_[Phases].value >= 1.5 ? "|2" : "|1";
+        signature += sliders_[AcousticFields].value >= 0.5 ? "|a" : "|-";
+        signature += sliders_[MicrophoneLine].text.empty() ? "|-" : "|m";
+        signature += sliders_[MicAudio].value >= 0.5 ? "|w" : "|-";
+        signature += "|" + sliders_[CaseKind].choice();
+        if (signature == visibilitySignature_)
+            return;
+        visibilitySignature_ = signature;
+        updateLayout(layoutSize_);
+    }
+
     void syncWindowLayout(sf::Vector2u size) {
         if (size.x == 0u || size.y == 0u ||
             (size.x == layoutSize_.x && size.y == layoutSize_.y)) {
@@ -2318,36 +2543,88 @@ private:
             {294.0f, 38.0f}
         };
 
+        {
+            const float gap = 4.0f;
+            const float span =
+                (294.0f - gap * (PARAMETER_TABS.size() - 1)) /
+                PARAMETER_TABS.size();
+            float x = 18.0f;
+            for (std::size_t index = 0; index < tabButtons_.size(); ++index) {
+                tabButtons_[index].label = PARAMETER_TABS[index].label;
+                tabButtons_[index].bounds = {
+                    {x, PARAMETER_STRIP_TOP}, {span, PARAMETER_STRIP_HEIGHT}};
+                tabButtons_[index].selected = index == activeTab_;
+                x += span + gap;
+            }
+        }
+
         const float parameterBottom =
             std::max(PARAMETER_TOP + 40.0f, height - PARAMETER_BOTTOM_MARGIN);
         const float viewportHeight = parameterBottom - PARAMETER_TOP;
+
+        refreshRowVisibility();
+        applyTabAndSearchFilter();
+
+        const auto groupOf = [](std::size_t index) {
+            std::size_t found = 0;
+            for (std::size_t g = 0; g < PARAMETER_GROUPS.size(); ++g)
+                if (PARAMETER_GROUPS[g].firstIndex <= index)
+                    found = g;
+            return found;
+        };
+
+        groupShown_.fill(false);
+        groupFirstShown_.fill(0);
+        std::size_t shownRows = 0;
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            if (rowHidden_[index])
+                continue;
+            ++shownRows;
+            const std::size_t g = groupOf(index);
+            if (!groupShown_[g]) {
+                groupShown_[g] = true;
+                groupFirstShown_[g] = index;
+            }
+        }
+        const std::size_t shownGroups = static_cast<std::size_t>(
+            std::count(groupShown_.begin(), groupShown_.end(), true));
+
         const float contentHeight =
-            static_cast<float>(sliders_.size()) * PARAMETER_ROW_HEIGHT +
-            static_cast<float>(PARAMETER_GROUPS.size()) *
-                PARAMETER_GROUP_HEIGHT;
+            static_cast<float>(shownRows) * PARAMETER_ROW_HEIGHT +
+            static_cast<float>(shownGroups) * PARAMETER_GROUP_HEIGHT;
+            static_cast<float>(shownRows) * PARAMETER_ROW_HEIGHT +
+            static_cast<float>(shownGroups) * PARAMETER_GROUP_HEIGHT;
         maxParameterScroll_ = std::max(0.0f, contentHeight - viewportHeight);
         parameterScrollOffset_ =
             clampFloat(parameterScrollOffset_, 0.0f, maxParameterScroll_);
 
+        float cursor = PARAMETER_TOP + 24.0f - parameterScrollOffset_;
+        groupHeaderY_.fill(-100000.0f);
+        float cursor = PARAMETER_TOP + 24.0f - parameterScrollOffset_;
+        groupHeaderY_.fill(-100000.0f);
         for (std::size_t index = 0; index < sliders_.size(); ++index) {
-            const std::size_t groupsBeforeOrAt = static_cast<std::size_t>(
-                std::count_if(
-                    PARAMETER_GROUPS.begin(),
-                    PARAMETER_GROUPS.end(),
-                    [index](const ParameterGroupInfo& group) {
-                        return group.firstIndex <= index;
-                    }));
-            sliders_[index].track = {
-                {
-                    20.0f,
-                    PARAMETER_TOP + 24.0f +
-                        static_cast<float>(index) * PARAMETER_ROW_HEIGHT -
-                        parameterScrollOffset_ +
-                        static_cast<float>(groupsBeforeOrAt) *
-                            PARAMETER_GROUP_HEIGHT
-                },
-                {278.0f, 5.0f}
-            };
+            if (rowHidden_[index]) {
+                sliders_[index].track = {{20.0f, -100000.0f}, {278.0f, 5.0f}};
+                continue;
+            }
+            const std::size_t g = groupOf(index);
+            if (groupShown_[g] && groupFirstShown_[g] == index) {
+                cursor += PARAMETER_GROUP_HEIGHT;
+                groupHeaderY_[g] = cursor - 47.0f;
+            }
+            sliders_[index].track = {{20.0f, cursor}, {278.0f, 5.0f}};
+            cursor += PARAMETER_ROW_HEIGHT;
+            if (rowHidden_[index]) {
+                sliders_[index].track = {{20.0f, -100000.0f}, {278.0f, 5.0f}};
+                continue;
+            }
+            const std::size_t g = groupOf(index);
+            if (groupShown_[g] && groupFirstShown_[g] == index) {
+                cursor += PARAMETER_GROUP_HEIGHT;
+                groupHeaderY_[g] = cursor - 47.0f;
+            }
+            sliders_[index].track = {{20.0f, cursor}, {278.0f, 5.0f}};
+            cursor += PARAMETER_ROW_HEIGHT;
         }
 
         setupViewport_ = {
@@ -2376,6 +2653,21 @@ private:
             place(paintFillButton_, 62.0f);
             place(paintClearButton_, 62.0f);
             place(paintUndoButton_, 62.0f);
+
+            layoutButton_.bounds = {
+                {setupViewport_.position.x + 120.0f,
+                 setupViewport_.position.y + 12.0f},
+                {96.0f, 30.0f}};
+            float lx = setupViewport_.position.x + 228.0f;
+            const auto placeLayout = [&](Button& button, float w) {
+                button.bounds = {
+                    {lx, setupViewport_.position.y + 12.0f}, {w, 30.0f}};
+                lx += w + 8.0f;
+            };
+            placeLayout(layoutKeyButton_, 86.0f);
+            placeLayout(layoutDropButton_, 78.0f);
+            placeLayout(layoutInterpButton_, 86.0f);
+            placeLayout(layoutClearButton_, 66.0f);
         }
 
         pressureButton_.bounds = {{20.0f, 72.0f}, {126.0f, 36.0f}};
@@ -2501,6 +2793,15 @@ private:
             return;
         }
 
+        if (const auto* key = event.getIf<sf::Event::KeyPressed>()) {
+            if (editingSlider_.has_value() && (key->control || key->system)) {
+                if (handleEditClipboard(*key))
+                    return;
+            }
+            if (!editingSlider_.has_value() && handleShortcut(*key))
+                return;
+        }
+
         if (editingSlider_.has_value()) {
             if (const auto* key = event.getIf<sf::Event::KeyPressed>()) {
                 handleSliderEditKey(*key);
@@ -2512,7 +2813,22 @@ private:
             }
         }
 
+        if (searchActive_) {
+            if (const auto* key = event.getIf<sf::Event::KeyPressed>()) {
+                if (handleSearchKey(*key))
+                    return;
+            }
+            if (const auto* text = event.getIf<sf::Event::TextEntered>()) {
+                if (handleSearchText(text->unicode))
+                    return;
+            }
+        }
+
         if (const auto* key = event.getIf<sf::Event::KeyPressed>()) {
+            if (mode_ == DisplayMode::Setup && layoutMode_) {
+                if (handleLayoutKeyPressed(*key))
+                    return;
+            }
             if (mode_ == DisplayMode::Results) {
                 if (handleResultsKeyPressed(*key)) {
                     return;
@@ -2595,7 +2911,21 @@ private:
     void handleSetupMousePressed(
         sf::Mouse::Button button,
         sf::Vector2f position) {
-        if (handlePaintMousePressed(button, position))
+        if (button == sf::Mouse::Button::Left &&
+            layoutButton_.hit(position)) {
+            layoutMode_ = !layoutMode_;
+            if (layoutMode_) {
+                painting_ = false;
+                layoutSignature_.clear();
+                refreshLayoutMask();
+                status_ = "Layout: click a body to pick it, drag to place it, "
+                          "K drops a keyframe, Tab cycles bodies.";
+            }
+            return;
+        }
+        if (handleLayoutMousePressed(button, position))
+            return;
+        if (!layoutMode_ && handlePaintMousePressed(button, position))
             return;
         if (button == sf::Mouse::Button::Left &&
             importButton_.hit(position)) {
@@ -2621,6 +2951,29 @@ private:
             loadConfigButton_.hit(position)) {
             loadConfiguration();
             return;
+        }
+        if (button == sf::Mouse::Button::Left && !searchActive_ &&
+            searchQuery_.empty()) {
+            for (std::size_t index = 0; index < tabButtons_.size(); ++index) {
+                if (!tabButtons_[index].hit(position))
+                    continue;
+                activeTab_ = index;
+                parameterScrollOffset_ = 0.0f;
+                updateLayout(layoutSize_);
+                return;
+            }
+        }
+        if (button == sf::Mouse::Button::Left &&
+            (searchActive_ || !searchQuery_.empty())) {
+            const sf::FloatRect field{{18.0f, PARAMETER_STRIP_TOP},
+                                      {294.0f, PARAMETER_STRIP_HEIGHT}};
+            if (field.contains(position)) {
+                if (searchActive_)
+                    closeSearch(true);
+                else
+                    openSearch();
+                return;
+            }
         }
         if (button == sf::Mouse::Button::Left &&
             maxParameterScroll_ > 0.0f) {
@@ -2654,6 +3007,8 @@ private:
                 }
                 if (sliders_[index].integer && !sliders_[index].boolean &&
                     sliders_[index].stepMinusBounds().contains(position)) {
+                    focusedSlider_ = index;
+                    pushUndo();
                     sliders_[index].value = std::max(sliders_[index].minimum, sliders_[index].value - 1.0);
                     invalidSlider_.reset();
                     if (index == CacheMegabytes) {
@@ -2664,6 +3019,8 @@ private:
                 }
                 if (sliders_[index].integer && !sliders_[index].boolean &&
                     sliders_[index].stepPlusBounds().contains(position)) {
+                    focusedSlider_ = index;
+                    pushUndo();
                     sliders_[index].value = std::min(sliders_[index].maximum, sliders_[index].value + 1.0);
                     invalidSlider_.reset();
                     if (index == CacheMegabytes) {
@@ -2684,6 +3041,8 @@ private:
                     continue;
                 }
                 if (sliders_[index].hit(position)) {
+                    focusedSlider_ = index;
+                    pushUndo();
                     if (index == UseCuda && !solverInfo_.cudaCapable) {
                         status_ =
                             "CUDA is unavailable in the selected CPU-only "
@@ -2721,6 +3080,8 @@ private:
             return;
         }
 
+        if (layoutMode_)
+            return;
         if (button == sf::Mouse::Button::Right) {
             rotatingRoll_ = true;
         } else if (button == sf::Mouse::Button::Left) {
@@ -2865,7 +3226,13 @@ private:
     void handleMouseMoved(sf::Vector2f position) {
         const sf::Vector2f delta = position - lastMouse_;
         lastMouse_ = position;
-        if (paintStroke_) {
+        if (layoutDragging_) {
+            dragLayoutSelection(delta);
+        } else if (layoutRotating_) {
+            rotateLayoutSelection(delta.x);
+        } else if (draggingLayoutTime_) {
+            setLayoutTimeFromX(position.x);
+        } else if (paintStroke_) {
             paintAt(position,
                     sf::Mouse::isButtonPressed(sf::Mouse::Button::Right));
         } else if (draggingParameterScrollbar_) {
@@ -2944,6 +3311,9 @@ private:
 
     void endDragging() {
         paintStroke_ = false;
+        layoutDragging_ = false;
+        layoutRotating_ = false;
+        draggingLayoutTime_ = false;
         const std::optional<std::size_t> releasedSlider = activeSlider_;
         if (activeSlider_.has_value()) {
             sliders_[*activeSlider_].dragging = false;
@@ -2955,6 +3325,8 @@ private:
         }
         if (releasedSlider.has_value()) {
             invalidSlider_.reset();
+            syncBodyRows(*releasedSlider);
+            syncBodyRows(*releasedSlider);
         }
         draggingParameterScrollbar_ = false;
         draggingHorizontalSlice_ = false;
@@ -2967,6 +3339,7 @@ private:
     }
 
     void handleSliderValueClick(std::size_t index) {
+        focusedSlider_ = index;
         if (editingSlider_ == index) {
             return;
         }
@@ -2997,6 +3370,32 @@ private:
             ": Enter applies; Esc cancels.";
     }
 
+    bool handleEditClipboard(const sf::Event::KeyPressed& key) {
+        if (!editingSlider_.has_value())
+            return false;
+        if (key.code == sf::Keyboard::Key::C ||
+            key.code == sf::Keyboard::Key::X) {
+            sf::Clipboard::setString(sf::String(sliderEditText_));
+            if (key.code == sf::Keyboard::Key::X)
+                sliderEditText_.clear();
+            return true;
+        }
+        if (key.code == sf::Keyboard::Key::V) {
+            const std::string incoming =
+                sf::Clipboard::getString().toAnsiString();
+            for (char character : incoming)
+                if (character >= 32 && character < 127 &&
+                    sliderEditText_.size() < 96)
+                    sliderEditText_.push_back(character);
+            return true;
+        }
+        if (key.code == sf::Keyboard::Key::A) {
+            sliderEditText_.clear();
+            return true;
+        }
+        return false;
+    }
+
     void handleSliderEditKey(const sf::Event::KeyPressed& key) {
         if (!editingSlider_.has_value()) {
             return;
@@ -3025,6 +3424,7 @@ private:
     }
 
     bool commitSliderEdit() {
+        pushUndo();
         if (!editingSlider_.has_value()) {
             return true;
         }
@@ -3056,6 +3456,8 @@ private:
         invalidSlider_.reset();
         editingSlider_.reset();
         sliderEditText_.clear();
+        syncBodyRows(index);
+        syncBodyRows(index);
         return true;
     }
 
@@ -3430,8 +3832,89 @@ private:
         };
     }
 
+    bool compressibleOn() const {
+        return sliders_[RegimeKind].choice() == "compressible";
+    }
+
+    void refreshRowVisibility() {
+        rowHidden_.fill(false);
+        const bool gas = compressibleOn();
+        const bool two = sliders_[Phases].value >= 1.5;
+
+        const std::size_t incompressibleOnly[] = {
+            Viscosity, Density, Density1, Viscosity1, Density2, Viscosity2,
+            VofSchemeKind, MixingKindRow, SurfaceTension, ContactAngle,
+            SourceLine, GravityEnabled, GravityAccel, GravityAngle,
+            GravityMode, CoarseSorOmega, SmootherOmega, MgIterations,
+            MgTolerance, MgMinCoarseSize, TurbulenceKindRow, SmagorinskyCs,
+            TurbIntensity, TurbLengthScale, LidSpeed};
+        const std::size_t compressibleOnly[] = {
+            Gamma1, GasConstant1, Gamma2, GasConstant2, Temperature0,
+            AmbientPressure, MachInlet, SpeciesModeRow, AcousticFields,
+            AcousticWindow, AcousticRef, MicrophoneLine, MicInterval,
+            MicAudio, MicAudioRate, MicAudioSpeed};
+
+        for (std::size_t index : incompressibleOnly)
+            rowHidden_[index] = gas;
+        for (std::size_t index : compressibleOnly)
+            rowHidden_[index] = !gas;
+
+        if (gas) {
+            rowHidden_[Gamma2] = !two;
+            rowHidden_[GasConstant2] = !two;
+            rowHidden_[SpeciesModeRow] = !two;
+            const bool listening = sliders_[AcousticFields].value >= 0.5;
+            rowHidden_[AcousticWindow] =
+                !listening && sliders_[MicrophoneLine].text.empty();
+            rowHidden_[AcousticRef] = rowHidden_[AcousticWindow];
+            rowHidden_[MicInterval] = sliders_[MicrophoneLine].text.empty();
+            rowHidden_[MicAudio] = rowHidden_[MicInterval];
+            const bool recording =
+                !rowHidden_[MicAudio] && sliders_[MicAudio].value >= 0.5;
+            rowHidden_[MicAudioRate] = !recording;
+            rowHidden_[MicAudioSpeed] = !recording;
+            rowHidden_[WindSpeed] = true;
+        } else {
+            rowHidden_[LidSpeed] =
+                sliders_[CaseKind].choice() != "cavity";
+        }
+    }
+
+    void applyTabAndSearchFilter() {
+        const auto groupOf = [](std::size_t index) {
+            std::size_t found = 0;
+            for (std::size_t g = 0; g < PARAMETER_GROUPS.size(); ++g)
+                if (PARAMETER_GROUPS[g].firstIndex <= index)
+                    found = g;
+            return found;
+        };
+        const bool filtering = !searchQuery_.empty();
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            if (rowHidden_[index])
+                continue;
+            if (filtering) {
+                if (!rowMatchesSearch(index))
+                    rowHidden_[index] = true;
+                continue;
+            }
+            if (activeTab_ == 0)
+                continue;
+            const int group = static_cast<int>(groupOf(index));
+            bool wanted = false;
+            for (int allowed : PARAMETER_TABS[activeTab_].groups)
+                if (allowed == group)
+                    wanted = true;
+            if (!wanted)
+                rowHidden_[index] = true;
+        }
+        rowHidden_[BodyTrackLine] = true;
+        if (focusedSlider_.has_value() && rowHidden_[*focusedSlider_])
+            focusedSlider_.reset();
+    }
+
     bool parameterRowOnScreen(std::size_t index) const {
-        if (index >= sliders_.size()) {
+        if (index >= sliders_.size() || rowHidden_[index]) {
+        if (index >= sliders_.size() || rowHidden_[index]) {
             return false;
         }
         const sf::FloatRect viewport = parameterViewport();
@@ -3512,6 +3995,40 @@ private:
         config.supportsWallMotion = solverInfo_.supportsWallMotion;
         config.wallMotion = sliders_[WallMotionLine].text;
 
+        config.supportsBodyMotion = solverInfo_.supportsBodyMotion;
+        config.bodyMotion = sliders_[BodyMotionLine].text;
+        config.bodyCoupling = sliders_[BodyCouplingKind].choice();
+        config.bodyCollisions = sliders_[BodyCollisions].value >= 0.5;
+        config.bodyRestitution = sliders_[BodyRestitution].value;
+        config.bodyForceReport = sliders_[BodyForceReport].value >= 0.5;
+
+        config.supportsCompressible = solverInfo_.supportsCompressible;
+        config.regime = sliders_[RegimeKind].choice();
+        config.gamma = sliders_[Gamma1].value;
+        config.gasConstant = sliders_[GasConstant1].value;
+        config.gamma2 = sliders_[Gamma2].value;
+        config.gasConstant2 = sliders_[GasConstant2].value;
+        config.T0 = sliders_[Temperature0].value;
+        config.pInf = sliders_[AmbientPressure].value;
+        config.machInlet = sliders_[MachInlet].value;
+        config.speciesMode = sliders_[SpeciesModeRow].choice();
+        config.acousticFields = sliders_[AcousticFields].value >= 0.5;
+        config.acousticWindow = sliders_[AcousticWindow].value;
+        config.acousticRef = sliders_[AcousticRef].value;
+        config.microphones = sliders_[MicrophoneLine].text;
+        config.micInterval =
+            static_cast<int>(std::lround(sliders_[MicInterval].value));
+        config.micAudio = sliders_[MicAudio].value >= 0.5;
+        config.micAudioRate =
+            static_cast<int>(std::lround(sliders_[MicAudioRate].value));
+        config.micAudioSpeed = sliders_[MicAudioSpeed].value;
+
+        config.supportsTurbulence = solverInfo_.supportsTurbulence;
+        config.turbulence = sliders_[TurbulenceKindRow].choice();
+        config.turbulenceCs = sliders_[SmagorinskyCs].value;
+        config.turbIntensity = sliders_[TurbIntensity].value;
+        config.turbLengthScale = sliders_[TurbLengthScale].value;
+
         config.supportsProfiles = solverInfo_.supportsProfiles;
         config.profiles = sliders_[Profiles].text;
         config.supportsExtraFields = solverInfo_.supportsExtraFields;
@@ -3565,7 +4082,7 @@ private:
 
     std::optional<std::size_t> sliderForValidationError(
         const std::string& error) const {
-        const std::array<std::pair<const char*, ParameterIndex>, 22> mappings{{
+        const std::array<std::pair<const char*, ParameterIndex>, 37> mappings{{
             {"Lx", DomainX}, {"Ly", DomainY}, {"nx", CellsX}, {"ny", CellsY},
             {"U0", WindSpeed}, {"nu", Viscosity}, {"ro", Density},
             {"CFL", Cfl}, {"totalTime", TotalTime},
@@ -3575,7 +4092,16 @@ private:
             {"mgMinCoarseSize", MgMinCoarseSize},
             {"saveInterval", SaveInterval}, {"useCuda", UseCuda},
             {"mixing", MixingKindRow}, {"diffusivity", Diffusivity},
-            {"surfaceTension", SurfaceTension}, {"contactAngle", ContactAngle}
+            {"surfaceTension", SurfaceTension}, {"contactAngle", ContactAngle},
+            {"regime", RegimeKind}, {"gamma", Gamma1}, {"machInlet", MachInlet},
+            {"T0", Temperature0}, {"pInf", AmbientPressure},
+            {"speciesMode", SpeciesModeRow},
+            {"acousticWindow", AcousticWindow},
+            {"microphones", MicrophoneLine}, {"micInterval", MicInterval},
+            {"micAudio", MicAudio}, {"micAudioRate", MicAudioRate},
+            {"micAudioSpeed", MicAudioSpeed},
+            {"bodyMotion", BodyMotionLine}, {"bodyCoupling", BodyCouplingKind},
+            {"bodyRestitution", BodyRestitution}
         }};
         for (const auto& mapping : mappings) {
             if (error.rfind(mapping.first, 0) == 0) {
@@ -3856,6 +4382,7 @@ private:
     }
 
     void loadConfiguration() {
+        pushUndo();
         std::string error;
         const std::filesystem::path path =
             chooseUiConfigFile(window_->getNativeHandle(), false, error);
@@ -3874,6 +4401,7 @@ private:
     }
 
     void resetDefaults() {
+        pushUndo();
         for (Slider& slider : sliders_) {
             slider.value = slider.defaultValue;
             slider.text = slider.defaultText;
@@ -4334,6 +4862,10 @@ private:
 
         if (config.wallMotion.empty())
             config.supportsWallMotion = false;
+        if (config.bodyMotion.empty())
+            config.supportsBodyMotion = false;
+        if (config.bodyMotion.empty())
+            config.supportsBodyMotion = false;
         if (config.profiles.empty())
             config.supportsProfiles = false;
 
@@ -5155,14 +5687,68 @@ private:
         window_->draw(thumb);
     }
 
+    void drawParameterStrip() {
+        if (searchActive_ || !searchQuery_.empty()) {
+            sf::RectangleShape field({294.0f, PARAMETER_STRIP_HEIGHT});
+            field.setPosition({18.0f, PARAMETER_STRIP_TOP});
+            field.setFillColor(sf::Color{22, 27, 35});
+            field.setOutlineColor(searchActive_ ? ACCENT : BORDER);
+            field.setOutlineThickness(1.0f);
+            window_->draw(field);
+            std::string shown = "Find: " + searchQuery_;
+            if (searchActive_)
+                shown += "_";
+            if (searchQuery_.empty() && !searchActive_)
+                shown = "Find: (Ctrl+F)";
+            window_->draw(makeText(font_, shown, 13,
+                                   {26.0f, PARAMETER_STRIP_TOP + 6.0f},
+                                   searchQuery_.empty() ? MUTED : TEXT));
+            return;
+        }
+        for (const Button& tab : tabButtons_)
+            tab.draw(*window_, font_);
+    }
+
+    void drawParameterRowBackdrops() {
+        const sf::FloatRect viewport = parameterViewport();
+        std::size_t stripe = 0;
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            if (!parameterRowOnScreen(index))
+                continue;
+            const float top = sliders_[index].track.position.y - 33.0f;
+            if (top + PARAMETER_ROW_HEIGHT < viewport.position.y ||
+                top > viewport.position.y + viewport.size.y)
+                continue;
+            const bool focused = focusedSlider_ == index;
+            if ((stripe % 2 == 1) || focused) {
+                sf::RectangleShape band({296.0f, PARAMETER_ROW_HEIGHT - 4.0f});
+                band.setPosition({16.0f, top});
+                band.setFillColor(focused ? sf::Color{30, 46, 66}
+                                          : sf::Color{255, 255, 255, 8});
+                window_->draw(band);
+            }
+            if (focused) {
+                sf::RectangleShape edge({2.0f, PARAMETER_ROW_HEIGHT - 4.0f});
+                edge.setPosition({16.0f, top});
+                edge.setFillColor(ACCENT);
+                window_->draw(edge);
+            }
+            ++stripe;
+        }
+    }
+
     void drawParameterGroupHeaders() {
         const sf::FloatRect viewport = parameterViewport();
-        for (const ParameterGroupInfo& group : PARAMETER_GROUPS) {
-            if (group.firstIndex >= sliders_.size()) {
+        for (std::size_t index = 0; index < PARAMETER_GROUPS.size(); ++index) {
+            const ParameterGroupInfo& group = PARAMETER_GROUPS[index];
+            if (group.firstIndex >= sliders_.size() || !groupShown_[index]) {
+        for (std::size_t index = 0; index < PARAMETER_GROUPS.size(); ++index) {
+            const ParameterGroupInfo& group = PARAMETER_GROUPS[index];
+            if (group.firstIndex >= sliders_.size() || !groupShown_[index]) {
                 continue;
             }
-            const float y =
-                sliders_[group.firstIndex].track.position.y - 47.0f;
+            const float y = groupHeaderY_[index];
+            const float y = groupHeaderY_[index];
             if (y < viewport.position.y - 18.0f ||
                 y > viewport.position.y + viewport.size.y) {
                 continue;
@@ -5314,6 +5900,412 @@ private:
     }
 
 
+
+
+    struct BodyEntry {
+        int object = 0;
+        std::string settings;
+    };
+
+    static std::vector<BodyEntry> splitEntries(const std::string& line) {
+        std::vector<BodyEntry> out;
+        std::size_t pos = 0;
+        while (pos < line.size()) {
+            std::size_t colon = line.find(':', pos);
+            if (colon == std::string::npos)
+                break;
+            const std::string number = line.substr(pos, colon - pos);
+            int object = std::atoi(number.c_str());
+            std::size_t next = colon + 1;
+            while (next < line.size()) {
+                const std::size_t mark = line.find(';', next);
+                if (mark == std::string::npos) {
+                    next = line.size();
+                    break;
+                }
+                next = mark;
+                break;
+            }
+            if (object >= 1) {
+                BodyEntry entry;
+                entry.object = object;
+                entry.settings = line.substr(colon + 1, next - colon - 1);
+                out.push_back(entry);
+            }
+            pos = next + 1;
+        }
+        return out;
+    }
+
+    static std::string joinEntries(const std::vector<BodyEntry>& entries) {
+        std::string out;
+        for (const BodyEntry& entry : entries) {
+            if (entry.settings.empty())
+                continue;
+            if (!out.empty())
+                out += ';';
+            out += std::to_string(entry.object) + ':' + entry.settings;
+        }
+        return out;
+    }
+
+    static double settingOf(const std::string& settings,
+                            const std::string& name,
+                            double fallback = 0.0) {
+        std::size_t pos = 0;
+        while (pos < settings.size()) {
+            std::size_t end = settings.find(',', pos);
+            if (end == std::string::npos)
+                end = settings.size();
+            const std::string token = settings.substr(pos, end - pos);
+            const std::size_t eq = token.find('=');
+            if (eq != std::string::npos) {
+                std::string key = token.substr(0, eq);
+                while (!key.empty() && key.front() == ' ')
+                    key.erase(key.begin());
+                while (!key.empty() && key.back() == ' ')
+                    key.pop_back();
+                std::string lower;
+                for (char c : key)
+                    lower += static_cast<char>(
+                        std::tolower(static_cast<unsigned char>(c)));
+                if (lower == name)
+                    return std::atof(token.c_str() + eq + 1);
+            }
+            pos = end + 1;
+        }
+        return fallback;
+    }
+
+    static std::string number(double value) {
+        std::ostringstream out;
+        out << value;
+        return out.str();
+    }
+
+    static std::string entrySettings(const std::string& line, int object) {
+        for (const BodyEntry& entry : splitEntries(line))
+            if (entry.object == object)
+                return entry.settings;
+        return std::string();
+    }
+
+    static void setEntry(std::string& line, int object,
+                         const std::string& settings) {
+        std::vector<BodyEntry> entries = splitEntries(line);
+        bool found = false;
+        for (BodyEntry& entry : entries)
+            if (entry.object == object) {
+                entry.settings = settings;
+                found = true;
+            }
+        if (!found && !settings.empty()) {
+            BodyEntry entry;
+            entry.object = object;
+            entry.settings = settings;
+            entries.push_back(entry);
+        }
+        line = joinEntries(entries);
+    }
+
+    int selectedBody() const {
+        return static_cast<int>(std::lround(sliders_[BodySelect].value));
+    }
+
+    void syncBodyRows(std::size_t index) {
+        if (index == BodySelect) {
+            loadBodyRows();
+            return;
+        }
+        if (index >= BodyBehaviour && index <= BodyPins)
+            storeBodyRows();
+        else if (index == BodyMotionLine || index == WallMotionLine)
+            loadBodyRows();
+    }
+
+    void loadBodyRows() {
+        const int object = selectedBody();
+        const std::string wall =
+            entrySettings(sliders_[WallMotionLine].text, object);
+        const std::string travel =
+            entrySettings(sliders_[BodyMotionLine].text, object);
+
+        int behaviour = 0;
+        if (!travel.empty())
+            behaviour = settingOf(travel, "free", 0.0) >= 0.5 ? 4 : 3;
+        else if (!wall.empty())
+            behaviour = settingOf(wall, "slip", 0.0) >= 0.5 ? 2 : 1;
+
+        sliders_[BodyBehaviour].value = behaviour;
+        sliders_[BodyRotation].value = settingOf(wall, "rot");
+        sliders_[BodySlideX].value = settingOf(wall, "slidex");
+        sliders_[BodySlideY].value = settingOf(wall, "slidey");
+        sliders_[BodyVelocityX].value = settingOf(travel, "vx");
+        sliders_[BodyVelocityY].value = settingOf(travel, "vy");
+        sliders_[BodySpin].value = settingOf(travel, "omega");
+        sliders_[BodyMass].value = settingOf(travel, "mass");
+        sliders_[BodyDensity].value = settingOf(travel, "density");
+        const int pins = (settingOf(travel, "pinx") >= 0.5 ? 1 : 0) |
+                         (settingOf(travel, "piny") >= 0.5 ? 2 : 0) |
+                         (settingOf(travel, "pinrot") >= 0.5 ? 4 : 0);
+        sliders_[BodyPins].value = pins;
+    }
+
+    void storeBodyRows() {
+        const int object = selectedBody();
+        const std::string behaviour = sliders_[BodyBehaviour].choice();
+
+        std::string wall;
+        std::string travel;
+        const auto add = [](std::string& into, const std::string& text) {
+            if (!into.empty())
+                into += ',';
+            into += text;
+        };
+
+        if (behaviour == "drag") {
+            if (sliders_[BodyRotation].value != 0.0)
+                add(wall, "rot=" + number(sliders_[BodyRotation].value));
+            if (sliders_[BodySlideX].value != 0.0)
+                add(wall, "slideX=" + number(sliders_[BodySlideX].value));
+            if (sliders_[BodySlideY].value != 0.0)
+                add(wall, "slideY=" + number(sliders_[BodySlideY].value));
+            if (wall.empty())
+                wall = "rot=0";
+        } else if (behaviour == "slip") {
+            wall = "slip=1";
+        } else if (behaviour == "travel" || behaviour == "free") {
+            if (behaviour == "free")
+                add(travel, "free=1");
+            if (sliders_[BodyVelocityX].value != 0.0)
+                add(travel, "vx=" + number(sliders_[BodyVelocityX].value));
+            if (sliders_[BodyVelocityY].value != 0.0)
+                add(travel, "vy=" + number(sliders_[BodyVelocityY].value));
+            if (sliders_[BodySpin].value != 0.0)
+                add(travel, "omega=" + number(sliders_[BodySpin].value));
+            if (behaviour == "free") {
+                if (sliders_[BodyDensity].value > 0.0)
+                    add(travel,
+                        "density=" + number(sliders_[BodyDensity].value));
+                else if (sliders_[BodyMass].value > 0.0)
+                    add(travel, "mass=" + number(sliders_[BodyMass].value));
+                const int pins =
+                    static_cast<int>(std::lround(sliders_[BodyPins].value));
+                if (pins & 1) add(travel, "pinX=1");
+                if (pins & 2) add(travel, "pinY=1");
+                if (pins & 4) add(travel, "pinRot=1");
+            }
+            if (travel.empty())
+                travel = "vx=0";
+        }
+
+        setEntry(sliders_[WallMotionLine].text, object, wall);
+        setEntry(sliders_[BodyMotionLine].text, object, travel);
+    }
+
+
+
+    struct BodyEntry {
+        int object = 0;
+        std::string settings;
+    };
+
+    static std::vector<BodyEntry> splitEntries(const std::string& line) {
+        std::vector<BodyEntry> out;
+        std::size_t pos = 0;
+        while (pos < line.size()) {
+            std::size_t colon = line.find(':', pos);
+            if (colon == std::string::npos)
+                break;
+            const std::string number = line.substr(pos, colon - pos);
+            int object = std::atoi(number.c_str());
+            std::size_t next = colon + 1;
+            while (next < line.size()) {
+                const std::size_t mark = line.find(';', next);
+                if (mark == std::string::npos) {
+                    next = line.size();
+                    break;
+                }
+                next = mark;
+                break;
+            }
+            if (object >= 1) {
+                BodyEntry entry;
+                entry.object = object;
+                entry.settings = line.substr(colon + 1, next - colon - 1);
+                out.push_back(entry);
+            }
+            pos = next + 1;
+        }
+        return out;
+    }
+
+    static std::string joinEntries(const std::vector<BodyEntry>& entries) {
+        std::string out;
+        for (const BodyEntry& entry : entries) {
+            if (entry.settings.empty())
+                continue;
+            if (!out.empty())
+                out += ';';
+            out += std::to_string(entry.object) + ':' + entry.settings;
+        }
+        return out;
+    }
+
+    static double settingOf(const std::string& settings,
+                            const std::string& name,
+                            double fallback = 0.0) {
+        std::size_t pos = 0;
+        while (pos < settings.size()) {
+            std::size_t end = settings.find(',', pos);
+            if (end == std::string::npos)
+                end = settings.size();
+            const std::string token = settings.substr(pos, end - pos);
+            const std::size_t eq = token.find('=');
+            if (eq != std::string::npos) {
+                std::string key = token.substr(0, eq);
+                while (!key.empty() && key.front() == ' ')
+                    key.erase(key.begin());
+                while (!key.empty() && key.back() == ' ')
+                    key.pop_back();
+                std::string lower;
+                for (char c : key)
+                    lower += static_cast<char>(
+                        std::tolower(static_cast<unsigned char>(c)));
+                if (lower == name)
+                    return std::atof(token.c_str() + eq + 1);
+            }
+            pos = end + 1;
+        }
+        return fallback;
+    }
+
+    static std::string number(double value) {
+        std::ostringstream out;
+        out << value;
+        return out.str();
+    }
+
+    static std::string entrySettings(const std::string& line, int object) {
+        for (const BodyEntry& entry : splitEntries(line))
+            if (entry.object == object)
+                return entry.settings;
+        return std::string();
+    }
+
+    static void setEntry(std::string& line, int object,
+                         const std::string& settings) {
+        std::vector<BodyEntry> entries = splitEntries(line);
+        bool found = false;
+        for (BodyEntry& entry : entries)
+            if (entry.object == object) {
+                entry.settings = settings;
+                found = true;
+            }
+        if (!found && !settings.empty()) {
+            BodyEntry entry;
+            entry.object = object;
+            entry.settings = settings;
+            entries.push_back(entry);
+        }
+        line = joinEntries(entries);
+    }
+
+    int selectedBody() const {
+        return static_cast<int>(std::lround(sliders_[BodySelect].value));
+    }
+
+    void syncBodyRows(std::size_t index) {
+        if (index == BodySelect) {
+            loadBodyRows();
+            return;
+        }
+        if (index >= BodyBehaviour && index <= BodyPins)
+            storeBodyRows();
+        else if (index == BodyMotionLine || index == WallMotionLine)
+            loadBodyRows();
+    }
+
+    void loadBodyRows() {
+        const int object = selectedBody();
+        const std::string wall =
+            entrySettings(sliders_[WallMotionLine].text, object);
+        const std::string travel =
+            entrySettings(sliders_[BodyMotionLine].text, object);
+
+        int behaviour = 0;
+        if (!travel.empty())
+            behaviour = settingOf(travel, "free", 0.0) >= 0.5 ? 4 : 3;
+        else if (!wall.empty())
+            behaviour = settingOf(wall, "slip", 0.0) >= 0.5 ? 2 : 1;
+
+        sliders_[BodyBehaviour].value = behaviour;
+        sliders_[BodyRotation].value = settingOf(wall, "rot");
+        sliders_[BodySlideX].value = settingOf(wall, "slidex");
+        sliders_[BodySlideY].value = settingOf(wall, "slidey");
+        sliders_[BodyVelocityX].value = settingOf(travel, "vx");
+        sliders_[BodyVelocityY].value = settingOf(travel, "vy");
+        sliders_[BodySpin].value = settingOf(travel, "omega");
+        sliders_[BodyMass].value = settingOf(travel, "mass");
+        sliders_[BodyDensity].value = settingOf(travel, "density");
+        const int pins = (settingOf(travel, "pinx") >= 0.5 ? 1 : 0) |
+                         (settingOf(travel, "piny") >= 0.5 ? 2 : 0) |
+                         (settingOf(travel, "pinrot") >= 0.5 ? 4 : 0);
+        sliders_[BodyPins].value = pins;
+    }
+
+    void storeBodyRows() {
+        const int object = selectedBody();
+        const std::string behaviour = sliders_[BodyBehaviour].choice();
+
+        std::string wall;
+        std::string travel;
+        const auto add = [](std::string& into, const std::string& text) {
+            if (!into.empty())
+                into += ',';
+            into += text;
+        };
+
+        if (behaviour == "drag") {
+            if (sliders_[BodyRotation].value != 0.0)
+                add(wall, "rot=" + number(sliders_[BodyRotation].value));
+            if (sliders_[BodySlideX].value != 0.0)
+                add(wall, "slideX=" + number(sliders_[BodySlideX].value));
+            if (sliders_[BodySlideY].value != 0.0)
+                add(wall, "slideY=" + number(sliders_[BodySlideY].value));
+            if (wall.empty())
+                wall = "rot=0";
+        } else if (behaviour == "slip") {
+            wall = "slip=1";
+        } else if (behaviour == "travel" || behaviour == "free") {
+            if (behaviour == "free")
+                add(travel, "free=1");
+            if (sliders_[BodyVelocityX].value != 0.0)
+                add(travel, "vx=" + number(sliders_[BodyVelocityX].value));
+            if (sliders_[BodyVelocityY].value != 0.0)
+                add(travel, "vy=" + number(sliders_[BodyVelocityY].value));
+            if (sliders_[BodySpin].value != 0.0)
+                add(travel, "omega=" + number(sliders_[BodySpin].value));
+            if (behaviour == "free") {
+                if (sliders_[BodyDensity].value > 0.0)
+                    add(travel,
+                        "density=" + number(sliders_[BodyDensity].value));
+                else if (sliders_[BodyMass].value > 0.0)
+                    add(travel, "mass=" + number(sliders_[BodyMass].value));
+                const int pins =
+                    static_cast<int>(std::lround(sliders_[BodyPins].value));
+                if (pins & 1) add(travel, "pinX=1");
+                if (pins & 2) add(travel, "pinY=1");
+                if (pins & 4) add(travel, "pinRot=1");
+            }
+            if (travel.empty())
+                travel = "vx=0";
+        }
+
+        setEntry(sliders_[WallMotionLine].text, object, wall);
+        setEntry(sliders_[BodyMotionLine].text, object, travel);
+    }
+
     bool phasesOn() const {
         return solverInfo_.supportsPhases &&
                std::lround(sliders_[Phases].value) > 1;
@@ -5419,17 +6411,391 @@ private:
         status_ = "Source added. Edit the Flow sources row for rate and angle.";
     }
 
+    struct Snapshot {
+        std::array<double, ParameterCount> values{};
+        std::array<std::string, ParameterCount> texts{};
+        std::vector<float> paint;
+        int paintNx = 0;
+        int paintNy = 0;
+        bool invert = false;
+    };
+
+    using Pose = BodyPose;
+
+    static const std::array<const char*, 8>& interpNames() {
+        static const std::array<const char*, 8> names{
+            {"linear", "smooth", "bezier", "sine", "quad", "cubic", "back",
+             "elastic"}};
+        return names;
+    }
+
+    static const std::array<const char*, 3>& easeNames() {
+        static const std::array<const char*, 3> names{{"in", "out", "inout"}};
+        return names;
+    }
+
+    std::vector<Pose> poseTrack(int object) const {
+        return parseBodyTrack(
+            entrySettings(sliders_[BodyTrackLine].text, object));
+    }
+
+    void setPoseTrack(int object, const std::vector<Pose>& track) {
+        setEntry(sliders_[BodyTrackLine].text, object,
+                 formatBodyTrack(track));
+        setEntry(sliders_[BodyMotionLine].text, object,
+                 bodyTrackToMotion(track));
+        loadBodyRows();
+    }
+
+    Pose poseAt(int object, double when) const {
+        return bodyPoseAt(poseTrack(object), when);
+    }
+
+    void dropKeyframe(int object, const Pose& pose) {
+        std::vector<Pose> track = poseTrack(object);
+        dropBodyPose(track, pose);
+        setPoseTrack(object, track);
+    }
+
+    void removeKeyframe(int object, double when) {
+        std::vector<Pose> track = poseTrack(object);
+        if (!removeBodyPose(track, when)) {
+            status_ = "No keyframe at that time.";
+            return;
+        }
+        setPoseTrack(object, track);
+        status_ = "Keyframe removed.";
+    }
+
+    Snapshot captureState() const {
+        Snapshot shot;
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            shot.values[index] = sliders_[index].value;
+            shot.texts[index] = sliders_[index].text;
+        }
+        shot.paint = paintField_;
+        shot.paintNx = paintNx_;
+        shot.paintNy = paintNy_;
+        shot.invert = invertSection_;
+        return shot;
+    }
+
+    void applyState(const Snapshot& shot) {
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            sliders_[index].value = shot.values[index];
+            sliders_[index].text = shot.texts[index];
+        }
+        paintField_ = shot.paint;
+        paintNx_ = shot.paintNx;
+        paintNy_ = shot.paintNy;
+        invertSection_ = shot.invert;
+        invalidSlider_.reset();
+        cancelSliderEdit(false);
+        updateLayout(layoutSize_);
+    }
+
+    bool sameState(const Snapshot& a, const Snapshot& b) const {
+        return a.values == b.values && a.texts == b.texts &&
+               a.paint == b.paint && a.invert == b.invert;
+    }
+
+    void pushUndo() {
+        Snapshot shot = captureState();
+        if (!undoStack_.empty() && sameState(undoStack_.back(), shot))
+            return;
+        undoStack_.push_back(std::move(shot));
+        if (undoStack_.size() > 64)
+            undoStack_.erase(undoStack_.begin());
+        redoStack_.clear();
+    }
+
+    void performUndo() {
+        if (undoStack_.empty()) {
+            status_ = "Nothing left to undo.";
+            return;
+        }
+        redoStack_.push_back(captureState());
+        Snapshot shot = undoStack_.back();
+        undoStack_.pop_back();
+        applyState(shot);
+        status_ = "Undone. Ctrl+Y puts it back.";
+    }
+
+    void performRedo() {
+        if (redoStack_.empty()) {
+            status_ = "Nothing left to redo.";
+            return;
+        }
+        undoStack_.push_back(captureState());
+        Snapshot shot = redoStack_.back();
+        redoStack_.pop_back();
+        applyState(shot);
+        status_ = "Redone.";
+    }
+
     void pushPaintUndo() {
-        paintUndo_.push_back(paintField_);
-        if (paintUndo_.size() > 32)
-            paintUndo_.erase(paintUndo_.begin());
+        pushUndo();
     }
 
     void undoPaint() {
-        if (paintUndo_.empty())
+        performUndo();
+    }
+
+    std::string configurationText() const {
+        std::ostringstream output;
+        output << "format=CFDMaskUI-1\n";
+        output << "invertSection=" << (invertSection_ ? 1 : 0) << '\n';
+        output << std::setprecision(
+            std::numeric_limits<double>::max_digits10);
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            const Slider& slider = sliders_[index];
+            output << parameterKey(index) << '=';
+            if (slider.kind == ControlKind::Text)
+                output << slider.text;
+            else if (slider.kind == ControlKind::Choice)
+                output << slider.choice();
+            else
+                output << slider.value;
+            output << '\n';
+        }
+        return output.str();
+    }
+
+    bool applyConfigurationText(const std::string& text, std::string& error) {
+        std::unordered_map<std::string, std::string> values;
+        std::istringstream input(text);
+        std::string line;
+        while (std::getline(input, line)) {
+            if (!line.empty() && line.back() == '\r')
+                line.pop_back();
+            const std::size_t separator = line.find('=');
+            if (separator != std::string::npos)
+                values[line.substr(0, separator)] = line.substr(separator + 1);
+        }
+        if (values["format"] != "CFDMaskUI-1") {
+            error = "the text does not start with format=CFDMaskUI-1";
+            return false;
+        }
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            const auto found = values.find(parameterKey(index));
+            if (found == values.end())
+                continue;
+            Slider& slider = sliders_[index];
+            if (slider.kind == ControlKind::Text) {
+                slider.text = found->second;
+                continue;
+            }
+            if (slider.kind == ControlKind::Choice) {
+                slider.setChoice(found->second);
+                continue;
+            }
+            try {
+                const double parsed = std::stod(found->second);
+                if (std::isfinite(parsed))
+                    slider.value = parsed;
+            } catch (const std::exception&) {
+                error = std::string(parameterKey(index)) +
+                        " does not carry a number";
+                return false;
+            }
+        }
+        if (const auto found = values.find("invertSection");
+            found != values.end())
+            invertSection_ = found->second == "1";
+        invalidSlider_.reset();
+        updateLayout(layoutSize_);
+        return true;
+    }
+
+    std::string rowClipboardText(std::size_t index) const {
+        const Slider& row = sliders_[index];
+        if (row.kind == ControlKind::Text)
+            return row.text;
+        if (row.kind == ControlKind::Choice)
+            return row.choice();
+        return formatValue(row.value, row.integer, std::string());
+    }
+
+    void copyFocusedRow(bool cut) {
+        if (!focusedSlider_.has_value()) {
+            sf::Clipboard::setString(sf::String(configurationText()));
+            status_ = "Whole configuration copied. Ctrl+V pastes one back.";
             return;
-        paintField_ = paintUndo_.back();
-        paintUndo_.pop_back();
+        }
+        const std::size_t index = *focusedSlider_;
+        sf::Clipboard::setString(sf::String(rowClipboardText(index)));
+        if (!cut) {
+            status_ = sliders_[index].label + " copied.";
+            return;
+        }
+        pushUndo();
+        sliders_[index].value = sliders_[index].defaultValue;
+        sliders_[index].text = sliders_[index].defaultText;
+        syncBodyRows(index);
+        status_ = sliders_[index].label + " cut back to its default.";
+    }
+
+    void pasteIntoFocusedRow() {
+        const std::string incoming = sf::Clipboard::getString().toAnsiString();
+        if (incoming.empty()) {
+            status_ = "The clipboard is empty.";
+            return;
+        }
+        if (incoming.find('\n') != std::string::npos &&
+            incoming.find('=') != std::string::npos) {
+            pushUndo();
+            std::string error;
+            if (applyConfigurationText(incoming, error)) {
+                status_ = "Configuration pasted from the clipboard.";
+            } else {
+                undoStack_.pop_back();
+                status_ = "That is not a configuration: " + error;
+            }
+            return;
+        }
+        if (!focusedSlider_.has_value()) {
+            status_ = "Click a parameter first, then Ctrl+V into it.";
+            return;
+        }
+        const std::size_t index = *focusedSlider_;
+        std::string error;
+        pushUndo();
+        if (!sliders_[index].setFromText(incoming, error)) {
+            undoStack_.pop_back();
+            invalidSlider_ = index;
+            status_ = sliders_[index].label + ": " + error;
+            return;
+        }
+        invalidSlider_.reset();
+        syncBodyRows(index);
+        status_ = sliders_[index].label + " pasted.";
+    }
+
+    static std::string lowerCopy(std::string text) {
+        for (char& character : text)
+            character = static_cast<char>(
+                std::tolower(static_cast<unsigned char>(character)));
+        return text;
+    }
+
+    bool rowMatchesSearch(std::size_t index) const {
+        if (searchQuery_.empty())
+            return true;
+        const std::string needle = lowerCopy(searchQuery_);
+        if (lowerCopy(sliders_[index].label).find(needle) !=
+            std::string::npos)
+            return true;
+        return lowerCopy(std::string(parameterKey(index))).find(needle) !=
+               std::string::npos;
+    }
+
+    void openSearch() {
+        searchActive_ = true;
+        cancelSliderEdit(false);
+        status_ = "Type to filter the parameters. Enter keeps it, Escape "
+                  "clears it.";
+        updateLayout(layoutSize_);
+    }
+
+    void closeSearch(bool clear) {
+        searchActive_ = false;
+        if (clear)
+            searchQuery_.clear();
+        updateLayout(layoutSize_);
+    }
+
+    void jumpToFirstMatch() {
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            if (rowHidden_[index])
+                continue;
+            focusedSlider_ = index;
+            scrollRowIntoView(index);
+            return;
+        }
+    }
+
+    void scrollRowIntoView(std::size_t index) {
+        const sf::FloatRect viewport = parameterViewport();
+        const float y = sliders_[index].track.position.y;
+        if (y < viewport.position.y + 40.0f) {
+            parameterScrollOffset_ = clampFloat(
+                parameterScrollOffset_ - (viewport.position.y + 40.0f - y),
+                0.0f, maxParameterScroll_);
+        } else if (y > viewport.position.y + viewport.size.y - 20.0f) {
+            parameterScrollOffset_ = clampFloat(
+                parameterScrollOffset_ +
+                    (y - (viewport.position.y + viewport.size.y - 20.0f)),
+                0.0f, maxParameterScroll_);
+        }
+        updateLayout(layoutSize_);
+    }
+
+    bool handleShortcut(const sf::Event::KeyPressed& key) {
+        const bool control = key.control;
+        if (!control)
+            return false;
+        switch (key.code) {
+        case sf::Keyboard::Key::Z:
+            if (key.shift)
+                performRedo();
+            else
+                performUndo();
+            return true;
+        case sf::Keyboard::Key::Y:
+            performRedo();
+            return true;
+        case sf::Keyboard::Key::C:
+            copyFocusedRow(false);
+            return true;
+        case sf::Keyboard::Key::X:
+            copyFocusedRow(true);
+            return true;
+        case sf::Keyboard::Key::V:
+            pasteIntoFocusedRow();
+            return true;
+        case sf::Keyboard::Key::F:
+            openSearch();
+            return true;
+        case sf::Keyboard::Key::S:
+            saveConfiguration();
+            return true;
+        case sf::Keyboard::Key::O:
+            loadConfiguration();
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    bool handleSearchKey(const sf::Event::KeyPressed& key) {
+        if (!searchActive_)
+            return false;
+        if (key.code == sf::Keyboard::Key::Escape) {
+            closeSearch(true);
+            return true;
+        }
+        if (key.code == sf::Keyboard::Key::Enter) {
+            jumpToFirstMatch();
+            searchActive_ = false;
+            return true;
+        }
+        if (key.code == sf::Keyboard::Key::Backspace) {
+            if (!searchQuery_.empty())
+                searchQuery_.pop_back();
+            updateLayout(layoutSize_);
+            return true;
+        }
+        return false;
+    }
+
+    bool handleSearchText(char32_t unicode) {
+        if (!searchActive_)
+            return false;
+        if (unicode >= 32 && unicode < 127 && searchQuery_.size() < 40) {
+            searchQuery_.push_back(static_cast<char>(unicode));
+            updateLayout(layoutSize_);
+        }
+        return true;
     }
 
     bool writePaintField(const std::filesystem::path& path,
@@ -5614,6 +6980,485 @@ private:
         return true;
     }
 
+    sf::FloatRect layoutCanvasRect() const {
+        sf::FloatRect area = setupViewport_;
+        area.position.x += 12.0f;
+        area.position.y += 52.0f;
+        area.size.x -= 24.0f;
+        area.size.y -= 152.0f;
+        const float want =
+            static_cast<float>(sliders_[DomainX].value /
+                               std::max(1e-9, sliders_[DomainY].value));
+        const float have = area.size.x / std::max(1.0f, area.size.y);
+        if (want > have) {
+            const float h = area.size.x / want;
+            area.position.y += (area.size.y - h) * 0.5f;
+            area.size.y = h;
+        } else {
+            const float w = area.size.y * want;
+            area.position.x += (area.size.x - w) * 0.5f;
+            area.size.x = w;
+        }
+        return area;
+    }
+
+    sf::FloatRect layoutTimeTrack() const {
+        const sf::FloatRect canvas = layoutCanvasRect();
+        return {{canvas.position.x,
+                 setupViewport_.position.y + setupViewport_.size.y - 62.0f},
+                {canvas.size.x, 6.0f}};
+    }
+
+    std::string layoutMaskSignature() const {
+        std::ostringstream out;
+        out << std::setprecision(9) << sliders_[DomainX].value << '|'
+            << sliders_[DomainY].value << '|' << sliders_[CellsX].value << '|'
+            << sliders_[CellsY].value << '|' << sliders_[SliceX].value << '|'
+            << sliders_[SliceZ].value << '|' << sliders_[SliceRotation].value
+            << '|' << (invertSection_ ? 1 : 0) << '|'
+            << geometry_.sourcePath().u8string() << '|'
+            << sliders_[Profiles].text;
+        return out.str();
+    }
+
+    void refreshLayoutMask() {
+        const std::string signature = layoutMaskSignature();
+        if (signature == layoutSignature_ && !layoutOwner_.empty())
+            return;
+        layoutSignature_ = signature;
+        layoutOwner_.clear();
+        layoutObjects_ = 0;
+        layoutCentreX_.clear();
+        layoutCentreY_.clear();
+        if (geometry_.empty())
+            return;
+
+        MaskParameters parameters = sectionParameters();
+        parameters.nx = std::min(parameters.nx, 400);
+        parameters.ny = std::min(parameters.ny, 400);
+        const MaskResult mask = geometry_.generateMask(parameters);
+        if (!mask.success)
+            return;
+
+        layoutNx_ = parameters.nx;
+        layoutNy_ = parameters.ny;
+        layoutOwner_.assign(mask.cells.size(), 0);
+
+        std::vector<int> stack;
+        for (int seed = 0; seed < layoutNx_ * layoutNy_; ++seed) {
+            if (mask.cells[seed] == 0 || layoutOwner_[seed] != 0)
+                continue;
+            ++layoutObjects_;
+            stack.clear();
+            stack.push_back(seed);
+            layoutOwner_[seed] = layoutObjects_;
+            double sumX = 0.0, sumY = 0.0, count = 0.0;
+            while (!stack.empty()) {
+                const int cell = stack.back();
+                stack.pop_back();
+                const int i = cell % layoutNx_;
+                const int j = cell / layoutNx_;
+                sumX += i;
+                sumY += j;
+                count += 1.0;
+                for (int dj = -1; dj <= 1; ++dj)
+                    for (int di = -1; di <= 1; ++di) {
+                        if (di == 0 && dj == 0)
+                            continue;
+                        const int ni = i + di;
+                        const int nj = j + dj;
+                        if (ni < 0 || ni >= layoutNx_ || nj < 0 ||
+                            nj >= layoutNy_)
+                            continue;
+                        const int neighbour = nj * layoutNx_ + ni;
+                        if (mask.cells[neighbour] == 0 ||
+                            layoutOwner_[neighbour] != 0)
+                            continue;
+                        layoutOwner_[neighbour] = layoutObjects_;
+                        stack.push_back(neighbour);
+                    }
+            }
+            const double dx = sliders_[DomainX].value / layoutNx_;
+            const double dy = sliders_[DomainY].value / layoutNy_;
+            layoutCentreX_.push_back((sumX / count + 0.5) * dx);
+            layoutCentreY_.push_back((sumY / count + 0.5) * dy);
+        }
+        if (layoutSelected_ > layoutObjects_)
+            layoutSelected_ = 0;
+    }
+
+    bool layoutPointToDomain(sf::Vector2f point, double& x, double& y) const {
+        const sf::FloatRect canvas = layoutCanvasRect();
+        if (!canvas.contains(point))
+            return false;
+        x = sliders_[DomainX].value *
+            static_cast<double>((point.x - canvas.position.x) / canvas.size.x);
+        y = sliders_[DomainY].value *
+            static_cast<double>(1.0f - (point.y - canvas.position.y) /
+                                           canvas.size.y);
+        return true;
+    }
+
+    sf::Vector2f layoutDomainToPoint(double x, double y) const {
+        const sf::FloatRect canvas = layoutCanvasRect();
+        return {canvas.position.x +
+                    static_cast<float>(x / std::max(1e-9,
+                                                    sliders_[DomainX].value)) *
+                        canvas.size.x,
+                canvas.position.y + canvas.size.y -
+                    static_cast<float>(y / std::max(1e-9,
+                                                    sliders_[DomainY].value)) *
+                        canvas.size.y};
+    }
+
+    int layoutObjectAt(sf::Vector2f point) const {
+        double x = 0.0, y = 0.0;
+        if (!layoutPointToDomain(point, x, y) || layoutOwner_.empty())
+            return 0;
+        for (int object = 1; object <= layoutObjects_; ++object) {
+            const Pose pose = poseAt(object, layoutTime_);
+            const double px = x - pose.x;
+            const double py = y - pose.y;
+            const int i = static_cast<int>(
+                px / std::max(1e-9, sliders_[DomainX].value) * layoutNx_);
+            const int j = static_cast<int>(
+                py / std::max(1e-9, sliders_[DomainY].value) * layoutNy_);
+            if (i < 0 || i >= layoutNx_ || j < 0 || j >= layoutNy_)
+                continue;
+            if (layoutOwner_[static_cast<std::size_t>(j) * layoutNx_ + i] ==
+                object)
+                return object;
+        }
+        return 0;
+    }
+
+    double layoutDuration() const {
+        return std::max(1e-6, sliders_[TotalTime].value);
+    }
+
+    void setLayoutTimeFromX(float x) {
+        const sf::FloatRect track = layoutTimeTrack();
+        const double t = std::clamp(
+            static_cast<double>((x - track.position.x) / track.size.x), 0.0,
+            1.0);
+        layoutTime_ = t * layoutDuration();
+    }
+
+    bool handleLayoutMousePressed(sf::Mouse::Button button,
+                                  sf::Vector2f position) {
+        if (!layoutMode_)
+            return false;
+        if (button == sf::Mouse::Button::Left) {
+            if (layoutKeyButton_.hit(position)) {
+                dropCurrentPose();
+                return true;
+            }
+            if (layoutDropButton_.hit(position)) {
+                pushUndo();
+                removeKeyframe(layoutSelected_, layoutTime_);
+                return true;
+            }
+            if (layoutInterpButton_.hit(position)) {
+                layoutInterp_ =
+                    (layoutInterp_ + 1) % interpNames().size();
+                if (layoutInterp_ == 0)
+                    layoutEase_ = (layoutEase_ + 1) % easeNames().size();
+                status_ = std::string("Keyframes drop with interp=") +
+                          interpNames()[layoutInterp_] + ", ease=" +
+                          easeNames()[layoutEase_];
+                return true;
+            }
+            if (layoutClearButton_.hit(position)) {
+                pushUndo();
+                setEntry(sliders_[BodyTrackLine].text, layoutSelected_,
+                         std::string());
+                setEntry(sliders_[BodyMotionLine].text, layoutSelected_,
+                         std::string());
+                loadBodyRows();
+                status_ = "Track cleared for that body.";
+                return true;
+            }
+            if (layoutTimeTrack().contains(
+                    {position.x, position.y - 8.0f}) ||
+                layoutTimeTrack().contains(position)) {
+                draggingLayoutTime_ = true;
+                setLayoutTimeFromX(position.x);
+                return true;
+            }
+        }
+        double x = 0.0, y = 0.0;
+        if (!layoutPointToDomain(position, x, y))
+            return false;
+        if (button == sf::Mouse::Button::Left) {
+            const int picked = layoutObjectAt(position);
+            if (picked > 0) {
+                layoutSelected_ = picked;
+                sliders_[BodySelect].value = picked;
+                loadBodyRows();
+                pushUndo();
+                layoutDragging_ = true;
+                status_ = "Body " + std::to_string(picked) +
+                          " selected. Drag to place it, K drops a keyframe "
+                          "at the time cursor.";
+            } else {
+                layoutSelected_ = 0;
+                status_ = "Nothing there. Click a body to pick it up.";
+            }
+            return true;
+        }
+        if (button == sf::Mouse::Button::Right && layoutSelected_ > 0) {
+            pushUndo();
+            layoutRotating_ = true;
+            return true;
+        }
+        return false;
+    }
+
+    void dragLayoutSelection(sf::Vector2f delta) {
+        if (layoutSelected_ <= 0)
+            return;
+        const sf::FloatRect canvas = layoutCanvasRect();
+        Pose pose = poseAt(layoutSelected_, layoutTime_);
+        pose.x += static_cast<double>(delta.x / canvas.size.x) *
+                  sliders_[DomainX].value;
+        pose.y -= static_cast<double>(delta.y / canvas.size.y) *
+                  sliders_[DomainY].value;
+        pose.time = layoutTime_;
+        pose.interp = interpNames()[layoutInterp_];
+        pose.ease = easeNames()[layoutEase_];
+        dropKeyframe(layoutSelected_, pose);
+    }
+
+    void rotateLayoutSelection(float deltaX) {
+        if (layoutSelected_ <= 0)
+            return;
+        Pose pose = poseAt(layoutSelected_, layoutTime_);
+        pose.rot += static_cast<double>(deltaX) * 0.5;
+        pose.time = layoutTime_;
+        pose.interp = interpNames()[layoutInterp_];
+        pose.ease = easeNames()[layoutEase_];
+        dropKeyframe(layoutSelected_, pose);
+    }
+
+    void dropCurrentPose() {
+        if (layoutSelected_ <= 0) {
+            status_ = "Pick a body first.";
+            return;
+        }
+        pushUndo();
+        Pose pose = poseAt(layoutSelected_, layoutTime_);
+        pose.time = layoutTime_;
+        pose.interp = interpNames()[layoutInterp_];
+        pose.ease = easeNames()[layoutEase_];
+        dropKeyframe(layoutSelected_, pose);
+        status_ = "Keyframe at " + formatValue(layoutTime_, false, "s") +
+                  " for body " + std::to_string(layoutSelected_) + ".";
+    }
+
+    bool handleLayoutKeyPressed(const sf::Event::KeyPressed& key) {
+        const double stepSeconds = layoutDuration() / 40.0;
+        switch (key.code) {
+        case sf::Keyboard::Key::K:
+            dropCurrentPose();
+            return true;
+        case sf::Keyboard::Key::Delete:
+            if (layoutSelected_ > 0) {
+                pushUndo();
+                removeKeyframe(layoutSelected_, layoutTime_);
+            }
+            return true;
+        case sf::Keyboard::Key::I:
+            layoutInterp_ = (layoutInterp_ + 1) % interpNames().size();
+            status_ = std::string("Keyframes drop with interp=") +
+                      interpNames()[layoutInterp_];
+            return true;
+        case sf::Keyboard::Key::Comma:
+            layoutTime_ = std::max(0.0, layoutTime_ - stepSeconds);
+            return true;
+        case sf::Keyboard::Key::Period:
+            layoutTime_ =
+                std::min(layoutDuration(), layoutTime_ + stepSeconds);
+            return true;
+        case sf::Keyboard::Key::Q:
+            if (layoutSelected_ > 0) {
+                pushUndo();
+                rotateLayoutSelection(-6.0f);
+            }
+            return true;
+        case sf::Keyboard::Key::E:
+            if (layoutSelected_ > 0) {
+                pushUndo();
+                rotateLayoutSelection(6.0f);
+            }
+            return true;
+        case sf::Keyboard::Key::Tab:
+            if (layoutObjects_ > 0) {
+                layoutSelected_ = layoutSelected_ % layoutObjects_ + 1;
+                sliders_[BodySelect].value = layoutSelected_;
+                loadBodyRows();
+            }
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    void drawLayoutCanvas() {
+        refreshLayoutMask();
+        const sf::FloatRect canvas = layoutCanvasRect();
+
+        sf::RectangleShape frame(canvas.size);
+        frame.setPosition(canvas.position);
+        frame.setFillColor(sf::Color{16, 20, 26});
+        frame.setOutlineColor(BORDER);
+        frame.setOutlineThickness(1.0f);
+        window_->draw(frame);
+
+        if (layoutOwner_.empty() || layoutNx_ < 1 || layoutNy_ < 1) {
+            window_->draw(makeText(
+                font_,
+                geometry_.empty()
+                    ? "Import a model and the bodies show up here."
+                    : "No solid cells in this section yet.",
+                16,
+                {canvas.position.x + 16.0f, canvas.position.y + 16.0f},
+                MUTED));
+            return;
+        }
+
+        const float cellW = canvas.size.x / layoutNx_;
+        const float cellH = canvas.size.y / layoutNy_;
+        for (int object = 1; object <= layoutObjects_; ++object) {
+            const Pose pose = poseAt(object, layoutTime_);
+            const sf::Vector2f shift =
+                layoutDomainToPoint(pose.x, pose.y) -
+                layoutDomainToPoint(0.0, 0.0);
+            const bool chosen = object == layoutSelected_;
+            sf::Color colour =
+                chosen ? ACCENT : sf::Color{96, 112, 140};
+            sf::VertexArray cells(sf::PrimitiveType::Triangles);
+            for (int j = 0; j < layoutNy_; ++j)
+                for (int i = 0; i < layoutNx_; ++i) {
+                    if (layoutOwner_[static_cast<std::size_t>(j) * layoutNx_ +
+                                     i] != object)
+                        continue;
+                    const float x0 = canvas.position.x + i * cellW + shift.x;
+                    const float y0 = canvas.position.y + canvas.size.y -
+                                     (j + 1) * cellH + shift.y;
+                    const sf::Vector2f a{x0, y0};
+                    const sf::Vector2f b{x0 + cellW, y0};
+                    const sf::Vector2f c{x0 + cellW, y0 + cellH};
+                    const sf::Vector2f d{x0, y0 + cellH};
+                    cells.append({a, colour});
+                    cells.append({b, colour});
+                    cells.append({c, colour});
+                    cells.append({a, colour});
+                    cells.append({c, colour});
+                    cells.append({d, colour});
+                }
+            window_->draw(cells);
+
+            const sf::Vector2f label = layoutDomainToPoint(
+                layoutCentreX_[object - 1] + pose.x,
+                layoutCentreY_[object - 1] + pose.y);
+            std::string caption = std::to_string(object);
+            if (std::fabs(pose.rot) > 0.05)
+                caption += "  " + formatValue(pose.rot, false, "deg");
+            window_->draw(makeText(font_, caption, chosen ? 15 : 12,
+                                   {label.x + 6.0f, label.y - 8.0f},
+                                   chosen ? TEXT : MUTED));
+
+            const std::vector<Pose> track = poseTrack(object);
+            if (track.size() > 1) {
+                sf::VertexArray path(sf::PrimitiveType::LineStrip);
+                for (const Pose& step : track) {
+                    const sf::Vector2f point = layoutDomainToPoint(
+                        layoutCentreX_[object - 1] + step.x,
+                        layoutCentreY_[object - 1] + step.y);
+                    path.append({point, chosen ? ACCENT : sf::Color{70, 82,
+                                                                    104}});
+                }
+                window_->draw(path);
+                for (const Pose& step : track) {
+                    const sf::Vector2f point = layoutDomainToPoint(
+                        layoutCentreX_[object - 1] + step.x,
+                        layoutCentreY_[object - 1] + step.y);
+                    sf::CircleShape dot(chosen ? 4.0f : 2.5f);
+                    dot.setOrigin({chosen ? 4.0f : 2.5f,
+                                   chosen ? 4.0f : 2.5f});
+                    dot.setPosition(point);
+                    dot.setFillColor(chosen ? sf::Color::White
+                                            : sf::Color{70, 82, 104});
+                    window_->draw(dot);
+                }
+            }
+        }
+
+        drawLayoutTimeline();
+    }
+
+    void drawLayoutTimeline() {
+        const sf::FloatRect track = layoutTimeTrack();
+        sf::RectangleShape rail(track.size);
+        rail.setPosition(track.position);
+        rail.setFillColor(sf::Color{52, 60, 74});
+        window_->draw(rail);
+
+        const double duration = layoutDuration();
+        if (layoutSelected_ > 0)
+            for (const Pose& pose : poseTrack(layoutSelected_)) {
+                const float x =
+                    track.position.x +
+                    static_cast<float>(pose.time / duration) * track.size.x;
+                sf::RectangleShape tick({2.0f, 14.0f});
+                tick.setPosition({x - 1.0f, track.position.y - 4.0f});
+                tick.setFillColor(sf::Color::White);
+                window_->draw(tick);
+            }
+
+        const float cursor =
+            track.position.x +
+            static_cast<float>(layoutTime_ / duration) * track.size.x;
+        sf::RectangleShape head({3.0f, 20.0f});
+        head.setPosition({cursor - 1.5f, track.position.y - 7.0f});
+        head.setFillColor(ACCENT);
+        window_->draw(head);
+
+        std::ostringstream caption;
+        caption << std::fixed << std::setprecision(4) << layoutTime_ << " s of "
+                << duration << " s";
+        if (layoutSelected_ > 0)
+            caption << "   |   body " << layoutSelected_ << "   |   "
+                    << interpNames()[layoutInterp_] << " "
+                    << easeNames()[layoutEase_];
+        caption << "   |   click a body, drag to place, K keyframes, "
+                   "right-drag or Q/E rotates, , and . step time";
+        window_->draw(makeText(font_, caption.str(), 12,
+                               {track.position.x, track.position.y + 12.0f},
+                               MUTED));
+    }
+
+    void drawLayoutControls() {
+        layoutButton_.label = layoutMode_ ? "Layout on" : "Layout";
+        layoutButton_.selected = layoutMode_;
+        layoutButton_.enabled = true;
+        layoutButton_.draw(*window_, font_);
+        if (!layoutMode_)
+            return;
+        layoutKeyButton_.label = "Keyframe";
+        layoutDropButton_.label = "Remove";
+        layoutInterpButton_.label = interpNames()[layoutInterp_];
+        layoutClearButton_.label = "Clear";
+        layoutKeyButton_.enabled = layoutSelected_ > 0;
+        layoutDropButton_.enabled = layoutSelected_ > 0;
+        layoutInterpButton_.enabled = true;
+        layoutClearButton_.enabled = layoutSelected_ > 0;
+        layoutKeyButton_.draw(*window_, font_);
+        layoutDropButton_.draw(*window_, font_);
+        layoutInterpButton_.draw(*window_, font_);
+        layoutClearButton_.draw(*window_, font_);
+    }
+
     void drawSetup() {
         drawPanel(
             *window_,
@@ -5621,6 +7466,8 @@ private:
              {LEFT_PANEL_WIDTH, static_cast<float>(layoutSize_.y) - 50.0f}});
         importButton_.draw(*window_, font_);
         outputFolderButton_.draw(*window_, font_);
+        drawParameterStrip();
+        drawParameterRowBackdrops();
         drawParameterGroupHeaders();
         for (std::size_t index = 0; index < sliders_.size(); ++index) {
             if (!parameterRowOnScreen(index)) {
@@ -5647,7 +7494,9 @@ private:
         viewBackground.setOutlineThickness(1.0f);
         window_->draw(viewBackground);
 
-        if (painting_ && phasesOn()) {
+        if (layoutMode_) {
+            drawLayoutCanvas();
+        } else if (painting_ && phasesOn()) {
             drawPaintCanvas();
         } else if (geometry_.empty()) {
             window_->draw(makeText(
@@ -5665,9 +7514,10 @@ private:
         } else {
             drawGeometryPreview();
         }
-        if (phasesOn())
+        if (phasesOn() && !layoutMode_)
             drawPaintControls();
-        if (!painting_) {
+        drawLayoutControls();
+        if (!painting_ && !layoutMode_) {
             drawSetupInfoOverlay();
             drawSliceControls();
         }
@@ -6789,6 +8639,36 @@ private:
 
     float setupZoom_ = 1.0f;
 
+    std::vector<Snapshot> undoStack_;
+    std::vector<Snapshot> redoStack_;
+
+    std::optional<std::size_t> focusedSlider_;
+    bool searchActive_ = false;
+    std::string searchQuery_;
+    std::size_t activeTab_ = 0;
+    std::array<Button, PARAMETER_TABS.size()> tabButtons_;
+
+    bool layoutMode_ = false;
+    int layoutSelected_ = 0;
+    int layoutObjects_ = 0;
+    double layoutTime_ = 0.0;
+    bool layoutDragging_ = false;
+    bool layoutRotating_ = false;
+    bool draggingLayoutTime_ = false;
+    std::vector<int> layoutOwner_;
+    int layoutNx_ = 0;
+    int layoutNy_ = 0;
+    std::vector<double> layoutCentreX_;
+    std::vector<double> layoutCentreY_;
+    std::string layoutSignature_;
+    Button layoutButton_;
+    Button layoutKeyButton_;
+    Button layoutDropButton_;
+    Button layoutInterpButton_;
+    Button layoutClearButton_;
+    std::size_t layoutInterp_ = 0;
+    std::size_t layoutEase_ = 0;
+
     bool painting_ = false;
     int paintBrush_ = 3;
     int paintTarget_ = 0;
@@ -6832,6 +8712,18 @@ private:
     double runTargetSeconds_ = 0.0;   // where it is heading
     double runElapsedSeconds_ = 0.0;
     bool windowHidden_ = false;
+    std::string visibilitySignature_;
+    std::array<bool, ParameterCount> rowHidden_{};
+    std::array<bool, PARAMETER_GROUPS.size()> groupShown_{};
+    std::array<std::size_t, PARAMETER_GROUPS.size()> groupFirstShown_{};
+    std::array<float, PARAMETER_GROUPS.size()> groupHeaderY_{};
+
+    std::string visibilitySignature_;
+    std::array<bool, ParameterCount> rowHidden_{};
+    std::array<bool, PARAMETER_GROUPS.size()> groupShown_{};
+    std::array<std::size_t, PARAMETER_GROUPS.size()> groupFirstShown_{};
+    std::array<float, PARAMETER_GROUPS.size()> groupHeaderY_{};
+
     std::vector<std::uint8_t> previewSolid_;
     std::size_t previewNx_ = 0;
     std::size_t previewNy_ = 0;
