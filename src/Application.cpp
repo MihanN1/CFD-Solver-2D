@@ -5,6 +5,7 @@
 #include "NumericInput.hpp"
 #include "BodyTrack.hpp"
 #include "GeometryProcessor.hpp"
+#include "ParameterInfo.hpp"
 #include "SectionAdapter.hpp"
 #include "TrayIcon.hpp"
 #include "VtkFrame.hpp"
@@ -845,381 +846,6 @@ enum class ResultOrigin {
     ImportedFiles
 };
 
-enum ParameterIndex : std::size_t {
-    WindSpeed,
-    Viscosity,
-    Density,
-    Phases,
-    Density1,
-    Viscosity1,
-    Density2,
-    Viscosity2,
-    PhaseInitKind,
-    PhaseLevel,
-    PhaseSpotX,
-    PhaseSpotY,
-    VofSchemeKind,
-    MixingKindRow,
-    Diffusivity,
-    SurfaceTension,
-    ContactAngle,
-    SourceLine,
-    GravityEnabled,
-    GravityAccel,
-    GravityAngle,
-    GravityMode,
-    RegimeKind,
-    Gamma1,
-    GasConstant1,
-    Gamma2,
-    GasConstant2,
-    Temperature0,
-    AmbientPressure,
-    MachInlet,
-    SpeciesModeRow,
-    AcousticFields,
-    AcousticWindow,
-    AcousticRef,
-    MicrophoneLine,
-    MicInterval,
-    MicAudio,
-    MicAudioRate,
-    MicAudioSpeed,
-    TurbulenceKindRow,
-    SmagorinskyCs,
-    TurbIntensity,
-    TurbLengthScale,
-    SliceX,
-    SliceZ,
-    SliceRotation,
-    Profiles,
-    CaseKind,
-    LidSpeed,
-    BcLeft,
-    BcRight,
-    BcBottom,
-    BcTop,
-    BcLeftSpeed,
-    BcRightSpeed,
-    BcBottomSpeed,
-    BcTopSpeed,
-    InletFrom,
-    InletTo,
-    InletProfileKind,
-    WallMotionLine,
-    BodySelect,
-    BodyBehaviour,
-    BodyRotation,
-    BodySlideX,
-    BodySlideY,
-    BodyVelocityX,
-    BodyVelocityY,
-    BodySpin,
-    BodyMass,
-    BodyDensity,
-    BodyPins,
-    BodyMotionLine,
-    BodyTrackLine,
-    BodyCouplingKind,
-    BodyCollisions,
-    BodyRestitution,
-    BodyForceReport,
-    DomainX,
-    DomainY,
-    CellsX,
-    CellsY,
-    Cfl,
-    TotalTime,
-    SteadyTolerance,
-    AddTime,
-    DtUpdateInterval,
-    DtSafety,
-    Convection,
-    Limiter,
-    TimeSchemeKind,
-    CoarseSorOmega,
-    SmootherOmega,
-    MgIterations,
-    MgTolerance,
-    MgMinCoarseSize,
-    SaveInterval,
-    ExtraFields,
-    UseCuda,
-    UseAvx2,
-    UseOpenMp,
-    SolverThreads,
-    CacheMegabytes,
-    ParameterCount
-};
-
-struct ParameterGroupInfo {
-    std::size_t firstIndex;
-    const char* label;
-};
-
-constexpr std::array<ParameterGroupInfo, 16> PARAMETER_GROUPS{{
-constexpr std::array<ParameterGroupInfo, 16> PARAMETER_GROUPS{{
-    {WindSpeed, "FLOW"},
-    {Phases, "FLUIDS"},
-    {RegimeKind, "GAS / COMPRESSIBLE"},
-    {AcousticFields, "ACOUSTICS"},
-    {TurbulenceKindRow, "TURBULENCE"},
-    {RegimeKind, "GAS / COMPRESSIBLE"},
-    {AcousticFields, "ACOUSTICS"},
-    {TurbulenceKindRow, "TURBULENCE"},
-    {SliceX, "GEOMETRY"},
-    {CaseKind, "BOUNDARIES"},
-    {WallMotionLine, "WALLS"},
-    {BodySelect, "BODIES"},
-    {BodySelect, "BODIES"},
-    {DomainX, "DOMAIN / GRID"},
-    {Cfl, "TIME"},
-    {Convection, "NUMERICS"},
-    {CoarseSorOmega, "PRESSURE / MULTIGRID"},
-    {SaveInterval, "OUTPUT"},
-    {UseCuda, "ACCELERATION"},
-    {CacheMegabytes, "UI"}
-}};
-
-struct ParameterTabInfo {
-    const char* label;
-    std::array<int, 6> groups;
-};
-
-constexpr std::array<ParameterTabInfo, 5> PARAMETER_TABS{{
-    {"All",   {{-1, -1, -1, -1, -1, -1}}},
-    {"Flow",  {{0, 1, 2, 3, 4, -1}}},
-    {"Shape", {{5, 6, 7, 8, -1, -1}}},
-    {"Grid",  {{9, 10, 11, 12, -1, -1}}},
-    {"Run",   {{13, 14, 15, -1, -1, -1}}}
-}};
-
-const char* parameterKey(std::size_t index) {
-    static constexpr std::array<const char*, ParameterCount> keys{{
-        "U0", "nu", "ro",
-        "phases", "rho1", "nu1", "rho2", "nu2",
-        "phaseInit", "phaseLevel", "phaseX", "phaseY", "vofScheme",
-        "mixing", "diffusivity", "surfaceTension", "contactAngle", "sources",
-        "gravityEnabled", "gravityAccel", "gravityAngle", "gravityMode",
-        "regime", "gamma", "R", "gamma2", "R2", "T0", "pInf", "machInlet",
-        "speciesMode",
-        "acousticFields", "acousticWindow", "acousticRef", "microphones",
-        "micInterval", "micAudio", "micAudioRate", "micAudioSpeed",
-        "turbulence", "Cs", "turbIntensity", "turbLengthScale",
-        "sliceAngleX", "sliceAngleZ", "sliceRotation", "profiles",
-        "caseType", "lidSpeed",
-        "bcLeft", "bcRight", "bcBottom", "bcTop",
-        "bcLeftSpeed", "bcRightSpeed", "bcBottomSpeed", "bcTopSpeed",
-        "inletFrom", "inletTo", "inletProfile",
-        "wallMotion",
-        "uiBody", "uiBodyBehaviour", "uiBodyRot", "uiBodySlideX",
-        "uiBodySlideY", "uiBodyVx", "uiBodyVy", "uiBodySpin",
-        "uiBodyMass", "uiBodyDensity", "uiBodyPins",
-        "bodyMotion", "uiBodyTrack", "bodyCoupling",
-        "bodyCollisions", "bodyRestitution", "bodyForceReport",
-        "Lx", "Ly", "nx", "ny",
-        "CFL", "totalTime", "steadyTolerance", "addTime",
-        "dtUpdateInterval", "dtSafety",
-        "convection", "limiter", "timeScheme",
-        "omega", "smootherOmega", "mgIterations", "mgTolerance",
-        "mgMinCoarseSize", "saveInterval", "extraFields",
-        "useCuda", "useAvx2", "useOpenMP",
-        "threads", "uiCacheMB"
-    }};
-    return index < keys.size() ? keys[index] : "unknown";
-}
-
-std::string parameterHelp(std::size_t index) {
-    switch (index) {
-    case WindSpeed:
-        return "U0: inlet speed used by the Fluid Solver.";
-    case Viscosity:
-        return "nu: kinematic viscosity; affects Reynolds number and diffusion timestep.";
-    case Density:
-        return "rho / CLI key ro: physical density used by the solver pressure output.";
-    case Phases:
-        return "phases: 1 is one fluid and every run before this one. 2 turns on the volume fraction, and then rho and nu are ignored in favour of the two fluids below.";
-    case Density1:
-    case Viscosity1:
-        return "Fluid 1 is what the start shape is made of, and what the brush paints. Water is 1000 kg/m3 and 1e-6 m2/s.";
-    case Density2:
-    case Viscosity2:
-        return "Fluid 2 fills everything the start shape does not. Air is 1.225 kg/m3 and 1.5e-5 m2/s.";
-    case PhaseInitKind:
-        return "What is in the domain at the start: layer fills the bottom, drop is a circle, column is the dam break block. Painting overrides all three.";
-    case PhaseLevel:
-        return "Layer height, drop diameter or column height, as a fraction of the domain.";
-    case PhaseSpotX:
-    case PhaseSpotY:
-        return "Where the drop sits, or how wide the column is, as fractions of Lx and Ly.";
-    case VofSchemeKind:
-        return "How the interface is carried. hric and cicsam both push it back together every step; upwind smears it over ten cells and is here to be compared against.";
-    case MixingKindRow:
-        return "mixing: immiscible is oil and water, a surface between them that surface tension can pull on. miscible is ink and water, no surface at all - the composition spreads by diffusion instead and the interface scheme above is not read.";
-    case Diffusivity:
-        return "diffusivity: how fast one fluid spreads through the other, m2/s, and only read when they mix. Salt in water is about 1e-9, a gas into another gas about 1e-5.";
-    case SurfaceTension:
-        return "surfaceTension: sigma, in mN/m because that is how everybody quotes it. Water against air is 72, mercury is 485, a soap film is about 25. Zero is off and the whole curvature pass is skipped. It costs time steps as well as time: dt has to stay under sqrt((rho1+rho2)*dx^3/(4*pi*sigma)) or the smallest capillary wave the grid can hold blows up, and the solver says so on the first step.";
-    case ContactAngle:
-        return "contactAngle: degrees, measured inside fluid 1, at a solid wall. 90 is a wall neither fluid prefers, under 90 means fluid 1 wets it and creeps up, over 90 means it beads off.";
-    case SourceLine:
-        return "sources, in the solver's own grammar: x=0.5,y=0.2,r=0.05,rate=2,angle=90,phase=1 - a disc inside the domain that pushes fluid out of itself. Needs an outlet like an inlet does.";
-    case GravityEnabled:
-        return "gravityEnabled: adds gravity as a uniform body force. At constant density it moves the pressure map, not the velocity field.";
-    case GravityAccel:
-        return "gravityAccel: magnitude of that body force in m/s2. 9.81 is Earth.";
-    case GravityAngle:
-        return "gravityAngle: direction in degrees, measured clockwise from straight down.";
-    case RegimeKind:
-        return "incompressible is the projection solver and every run before this one: density is a constant, the pressure comes out of a Poisson solve, and the speed of sound is infinite. compressible is a second solver entirely - density is one of the unknowns, there is no pressure solve at all, and sound travels at a finite speed, which is what lets a shock exist and what lets the run have something to listen to. Picking it puts the multigrid rows out of use and brings the gas rows in.";
-    case Gamma1:
-    case GasConstant1:
-        return "The gas. gamma is the ratio of specific heats - 1.4 for air, 1.667 for helium or argon, about 1.3 for steam - and R is the specific gas constant, 287 for air and 2077 for helium. Together they fix the speed of sound: sqrt(gamma*R*T).";
-    case Gamma2:
-    case GasConstant2:
-        return "The second gas, read only at two phases. Helium in air is the demonstration everybody knows: same pressure, same temperature, sound travels nearly three times faster through it.";
-    case Temperature0:
-        return "T0: the reference temperature in kelvin. The inlet and the initial field are both built from it and the ambient pressure through the gas law, so it sets the density and the speed of sound of the whole run.";
-    case AmbientPressure:
-        return "pInf: the ambient pressure in pascals. 101325 is one atmosphere. It is what an outlet holds the flow to while it is subsonic, and what the initial field is built at.";
-    case MachInlet:
-        return "How fast the inlet blows, as a multiple of the speed of sound there rather than in m/s - because in a compressible run that ratio is the number that decides the physics. Under 1 the boundary still hears the domain and holds the pressure; over 1 nothing travels back out and the whole state is imposed.";
-    case SpeciesModeRow:
-        return "active lets the composition set gamma and R, so the speed of sound, the temperature and every wave speed follow the mixture. passive carries the fraction along and nothing else, with the properties frozen at the first gas - useful only for showing what the thermodynamics is worth, and the solver says so in its own log when it is on.";
-    case AcousticFields:
-        return "Writes the sound out as fields on the grid: the pressure fluctuation, its level in dB and a pitch in Hz for every cell. It costs four arrays and a running average per step, and it is off by default because most runs are not about the noise.";
-    case AcousticWindow:
-        return "How far back the running average looks, in seconds. It has to cover several periods of whatever you are listening for, and it is what separates the sound from the flow: anything slower than this window counts as the flow and is subtracted off.";
-    case AcousticRef:
-        return "The pressure that counts as 0 dB. 2e-5 Pa is the human hearing threshold and what SPL is always quoted against; 1 Pa is the other common choice and shifts every number by 94 dB.";
-    case MicrophoneLine:
-        return "Points that record the pressure every few steps: x=0.5,y=0.2;x=1,y=0.5 in metres. At the end the run writes microphones.txt next to the frames with the whole trace and, for each point, a level and a peak frequency found by scanning the spectrum. This is the accurate half of the acoustics; the fields are the half you can look at.";
-    case MicAudio:
-        return "Writes what each microphone heard as microphone1.wav, microphone2.wav and so on, next to the frames, so you can play it instead of reading a column of numbers. The trace is de-meaned, box-filtered down to the file's rate rather than plain decimated - dropping samples out of a megahertz signal folds everything above the new Nyquist back into the audible band as a screech that was never there - and peak-normalised, with the pascal value that ended up at full scale printed when the run stops.";
-    case MicAudioRate:
-        return "Sample rate of those .wav files. 44100 is what everything plays. There is nothing to gain above twice the highest frequency in the run, and the run's own ceiling is 1/(micInterval*dt).";
-    case MicAudioSpeed:
-        return "Stretches the timebase of the .wav. 1 is real time. 0.05 plays it twenty times slower, which drops every frequency by twenty as well - that is how you hear something that happened in two milliseconds, or how you bring a 40 kHz whistle down to where your ears are. It does not change the simulation, only the file.";
-    case MicInterval:
-        return "How many steps pass between microphone samples. 1 is every step and sets the sampling rate to 1/dt, which is the highest frequency the run can resolve at all. Raising it makes the file smaller and the ceiling lower.";
-    case TurbulenceKindRow:
-        return "none solves what is actually on the grid and nothing else, which is right until the grid stops being able to hold the smallest eddy that matters. smagorinsky is a large eddy model: it adds the viscosity the eddies smaller than a cell would have had, and it wants a grid fine enough that they really are small. kOmegaSST carries two more transported fields and models all of the turbulence rather than the small end of it, which is what a Reynolds number in the millions on a grid you can afford needs.";
-    case SmagorinskyCs:
-        return "Cs: the one constant Smagorinsky has. 0.17 is what it comes out at for isotropic turbulence, 0.1 is what channels and anything with a wall in it want, and near a wall it gets damped down from there anyway.";
-    case TurbIntensity:
-        return "How turbulent the inlet is, as a fraction of its speed. 0.01 is a wind tunnel, 0.05 is a pipe, 0.1 is behind something. Only kOmegaSST reads it: it sets k = 1.5*(I*U)^2 coming in.";
-    case TurbLengthScale:
-        return "The size of the biggest eddy coming in through the inlet, in metres. A tenth of the pipe or the duct is the usual guess, and zero lets the solver take a tenth of Ly. Only kOmegaSST reads it: with the intensity above it sets omega coming in.";
-    case SliceX:
-    case SliceZ:
-    case SliceRotation:
-        return "Geometry section transform. The UI bakes this into section-adapter.obj.";
-    case GravityMode:
-        return "gravityMode: reduced adds the head on output only, which is exact at one density. body puts the force in the solve and p becomes the total pressure.";
-    case Profiles:
-        return "profiles: several models at once, each placed where you say. <file>@x=1,y=0.5,size=0.3;<file>@x=3,y=0.5 - the separator is @ because a Windows path owns the colon.";
-    case CaseKind:
-        return "caseType: channel leaves the four sides to you. cavity is the lid driven cavity - four walls, the top one sliding - and it sets all four sides itself, so the boundary rows below are not sent when it is picked.";
-    case LidSpeed:
-        return "lidSpeed: how fast the cavity lid slides. Re = lidSpeed * Ly / nu, and 1 m/s with nu = 0.01 over a 1 m box is the Re 100 case everybody checks against Ghia.";
-    case SteadyTolerance:
-        return "steadyTolerance: stop early once the field stops changing. It is the largest velocity change per second divided by whatever drives the case, so 1e-5 means one part in a hundred thousand. Zero runs the whole of Total time.";
-    case BcLeft:
-    case BcRight:
-    case BcBottom:
-    case BcTop:
-        return "What this side of the domain does. A run needs at least one outlet, or the pressure has no level to sit at.";
-    case BcLeftSpeed:
-    case BcRightSpeed:
-    case BcBottomSpeed:
-    case BcTopSpeed:
-        return "Speed this side imposes: what a movingWall slides at, or an inlet speed other than U0. Left at zero on an inlet it means U0.";
-    case InletFrom:
-    case InletTo:
-        return "Cuts the inlet down to a band of its side, as fractions measured from the low end. The rest of that side becomes a wall.";
-    case InletProfileKind:
-        return "uniform is a flat inlet, parabolic bends it into a parabola carrying the same flow rate.";
-    case BodySelect:
-        return "Which body the rows under it are about. The numbers are the ones the solver prints for the mask, counted the same way - flood filled in scan order. The two text rows at the bottom are what is actually sent; these rows write into them.";
-    case BodyBehaviour:
-        return "static leaves the body alone. drag holds the fluid and pulls it along without the body going anywhere - that is wallMotion. slip lets the fluid past and exerts no drag. travel moves the body itself along a path you give. free lets go of it and the flow decides where it goes.";
-    case BodyRotation:
-    case BodySlideX:
-    case BodySlideY:
-        return "What a dragging surface does to the fluid touching it. The body itself does not move: rot spins the surface about its own centre, slideX and slideY run it along like a conveyor belt.";
-    case BodyVelocityX:
-    case BodyVelocityY:
-    case BodySpin:
-        return "How the body itself moves. Under travel this is the path; under free it is the velocity it is let go with, and the flow takes it from there.";
-    case BodyMass:
-    case BodyDensity:
-        return "What a free body weighs, per metre of depth because this is a 2D slice. Give it a mass, or a density and let the area do the arithmetic - whichever you set last wins. A body much lighter than the fluid it displaces wants coupling = strong.";
-    case BodyPins:
-        return "Degrees of freedom held still while the rest are free. A cylinder free to spin but not to drift is x and y pinned; a body free to fall straight down is spin pinned.";
-    case BodyTrackLine:
-        return "The keyframed poses the Layout view writes: one @t=..,x=..,y=..,rot=..,interp=..,ease=.. block per keyframe, per object. It is the UI's own record, it never reaches the solver, and every time it changes the Body motion row above is rewritten from it - each pair of poses becomes the velocity that carries the body from one to the next. Editing Body motion by hand still works; it just means the Layout view no longer knows where the body is meant to be.";
-    case BodyMotionLine:
-        return "bodyMotion, in the solver's own grammar: <object>:vx=0.2,omega=45;<object>:free=1,mass=2. The rows above write into this and it is what is sent, so editing it by hand does the same thing. @<seconds> opens a keyframe, which the rows above cannot write.";
-    case BodyCollisions:
-        return "Off, bodies pass straight through each other and through the walls - which is what every run before this did and is fine while nothing can meet anything. On, a body that would run into another one or into the domain edge bounces instead. Contact is read off the mask, so it is exact for any shape and not a circle around it.";
-    case BodyRestitution:
-        return "How much of the closing speed survives a bounce. 0 is a body that hits and stops dead, 1 is one that comes back at the speed it arrived. A body whose path you set is unmovable by construction, so a free body hitting one takes the whole impulse.";
-    case BodyForceReport:
-        return "Work out the fluid force on bodies whose path you set as well. It never changes where they go - a set path is a set path - it only puts the force in the step line so you can read what the fluid was doing to it. Free bodies always have it computed, because that is what moves them.";
-    case BodyCouplingKind:
-        return "How a free body is coupled to the fluid. added carries the fluid that moves with the body on the left hand side of its own equation of motion and costs nothing. strong iterates force and motion inside the step until they agree and costs that many pressure solves. weak does neither and is here to be compared against - it goes unstable as soon as the body is not much heavier than what it displaces.";
-    case WallMotionLine:
-        return "wallMotion, in the solver's own grammar: <object>:rot=90,slideX=0.5;<object>:slip=1. The object numbers are the ones the solver prints for the mask.";
-    case Convection:
-        return "upwind is first order and what this solver has always used. muscl is second order where the field is smooth, limited where it is not. central does no limiting at all.";
-    case Limiter:
-        return "Which limiter muscl uses. minmod is the most diffusive and the safest, superbee the least of both.";
-    case TimeSchemeKind:
-        return "euler is one projection a step. rk2 and rk3 project on every stage, cost that many times more and are what anything other than upwind needs under it.";
-    case ExtraFields:
-        return "Extra fields written into every frame for ParaView and the results view: vorticity, divergence, speed, objectId, comma separated.";
-    case DomainX:
-    case DomainY:
-        return "Physical domain size. dx=Lx/nx and dy=Ly/ny.";
-    case CellsX:
-    case CellsY:
-        return "Grid resolution. Typed values may exceed the slider range, subject to validation.";
-    case Cfl:
-        return "CFL controls the advective timestep restriction; valid range is (0, 1].";
-    case TotalTime:
-        return "Simulation duration in seconds for a new run.";
-    case AddTime:
-        return "Continuation only: seconds to add to the time the chosen frame stopped at. Zero uses Total time as the target instead.";
-    case DtUpdateInterval:
-        return "How many solver steps elapse between adaptive dt recalculations.";
-    case DtSafety:
-        return "Safety multiplier applied to the timestep; valid range is (0, 1].";
-    case CoarseSorOmega:
-        return "Relaxation omega for the coarsest pressure solve; must be in (0, 2).";
-    case SmootherOmega:
-        return "Relaxation omega used by multigrid smoothing; must be in (0, 2).";
-    case MgIterations:
-        return "Maximum/target multigrid V-cycles per pressure solve.";
-    case MgTolerance:
-        return "Relative residual tolerance for the pressure solve.";
-    case MgMinCoarseSize:
-        return "Minimum coarse-grid size used when building the multigrid hierarchy.";
-    case SaveInterval:
-        return "Write one VTK result every N solver steps.";
-    case UseCuda:
-        return "Requests CUDA in a CUDA-capable build; CPU-only builds force this off.";
-    case UseAvx2:
-        return "Lets the solver use its AVX2 kernels. Off falls back to the scalar path, which is slower and agrees to solver tolerance. Needs Fluid Solver 0.2 or newer.";
-    case UseOpenMp:
-        return "Lets the solver spread its loops over every core. Needs Fluid Solver 0.2 or newer.";
-    case SolverThreads:
-        return "How many threads the solver may use. 0 means every core. Needs Fluid Solver 0.2 or newer.";
-    case CacheMegabytes:
-        return "Maximum decoded VTK frame cache owned by the UI, in MiB.";
-    default:
-        return {};
-    }
-}
 
 struct ProjectedPoint {
     sf::Vector2f position;
@@ -1853,9 +1479,6 @@ struct SolverExecutableInfo {
     bool supportsBodyMotion = false;
     bool supportsTurbulence = false;
     bool supportsCompressible = false;
-    bool supportsBodyMotion = false;
-    bool supportsTurbulence = false;
-    bool supportsCompressible = false;
     bool supportsProfiles = false;
     bool supportsExtraFields = false;
     bool supportsSchemes = false;
@@ -2047,9 +1670,6 @@ SolverExecutableInfo inspectSolverExecutable(
     info.supportsBodyMotion = binaryContains(executable, "bodyMotion");
     info.supportsTurbulence = binaryContains(executable, "turbLengthScale");
     info.supportsCompressible = binaryContains(executable, "machInlet");
-    info.supportsBodyMotion = binaryContains(executable, "bodyMotion");
-    info.supportsTurbulence = binaryContains(executable, "turbLengthScale");
-    info.supportsCompressible = binaryContains(executable, "machInlet");
     info.supportsProfiles = binaryContains(executable, "profiles");
     info.supportsExtraFields = binaryContains(executable, "extraFields");
     info.supportsSchemes = binaryContains(executable, "timeScheme");
@@ -2200,6 +1820,18 @@ public:
               Slider{"Inlet Mach", "", 0.0, 20.0, 0.5, false, false},
               Slider{"Species mode", "", 0.0, 1.0, 0.0, true, false, false, 0.0,
                      ControlKind::Choice, {"active", "passive"}},
+              Slider{"Grid stretch", "", 0.0, 3.0, 0.0, true, false, false,
+                     0.0, ControlKind::Choice,
+                     {"off", "body", "wake", "edges"}},
+              Slider{"Stretch ratio", "", 1.0, 1.5, 1.05, false, false},
+              Slider{"Fine band", "", 0.01, 1.0, 0.25, false, false},
+              Slider{"Refinement levels", "", 0.0, 4.0, 0.0, true, false},
+              Slider{"Refine on", "", 0.0, 4.0, 4.0, true, false, false, 0.0,
+                     ControlKind::Choice,
+                     {"density", "vorticity", "species", "body",
+                      "everything"}},
+              Slider{"Refine above", "", 0.001, 1.0, 0.2, false, true},
+              Slider{"Regrid every", "steps", 1.0, 100000.0, 8.0, true, true},
               Slider{"Acoustic fields", "", 0.0, 1.0, 0.0, true, false, true},
               Slider{"Acoustic window", "s", 1e-6, 1000.0, 0.02, false, true},
               Slider{"0 dB reference", "Pa", 1e-12, 1e6, 2e-5, false, true},
@@ -2427,7 +2059,6 @@ public:
             }
             syncWindowLayout(window.getSize());
             syncRowVisibility();
-            syncRowVisibility();
 #ifdef _WIN32
             bool receivedFileDrop = false;
             if (fileDropTarget.takeReadFailure()) {
@@ -2592,28 +2223,13 @@ private:
         const float contentHeight =
             static_cast<float>(shownRows) * PARAMETER_ROW_HEIGHT +
             static_cast<float>(shownGroups) * PARAMETER_GROUP_HEIGHT;
-            static_cast<float>(shownRows) * PARAMETER_ROW_HEIGHT +
-            static_cast<float>(shownGroups) * PARAMETER_GROUP_HEIGHT;
         maxParameterScroll_ = std::max(0.0f, contentHeight - viewportHeight);
         parameterScrollOffset_ =
             clampFloat(parameterScrollOffset_, 0.0f, maxParameterScroll_);
 
         float cursor = PARAMETER_TOP + 24.0f - parameterScrollOffset_;
         groupHeaderY_.fill(-100000.0f);
-        float cursor = PARAMETER_TOP + 24.0f - parameterScrollOffset_;
-        groupHeaderY_.fill(-100000.0f);
         for (std::size_t index = 0; index < sliders_.size(); ++index) {
-            if (rowHidden_[index]) {
-                sliders_[index].track = {{20.0f, -100000.0f}, {278.0f, 5.0f}};
-                continue;
-            }
-            const std::size_t g = groupOf(index);
-            if (groupShown_[g] && groupFirstShown_[g] == index) {
-                cursor += PARAMETER_GROUP_HEIGHT;
-                groupHeaderY_[g] = cursor - 47.0f;
-            }
-            sliders_[index].track = {{20.0f, cursor}, {278.0f, 5.0f}};
-            cursor += PARAMETER_ROW_HEIGHT;
             if (rowHidden_[index]) {
                 sliders_[index].track = {{20.0f, -100000.0f}, {278.0f, 5.0f}};
                 continue;
@@ -3326,7 +2942,6 @@ private:
         if (releasedSlider.has_value()) {
             invalidSlider_.reset();
             syncBodyRows(*releasedSlider);
-            syncBodyRows(*releasedSlider);
         }
         draggingParameterScrollbar_ = false;
         draggingHorizontalSlice_ = false;
@@ -3456,7 +3071,6 @@ private:
         invalidSlider_.reset();
         editingSlider_.reset();
         sliderEditText_.clear();
-        syncBodyRows(index);
         syncBodyRows(index);
         return true;
     }
@@ -3850,7 +3464,9 @@ private:
             TurbIntensity, TurbLengthScale, LidSpeed};
         const std::size_t compressibleOnly[] = {
             Gamma1, GasConstant1, Gamma2, GasConstant2, Temperature0,
-            AmbientPressure, MachInlet, SpeciesModeRow, AcousticFields,
+            AmbientPressure, MachInlet, SpeciesModeRow, GridStretchKind,
+            StretchRatio, RefineNear, AmrLevels, AmrCriterionKind,
+            AmrThreshold, AmrEvery, AcousticFields,
             AcousticWindow, AcousticRef, MicrophoneLine, MicInterval,
             MicAudio, MicAudioRate, MicAudioSpeed};
 
@@ -3863,6 +3479,16 @@ private:
             rowHidden_[Gamma2] = !two;
             rowHidden_[GasConstant2] = !two;
             rowHidden_[SpeciesModeRow] = !two;
+            const bool stretching =
+                sliders_[GridStretchKind].choice() != "off";
+            rowHidden_[StretchRatio] = !stretching;
+            rowHidden_[RefineNear] =
+                !stretching || sliders_[GridStretchKind].choice() == "edges";
+            const bool refining =
+                std::lround(sliders_[AmrLevels].value) > 0;
+            rowHidden_[AmrCriterionKind] = !refining;
+            rowHidden_[AmrThreshold] = !refining;
+            rowHidden_[AmrEvery] = !refining;
             const bool listening = sliders_[AcousticFields].value >= 0.5;
             rowHidden_[AcousticWindow] =
                 !listening && sliders_[MicrophoneLine].text.empty();
@@ -3913,7 +3539,6 @@ private:
     }
 
     bool parameterRowOnScreen(std::size_t index) const {
-        if (index >= sliders_.size() || rowHidden_[index]) {
         if (index >= sliders_.size() || rowHidden_[index]) {
             return false;
         }
@@ -4012,6 +3637,15 @@ private:
         config.pInf = sliders_[AmbientPressure].value;
         config.machInlet = sliders_[MachInlet].value;
         config.speciesMode = sliders_[SpeciesModeRow].choice();
+        config.amrLevels =
+            static_cast<int>(std::lround(sliders_[AmrLevels].value));
+        config.amrCriterion = sliders_[AmrCriterionKind].choice();
+        config.amrThreshold = sliders_[AmrThreshold].value;
+        config.amrEvery =
+            static_cast<int>(std::lround(sliders_[AmrEvery].value));
+        config.gridStretch = sliders_[GridStretchKind].choice();
+        config.stretchRatio = sliders_[StretchRatio].value;
+        config.refineNear = sliders_[RefineNear].value;
         config.acousticFields = sliders_[AcousticFields].value >= 0.5;
         config.acousticWindow = sliders_[AcousticWindow].value;
         config.acousticRef = sliders_[AcousticRef].value;
@@ -4082,7 +3716,7 @@ private:
 
     std::optional<std::size_t> sliderForValidationError(
         const std::string& error) const {
-        const std::array<std::pair<const char*, ParameterIndex>, 37> mappings{{
+        const std::array<std::pair<const char*, ParameterIndex>, 44> mappings{{
             {"Lx", DomainX}, {"Ly", DomainY}, {"nx", CellsX}, {"ny", CellsY},
             {"U0", WindSpeed}, {"nu", Viscosity}, {"ro", Density},
             {"CFL", Cfl}, {"totalTime", TotalTime},
@@ -4096,6 +3730,10 @@ private:
             {"regime", RegimeKind}, {"gamma", Gamma1}, {"machInlet", MachInlet},
             {"T0", Temperature0}, {"pInf", AmbientPressure},
             {"speciesMode", SpeciesModeRow},
+            {"amrLevels", AmrLevels}, {"amrCriterion", AmrCriterionKind},
+            {"amrThreshold", AmrThreshold}, {"amrEvery", AmrEvery},
+            {"gridStretch", GridStretchKind}, {"stretchRatio", StretchRatio},
+            {"refineNear", RefineNear},
             {"acousticWindow", AcousticWindow},
             {"microphones", MicrophoneLine}, {"micInterval", MicInterval},
             {"micAudio", MicAudio}, {"micAudioRate", MicAudioRate},
@@ -4864,8 +4502,6 @@ private:
             config.supportsWallMotion = false;
         if (config.bodyMotion.empty())
             config.supportsBodyMotion = false;
-        if (config.bodyMotion.empty())
-            config.supportsBodyMotion = false;
         if (config.profiles.empty())
             config.supportsProfiles = false;
 
@@ -5479,18 +5115,20 @@ private:
     }
 
     ResultImageTransform resultImageTransform(const VtkFrame& frame) const {
-        const double physicalWidth =
-            static_cast<double>(frame.nx) * frame.spacingX;
-        const double physicalHeight =
-            static_cast<double>(frame.ny) * frame.spacingY;
+        const double physicalWidth = frame.spanX();
+        const double physicalHeight = frame.spanY();
         if (physicalWidth <= 0.0 || physicalHeight <= 0.0) {
             return {};
         }
         const double fit = std::min(
             static_cast<double>(resultViewport_.size.x) / physicalWidth,
             static_cast<double>(resultViewport_.size.y) / physicalHeight);
-        const double pixelWidth = frame.spacingX * fit * resultZoom_;
-        const double pixelHeight = frame.spacingY * fit * resultZoom_;
+        const double pixelWidth =
+            physicalWidth / std::max<std::size_t>(1, frame.nx) * fit *
+            resultZoom_;
+        const double pixelHeight =
+            physicalHeight / std::max<std::size_t>(1, frame.ny) * fit *
+            resultZoom_;
         const double imageWidth = static_cast<double>(frame.nx) * pixelWidth;
         const double imageHeight = static_cast<double>(frame.ny) * pixelHeight;
         return {
@@ -5687,6 +5325,92 @@ private:
         window_->draw(thumb);
     }
 
+    static std::vector<std::string> wrapText(const std::string& text,
+                                             std::size_t columns) {
+        std::vector<std::string> lines;
+        std::string line;
+        std::size_t at = 0;
+        while (at < text.size()) {
+            std::size_t space = text.find(' ', at);
+            if (space == std::string::npos)
+                space = text.size();
+            const std::string word = text.substr(at, space - at);
+            if (!line.empty() && line.size() + 1 + word.size() > columns) {
+                lines.push_back(line);
+                line.clear();
+            }
+            if (!line.empty())
+                line += ' ';
+            line += word;
+            at = space + 1;
+        }
+        if (!line.empty())
+            lines.push_back(line);
+        return lines;
+    }
+
+    void drawParameterTooltip() {
+        if (editingSlider_.has_value() || activeSlider_.has_value())
+            return;
+        std::optional<std::size_t> hovered;
+        for (std::size_t index = 0; index < sliders_.size(); ++index) {
+            if (!parameterRowOnScreen(index))
+                continue;
+            const sf::FloatRect row{
+                {12.0f, sliders_[index].track.position.y - 29.0f},
+                {292.0f, 42.0f}};
+            if (row.contains(lastMouse_)) {
+                hovered = index;
+                break;
+            }
+        }
+        if (!hovered.has_value())
+            return;
+        const std::string hint = parameterHint(*hovered);
+        if (hint.empty())
+            return;
+
+        const std::vector<std::string> lines = wrapText(hint, 52);
+        float widest = 0.0f;
+        for (const std::string& line : lines)
+            widest = std::max(widest,
+                              makeText(font_, line, 11, {0.0f, 0.0f})
+                                  .getLocalBounds()
+                                  .size.x);
+
+        const float padding = 8.0f;
+        const float lineHeight = 14.0f;
+        const sf::Vector2f box{
+            widest + padding * 2.0f,
+            lines.size() * lineHeight + padding * 2.0f - 2.0f};
+
+        sf::Vector2f at{lastMouse_.x + 18.0f, lastMouse_.y + 16.0f};
+        const float width = static_cast<float>(layoutSize_.x);
+        const float height = static_cast<float>(layoutSize_.y);
+        if (at.x + box.x > width - 8.0f)
+            at.x = std::max(8.0f, width - 8.0f - box.x);
+        if (at.y + box.y > height - 8.0f)
+            at.y = std::max(8.0f, lastMouse_.y - 12.0f - box.y);
+
+        sf::RectangleShape shadow(box);
+        shadow.setPosition({at.x + 2.0f, at.y + 2.0f});
+        shadow.setFillColor(sf::Color{0, 0, 0, 110});
+        window_->draw(shadow);
+
+        sf::RectangleShape frame(box);
+        frame.setPosition(at);
+        frame.setFillColor(sf::Color{24, 30, 40, 246});
+        frame.setOutlineColor(ACCENT_DARK);
+        frame.setOutlineThickness(1.0f);
+        window_->draw(frame);
+
+        for (std::size_t line = 0; line < lines.size(); ++line)
+            window_->draw(makeText(
+                font_, lines[line], 11,
+                {at.x + padding, at.y + padding + line * lineHeight - 2.0f},
+                TEXT));
+    }
+
     void drawParameterStrip() {
         if (searchActive_ || !searchQuery_.empty()) {
             sf::RectangleShape field({294.0f, PARAMETER_STRIP_HEIGHT});
@@ -5742,12 +5466,8 @@ private:
         for (std::size_t index = 0; index < PARAMETER_GROUPS.size(); ++index) {
             const ParameterGroupInfo& group = PARAMETER_GROUPS[index];
             if (group.firstIndex >= sliders_.size() || !groupShown_[index]) {
-        for (std::size_t index = 0; index < PARAMETER_GROUPS.size(); ++index) {
-            const ParameterGroupInfo& group = PARAMETER_GROUPS[index];
-            if (group.firstIndex >= sliders_.size() || !groupShown_[index]) {
                 continue;
             }
-            const float y = groupHeaderY_[index];
             const float y = groupHeaderY_[index];
             if (y < viewport.position.y - 18.0f ||
                 y > viewport.position.y + viewport.size.y) {
@@ -5886,222 +5606,27 @@ private:
             if (help.empty()) {
                 break;
             }
-            sf::RectangleShape helpBox({width, 48.0f});
+            const std::size_t columns = static_cast<std::size_t>(
+                std::max(24.0f, (width - 20.0f) / 5.4f));
+            const std::vector<std::string> lines = wrapText(help, columns);
+            const float lineHeight = 14.0f;
+            sf::RectangleShape helpBox(
+                {width, lines.size() * lineHeight + 18.0f});
             helpBox.setPosition({position.x, position.y + 136.0f});
             helpBox.setFillColor(OVERLAY_BACKGROUND);
             helpBox.setOutlineColor(ACCENT_DARK);
             helpBox.setOutlineThickness(1.0f);
             window_->draw(helpBox);
-            window_->draw(makeText(
-                font_, help, 11,
-                {position.x + 10.0f, position.y + 150.0f}, MUTED));
+            for (std::size_t line = 0; line < lines.size(); ++line)
+                window_->draw(makeText(
+                    font_, lines[line], 11,
+                    {position.x + 10.0f,
+                     position.y + 144.0f + line * lineHeight},
+                    MUTED));
             break;
         }
     }
 
-
-
-
-    struct BodyEntry {
-        int object = 0;
-        std::string settings;
-    };
-
-    static std::vector<BodyEntry> splitEntries(const std::string& line) {
-        std::vector<BodyEntry> out;
-        std::size_t pos = 0;
-        while (pos < line.size()) {
-            std::size_t colon = line.find(':', pos);
-            if (colon == std::string::npos)
-                break;
-            const std::string number = line.substr(pos, colon - pos);
-            int object = std::atoi(number.c_str());
-            std::size_t next = colon + 1;
-            while (next < line.size()) {
-                const std::size_t mark = line.find(';', next);
-                if (mark == std::string::npos) {
-                    next = line.size();
-                    break;
-                }
-                next = mark;
-                break;
-            }
-            if (object >= 1) {
-                BodyEntry entry;
-                entry.object = object;
-                entry.settings = line.substr(colon + 1, next - colon - 1);
-                out.push_back(entry);
-            }
-            pos = next + 1;
-        }
-        return out;
-    }
-
-    static std::string joinEntries(const std::vector<BodyEntry>& entries) {
-        std::string out;
-        for (const BodyEntry& entry : entries) {
-            if (entry.settings.empty())
-                continue;
-            if (!out.empty())
-                out += ';';
-            out += std::to_string(entry.object) + ':' + entry.settings;
-        }
-        return out;
-    }
-
-    static double settingOf(const std::string& settings,
-                            const std::string& name,
-                            double fallback = 0.0) {
-        std::size_t pos = 0;
-        while (pos < settings.size()) {
-            std::size_t end = settings.find(',', pos);
-            if (end == std::string::npos)
-                end = settings.size();
-            const std::string token = settings.substr(pos, end - pos);
-            const std::size_t eq = token.find('=');
-            if (eq != std::string::npos) {
-                std::string key = token.substr(0, eq);
-                while (!key.empty() && key.front() == ' ')
-                    key.erase(key.begin());
-                while (!key.empty() && key.back() == ' ')
-                    key.pop_back();
-                std::string lower;
-                for (char c : key)
-                    lower += static_cast<char>(
-                        std::tolower(static_cast<unsigned char>(c)));
-                if (lower == name)
-                    return std::atof(token.c_str() + eq + 1);
-            }
-            pos = end + 1;
-        }
-        return fallback;
-    }
-
-    static std::string number(double value) {
-        std::ostringstream out;
-        out << value;
-        return out.str();
-    }
-
-    static std::string entrySettings(const std::string& line, int object) {
-        for (const BodyEntry& entry : splitEntries(line))
-            if (entry.object == object)
-                return entry.settings;
-        return std::string();
-    }
-
-    static void setEntry(std::string& line, int object,
-                         const std::string& settings) {
-        std::vector<BodyEntry> entries = splitEntries(line);
-        bool found = false;
-        for (BodyEntry& entry : entries)
-            if (entry.object == object) {
-                entry.settings = settings;
-                found = true;
-            }
-        if (!found && !settings.empty()) {
-            BodyEntry entry;
-            entry.object = object;
-            entry.settings = settings;
-            entries.push_back(entry);
-        }
-        line = joinEntries(entries);
-    }
-
-    int selectedBody() const {
-        return static_cast<int>(std::lround(sliders_[BodySelect].value));
-    }
-
-    void syncBodyRows(std::size_t index) {
-        if (index == BodySelect) {
-            loadBodyRows();
-            return;
-        }
-        if (index >= BodyBehaviour && index <= BodyPins)
-            storeBodyRows();
-        else if (index == BodyMotionLine || index == WallMotionLine)
-            loadBodyRows();
-    }
-
-    void loadBodyRows() {
-        const int object = selectedBody();
-        const std::string wall =
-            entrySettings(sliders_[WallMotionLine].text, object);
-        const std::string travel =
-            entrySettings(sliders_[BodyMotionLine].text, object);
-
-        int behaviour = 0;
-        if (!travel.empty())
-            behaviour = settingOf(travel, "free", 0.0) >= 0.5 ? 4 : 3;
-        else if (!wall.empty())
-            behaviour = settingOf(wall, "slip", 0.0) >= 0.5 ? 2 : 1;
-
-        sliders_[BodyBehaviour].value = behaviour;
-        sliders_[BodyRotation].value = settingOf(wall, "rot");
-        sliders_[BodySlideX].value = settingOf(wall, "slidex");
-        sliders_[BodySlideY].value = settingOf(wall, "slidey");
-        sliders_[BodyVelocityX].value = settingOf(travel, "vx");
-        sliders_[BodyVelocityY].value = settingOf(travel, "vy");
-        sliders_[BodySpin].value = settingOf(travel, "omega");
-        sliders_[BodyMass].value = settingOf(travel, "mass");
-        sliders_[BodyDensity].value = settingOf(travel, "density");
-        const int pins = (settingOf(travel, "pinx") >= 0.5 ? 1 : 0) |
-                         (settingOf(travel, "piny") >= 0.5 ? 2 : 0) |
-                         (settingOf(travel, "pinrot") >= 0.5 ? 4 : 0);
-        sliders_[BodyPins].value = pins;
-    }
-
-    void storeBodyRows() {
-        const int object = selectedBody();
-        const std::string behaviour = sliders_[BodyBehaviour].choice();
-
-        std::string wall;
-        std::string travel;
-        const auto add = [](std::string& into, const std::string& text) {
-            if (!into.empty())
-                into += ',';
-            into += text;
-        };
-
-        if (behaviour == "drag") {
-            if (sliders_[BodyRotation].value != 0.0)
-                add(wall, "rot=" + number(sliders_[BodyRotation].value));
-            if (sliders_[BodySlideX].value != 0.0)
-                add(wall, "slideX=" + number(sliders_[BodySlideX].value));
-            if (sliders_[BodySlideY].value != 0.0)
-                add(wall, "slideY=" + number(sliders_[BodySlideY].value));
-            if (wall.empty())
-                wall = "rot=0";
-        } else if (behaviour == "slip") {
-            wall = "slip=1";
-        } else if (behaviour == "travel" || behaviour == "free") {
-            if (behaviour == "free")
-                add(travel, "free=1");
-            if (sliders_[BodyVelocityX].value != 0.0)
-                add(travel, "vx=" + number(sliders_[BodyVelocityX].value));
-            if (sliders_[BodyVelocityY].value != 0.0)
-                add(travel, "vy=" + number(sliders_[BodyVelocityY].value));
-            if (sliders_[BodySpin].value != 0.0)
-                add(travel, "omega=" + number(sliders_[BodySpin].value));
-            if (behaviour == "free") {
-                if (sliders_[BodyDensity].value > 0.0)
-                    add(travel,
-                        "density=" + number(sliders_[BodyDensity].value));
-                else if (sliders_[BodyMass].value > 0.0)
-                    add(travel, "mass=" + number(sliders_[BodyMass].value));
-                const int pins =
-                    static_cast<int>(std::lround(sliders_[BodyPins].value));
-                if (pins & 1) add(travel, "pinX=1");
-                if (pins & 2) add(travel, "pinY=1");
-                if (pins & 4) add(travel, "pinRot=1");
-            }
-            if (travel.empty())
-                travel = "vx=0";
-        }
-
-        setEntry(sliders_[WallMotionLine].text, object, wall);
-        setEntry(sliders_[BodyMotionLine].text, object, travel);
-    }
 
 
 
@@ -7521,6 +7046,7 @@ private:
             drawSetupInfoOverlay();
             drawSliceControls();
         }
+        drawParameterTooltip();
     }
 
     void drawGeometryPreview() {
@@ -8042,6 +7568,17 @@ private:
                 resultQuantity_ == ResultQuantity::Scalar &&
                 activeScalarName_ == "phase";
 
+            // A stretched frame is resampled onto an even image of the same
+            // size: pixel to metres, metres to cell. Without it a cell a
+            // hundredth the size of its neighbour is drawn the same width and
+            // the picture is a lie. On an even frame the lookup is the
+            // identity and the branch is hoisted out of the loop.
+            const bool stretchedFrame = frame.rectilinear();
+            const double evenWidth =
+                frame.spanX() / std::max<std::size_t>(1, frame.nx);
+            const double evenHeight =
+                frame.spanY() / std::max<std::size_t>(1, frame.ny);
+
             // One row per thread. Rows are independent and the map is pure
             // arithmetic, so this is the cheapest parallelism in the UI. The
             // per-pixel branch on the displayed quantity is gone with it: the
@@ -8053,10 +7590,20 @@ private:
                  row < static_cast<std::ptrdiff_t>(ny);
                  ++row) {
                 const std::size_t j = static_cast<std::size_t>(row);
-                const std::size_t sourceRow = j * nx;
+                const std::size_t sourceRow =
+                    (stretchedFrame ? frame.rowAt(
+                                          frame.originY +
+                                          (row + 0.5) * evenHeight)
+                                    : j) *
+                    nx;
                 const std::size_t pixelRow = (ny - 1u - j) * nx * 4u;
                 for (std::size_t i = 0; i < nx; ++i) {
-                    const std::size_t dataIndex = sourceRow + i;
+                    const std::size_t column =
+                        stretchedFrame
+                            ? frame.columnAt(frame.originX +
+                                             (i + 0.5) * evenWidth)
+                            : i;
+                    const std::size_t dataIndex = sourceRow + column;
                     sf::Color color = SOLID_COLOR;
                     if (solidMask[dataIndex] == 0) {
                         if (finiteMask[dataIndex] == 0 || !rangeAvailable) {
@@ -8712,12 +8259,6 @@ private:
     double runTargetSeconds_ = 0.0;   // where it is heading
     double runElapsedSeconds_ = 0.0;
     bool windowHidden_ = false;
-    std::string visibilitySignature_;
-    std::array<bool, ParameterCount> rowHidden_{};
-    std::array<bool, PARAMETER_GROUPS.size()> groupShown_{};
-    std::array<std::size_t, PARAMETER_GROUPS.size()> groupFirstShown_{};
-    std::array<float, PARAMETER_GROUPS.size()> groupHeaderY_{};
-
     std::string visibilitySignature_;
     std::array<bool, ParameterCount> rowHidden_{};
     std::array<bool, PARAMETER_GROUPS.size()> groupShown_{};

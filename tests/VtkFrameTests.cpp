@@ -86,6 +86,37 @@ void writeFrame(const std::filesystem::path& path,
     output << '\n';
 }
 
+void writeRectilinearFrame(const std::filesystem::path& path) {
+    std::ofstream output(path, std::ios::binary | std::ios::trunc);
+    const float xs[4] = {0.0f, 0.1f, 0.5f, 1.5f};
+    const float ys[3] = {0.0f, 0.25f, 1.0f};
+    output << "# vtk DataFile Version 3.0\n"
+           << "CFD-Solver-2D output, step 7\n"
+           << "BINARY\n"
+           << "DATASET RECTILINEAR_GRID\n"
+           << "DIMENSIONS 4 3 1\n"
+           << "X_COORDINATES 4 float\n";
+    for (float value : xs)
+        writeFloat(output, value);
+    output << "\nY_COORDINATES 3 float\n";
+    for (float value : ys)
+        writeFloat(output, value);
+    output << "\nZ_COORDINATES 1 float\n";
+    writeFloat(output, 0.0f);
+    output << "\nCELL_DATA 6\n"
+           << "SCALARS pressure float 1\n"
+           << "LOOKUP_TABLE default\n";
+    for (int value = 0; value < 6; ++value)
+        writeFloat(output, static_cast<float>(value));
+    output << "\nSCALARS solid int 1\nLOOKUP_TABLE default\n";
+    for (int value = 0; value < 6; ++value)
+        writeWord(output, 0u);
+    output << "\nVECTORS velocity float\n";
+    for (int value = 0; value < 18; ++value)
+        writeFloat(output, 0.0f);
+    output << '\n';
+}
+
 int fail(const std::string& message) {
     std::cerr << message << '\n';
     return 1;
@@ -148,6 +179,42 @@ int main() {
     if (std::abs(withPhase.scalars.at("phase").at(3) - 0.75f) > 1e-6f) {
         return fail("the phase fraction came back with the wrong values");
     }
+
+    const std::filesystem::path stretched = root / "solution_7.vtk";
+    writeRectilinearFrame(stretched);
+    const maskui::VtkFrame uneven = maskui::VtkFrameParser::parse(stretched);
+    if (!uneven.rectilinear())
+        return fail("a RECTILINEAR_GRID frame came back claiming to be evenly "
+                    "spaced");
+    if (uneven.nx != 3 || uneven.ny != 2)
+        return fail("a RECTILINEAR_GRID frame came back the wrong size");
+    if (std::abs(uneven.spanX() - 1.5) > 1e-6 ||
+        std::abs(uneven.spanY() - 1.0) > 1e-6)
+        return fail("the domain of a stretched frame is not what its "
+                    "coordinates say");
+    if (std::abs(uneven.cellRight(0) - uneven.cellLeft(0) - 0.1) > 1e-6 ||
+        std::abs(uneven.cellRight(2) - uneven.cellLeft(2) - 1.0) > 1e-6)
+        return fail("the cell widths of a stretched frame are wrong, and a "
+                    "ten to one stretch is the whole point of the format");
+
+    if (uneven.columnAt(0.05) != 0 || uneven.columnAt(0.3) != 1 ||
+        uneven.columnAt(1.2) != 2)
+        return fail("a physical x did not land in the cell that contains it");
+    if (uneven.columnAt(-5.0) != 0 || uneven.columnAt(99.0) != 2)
+        return fail("a physical x outside the domain did not clamp to an end "
+                    "cell");
+    if (uneven.rowAt(0.1) != 0 || uneven.rowAt(0.8) != 1)
+        return fail("a physical y did not land in the row that contains it");
+    if (std::abs(uneven.cellCentreX(1) - 0.3) > 1e-6)
+        return fail("the centre of a stretched cell is not between its faces");
+
+    const maskui::VtkFrame even = maskui::VtkFrameParser::parse(exact);
+    if (even.rectilinear())
+        return fail("an evenly spaced frame came back claiming to be "
+                    "stretched");
+    if (even.columnAt(0.75) != 1 || even.rowAt(0.25) != 0)
+        return fail("the lookup stopped working on an evenly spaced frame, "
+                    "where it is supposed to be the identity it always was");
 
     std::error_code cleanupError;
     std::filesystem::remove_all(root, cleanupError);

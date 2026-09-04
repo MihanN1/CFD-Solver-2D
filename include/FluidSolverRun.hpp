@@ -92,6 +92,15 @@ struct FluidSolverRunConfig {
     double pInf = 101325.0;
     double machInlet = 0.5;
     std::string speciesMode = "active";
+    int amrLevels = 0;
+    std::string amrCriterion = "everything";
+    double amrThreshold = 0.2;
+    int amrEvery = 8;
+
+    std::string gridStretch = "off";
+    double stretchRatio = 1.05;
+    double refineNear = 0.25;
+
     bool acousticFields = false;
     double acousticWindow = 0.02;
     double acousticRef = 2e-5;

@@ -51,6 +51,36 @@ struct VtkFrame {
     double originY = 0.0;
     double spacingX = 0.0;
     double spacingY = 0.0;
+    std::vector<double> faceX;
+    std::vector<double> faceY;
+
+    bool rectilinear() const { return !faceX.empty() && !faceY.empty(); }
+    double cellLeft(std::size_t i) const {
+        return rectilinear() ? faceX[i] : originX + i * spacingX;
+    }
+    double cellRight(std::size_t i) const {
+        return rectilinear() ? faceX[i + 1] : originX + (i + 1) * spacingX;
+    }
+    double cellBottom(std::size_t j) const {
+        return rectilinear() ? faceY[j] : originY + j * spacingY;
+    }
+    double cellTop(std::size_t j) const {
+        return rectilinear() ? faceY[j + 1] : originY + (j + 1) * spacingY;
+    }
+    double cellCentreX(std::size_t i) const {
+        return 0.5 * (cellLeft(i) + cellRight(i));
+    }
+    double cellCentreY(std::size_t j) const {
+        return 0.5 * (cellBottom(j) + cellTop(j));
+    }
+    double spanX() const {
+        return rectilinear() ? faceX.back() - faceX.front() : nx * spacingX;
+    }
+    double spanY() const {
+        return rectilinear() ? faceY.back() - faceY.front() : ny * spacingY;
+    }
+    std::size_t columnAt(double x) const;
+    std::size_t rowAt(double y) const;
     std::vector<float> pressure;
     std::vector<std::uint8_t> solid;
     std::vector<Velocity> velocity;

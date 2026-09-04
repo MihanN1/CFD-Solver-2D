@@ -107,6 +107,7 @@ add_library(mask_ui_core STATIC
     src/FluidSolverRun.cpp
     src/GeometryProcessor.cpp
     src/NumericInput.cpp
+    src/ParameterInfo.cpp
     src/SectionAdapter.cpp
     src/tiny_obj_loader_impl.cpp
     src/TrayIcon.cpp
@@ -325,6 +326,7 @@ if(BUILD_TESTING)
         GeometryProcessorTests
         ContinuationTests
         BodyTrackTests
+        ParameterInfoTests
     )
         add_mask_ui_test(${MASK_UI_TEST})
     endforeach()

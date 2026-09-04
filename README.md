@@ -145,7 +145,6 @@ is not there:
 | `gravityEnabled` `gravityAccel` `gravityAngle` | `gravityEnabled` |
 | `wallMotion` | `wallMotion` |
 | `bodyMotion` `bodyCoupling` | `bodyMotion` |
-| `bodyMotion` `bodyCoupling` | `bodyMotion` |
 | `profiles` | `profiles` |
 | `extraFields` | `extraFields` |
 | `convection` `limiter` `timeScheme` `gravityMode` | `timeScheme` |
@@ -173,93 +172,6 @@ the boundary rows happened to say, which is not what picking a preset means.
 **Stop when steady** is `steadyTolerance`: the run ends early once the largest
 velocity change per second, measured against whatever drives the case, drops
 under it. Zero, the default, runs the whole of **Total time**.
-
-=== BODIES ===
-
-A body selector and a set of rows that edit whichever body it is pointing at,
-rather than one row per body per setting - a table of eight settings across
-however many bodies the mask happens to have does not fit on a screen, and the
-number is not known until the mask is generated.
-
-    BODIES   Body               which one the rows below are about
-             Behaviour          static | drag | slip | travel | free
-             Surface spin       deg/s      \
-             Surface slide X    m/s         > drag: the surface moves, the
-             Surface slide Y    m/s        /  body does not
-             Body velocity X    m/s        \
-             Body velocity Y    m/s         > travel: the body itself moves.
-             Body spin          deg/s      /  Under free, what it starts with
-             Body mass          kg/m       \
-             Body density       kg/m3       > free only
-             Pinned             which degrees of freedom are held
-             Body motion        text, the solver's grammar
-             Coupling           weak | added | strong
-             Collisions         off, bodies pass through each other
-             Bounciness         how much of the closing speed survives
-             Report forces      work the force out for set paths too
-
-The two text rows are the truth and the rows above them are a way of writing
-into one entry of each - exactly as the brush is a way of writing into the
-sources row. Pick a body and the rows read that body's entry back out of the
-text; change a row and it writes that entry back. Editing the text by hand does
-the same thing, and `@<seconds>` keyframes can only be written there, because a
-timetable is not a slider.
-
-**Collisions** is off by default and that is deliberate: turning it on changes
-the answer, and every run written before this branch had bodies passing
-through each other. On, a body that would run into another one or into the
-domain edge bounces instead, and **Bounciness** is how much of the closing
-speed comes back - 0 stops dead, 1 rebounds at the speed it arrived.
-
-**Report forces** works the fluid force out for bodies whose path you set as
-well. It never changes where they go; a set path is a set path. It only puts
-the force in the step line so you can read what the fluid was doing to the
-body - useful just before you release it, and for a drag coefficient. Free
-bodies always have it computed, because that is the thing that moves them.
-
-=== TURBULENCE ===
-
-    TURBULENCE  Turbulence model        none | smagorinsky | kOmegaSST
-                Smagorinsky Cs          the one constant smagorinsky has
-                Turbulence intensity    fraction of the inlet speed
-                Turbulence length       m, the biggest eddy coming in
-
-Four rows, and three of them are read by one model each. `Cs` is only sent for
-`smagorinsky`; the two inlet rows are only sent for `kOmegaSST`; `none` sends
-the model name and nothing else, so a run with the model off puts exactly one
-extra key on the command line and changes nothing about what the solver does.
-
-The whole group is held back on finding `turbLengthScale` in the executable,
-like every block since 0.2. Point it at a 0.7 solver and none of these four
-rows reach the command line.
-
-Refused before the run rather than after: a `Cs` of zero or above one, an
-intensity above one - an inlet more turbulent than it is moving - and a
-negative length scale.
-
-`nuT`, `wallDistance` and `strain` are `extraFields` like any other and show up
-in the **Field** button once the solver has been asked to write them. `k` and
-`omega` arrive on their own in every frame of a `kOmegaSST` run, because the
-solver needs them back to continue.
-
-One trap the UI cannot fix for you: **object numbers come from the mask, not
-from the order the models are listed in.** The flood fill walks the grid in
-scan order, so of two shapes side by side either can end up as number 1. The
-solver prints the mapping with the mesh, before anything runs, and that is what
-the Body row is pointing at.
-
-**Behaviour** is the one row that decides which of the two strings an entry
-goes into. `drag` and `slip` are `wallMotion` - the surface moves and the body
-stays put. `travel` and `free` are `bodyMotion` - the body itself goes
-somewhere, and the solver cuts its outline again every step.
-
-Held back on finding `bodyMotion` in the executable, like every block since
-0.2. Point it at a 0.6 solver and the whole group is left off the command line.
-
-The validator refuses a body told to travel through an empty domain, because
-moving a body means cutting its outline again and an empty domain has no
-outline to cut. Better a sentence now than a run that starts, prints a refusal
-of its own and then sits perfectly still for ten minutes.
 
 === BODIES ===
 
@@ -407,23 +319,62 @@ section adapter with no contours in it. An empty adapter used to make the solver
 fall back to its verification circle, which is how a lid driven cavity ended up
 with a cylinder sitting in the middle of it.
 
+## Uneven grids
+
+The compressible solver can now put its cells where they are needed, and its
+frames come out as `RECTILINEAR_GRID` with a list of face positions per axis
+instead of one `SPACING`. The reader takes both: `VtkFrame` grows a `faceX` and
+a `faceY`, empty on an evenly spaced frame, and everything that used to
+multiply by `spacingX` asks the frame for the cell instead.
+
+Drawing it needed one change and it is worth naming, because getting it wrong
+looks fine. The result view builds one texture pixel per cell and stretches it
+over the viewport - which on a stretched grid draws a cell a tenth the size of
+its neighbour at the same width, and the picture is then a lie about where
+everything is. So a stretched frame is **resampled onto an even image of the
+same size**: pixel to metres, metres to cell, nearest cell wins. Hover does the
+same lookup in reverse, so the readout under the cursor is the cell that is
+actually under the cursor. On an evenly spaced frame the lookup is the identity
+and the branch is hoisted out of the loop, so nothing about an old frame
+changed.
+
+`VtkFrameTests` covers it: a 10:1 stretched frame parsed back with the right
+cell widths, a physical coordinate landing in the cell that contains it,
+coordinates outside the domain clamping to the end cells, and an evenly spaced
+frame still reporting itself as even and still resolving cells the way it
+always did. Non-increasing coordinates are refused - a cell of zero width is
+not a cell.
+
+Three rows drive it, in the GAS / COMPRESSIBLE group: `Grid stretch`
+(off / body / wake / edges), `Stretch ratio` and `Fine band`, the last two
+appearing only once stretching is asked for, and `Fine band` staying away for
+`edges`, which has no band.
+
+## Refinement
+
+The compressible solver can put patches of a finer grid where the flow needs
+them. Four rows in the GAS / COMPRESSIBLE group drive it - `Refinement levels`,
+`Refine on`, `Refine above` and `Regrid every` - with the last three appearing
+only once a level is asked for.
+
+The UI needs nothing else, and that is deliberate on the solver's side: a
+refined run still writes the ordinary `.vtk` frame on the base grid, with the
+fine levels averaged into it, so every frame this UI could read before it stays
+readable. The full hierarchy goes into a `.vtm` next to it, one `.vtr` per
+patch, for ParaView. Showing the patches at their own resolution in this window
+is a later job; averaging them into the base grid is not a placeholder, it is
+what makes the base frame the best answer the run has rather than the coarse
+one it started from.
+
+`FluidSolverRunTests` covers the settings: the four keys reaching the command
+line together, a criterion nobody has heard of being refused, a threshold of
+zero being refused (it refines the whole domain), rebuilding every zero steps
+being refused, and the three detail keys staying off the command line when
+refinement is off.
+
 ## Result fields
 
 A frame carries pressure, the solid mask and velocity. Anything else the solver
-was asked to write - `vorticity`, `divergence`, `speed`, `objectId`, `phase`,
-`nuT`, `k`, `omega`, `wallDistance`, `strain` - is read into a registry keyed by
-the name the frame used, and the **Field** button walks whatever turned up and
-back round to pressure. Nothing in the UI has a list of which fields exist, so a
-field the solver learns to write later shows up without this project changing.
-
-Where a scalar sits in the file is the writer's business, and it took a while to
-admit it. The reader used to refuse any array it did not recognise until it had
-seen all three of pressure, mask and velocity - and the solver writes the phase
-fraction between the pressure and the mask, with `k` and `omega` beside it. So
-every two-fluid frame ever written was rejected on the way in with *Unknown
-scalar array before required arrays: phase*. The order check is gone; a frame
-that never provides the three is still rejected, at the end of the parse where
-that can actually be known.
 was asked to write - `vorticity`, `divergence`, `speed`, `objectId`, `phase`,
 `nuT`, `k`, `omega`, `wallDistance`, `strain` - is read into a registry keyed by
 the name the frame used, and the **Field** button walks whatever turned up and
@@ -542,6 +493,41 @@ too, and its buffer is kept between frames rather than reallocated per step.
 Enable `BUILD_TESTING` in CMake GUI if wanted, then build the test targets and run
 CTest. `SolverCompatibilityTests` is added only when `CFD_SOLVER_EXE` points to an
 existing solver executable.
+
+## Every row explains itself
+
+Hovering a parameter pops a small box under the cursor with one sentence about
+what that row does. Not the manual - one sentence, written so that somebody who
+has never opened a CFD tool gets a real answer and somebody who has still gets
+the unit and a number to aim at:
+
+    Viscosity nu     How syrupy the fluid is. Low means it swirls and sheds
+                     vortices, high means it flows smoothly. Water 1e-6,
+                     air 1.5e-5 m2/s.
+
+    Inlet Mach       Inlet speed as a multiple of the speed of sound, not in
+                     m/s. Under 1 is subsonic, over 1 is supersonic.
+
+    CFL              How far the flow may cross a cell in one step. Under 1
+                     keeps it stable; lower is safer and slower.
+
+Every one of the 104 rows has one. That is not a claim, it is a test:
+`ParameterInfoTests` walks the whole list and fails if a row has no hint, if a
+hint is under twenty characters (a label, not an explanation), over two hundred
+(that belongs in the long help), does not end in a full stop, or has stray
+whitespace in it. It also checks that every row has a unique solver key, that
+the groups are in ascending order, and that every group is reachable from
+exactly one tab. Add a parameter and forget its hint and the build tells you.
+
+The longer paragraph that was already there did not go anywhere - it still
+appears in the info box in the top right corner while hovering, and it is
+word-wrapped now instead of being clipped after one line, which is what it had
+been doing since it was added.
+
+The tables behind all of this - the parameter enum, the keys, the hints, the
+long help, the groups and the tabs - moved out of `Application.cpp` into
+`ParameterInfo.{hpp,cpp}`, which is what makes them testable without a window
+and takes six hundred lines out of a file that had nine thousand.
 
 ## Keyboard
 

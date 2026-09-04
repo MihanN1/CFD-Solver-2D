@@ -528,6 +528,45 @@ int main() {
     }
     config.micInterval = 1;
 
+    config.amrLevels = 2;
+    config.amrCriterion = "density";
+    config.amrThreshold = 0.15;
+    config.amrEvery = 4;
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("refinement arguments failed: " + error);
+    }
+    if (!contains(arguments, "amrLevels=2") ||
+        !contains(arguments, "amrCriterion=density") ||
+        !hasPrefix(arguments, "amrThreshold=") ||
+        !contains(arguments, "amrEvery=4")) {
+        return fail("refinement was asked for and the settings did not "
+                    "follow it");
+    }
+    config.amrCriterion = "sideways";
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a refinement criterion nobody has heard of was accepted");
+    }
+    config.amrCriterion = "density";
+    config.amrThreshold = 0.0;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("a refinement threshold of zero was accepted, and it "
+                    "refines the whole domain");
+    }
+    config.amrThreshold = 0.15;
+    config.amrEvery = 0;
+    if (maskui::validateFluidSolverRunConfig(config, error)) {
+        return fail("rebuilding the patches every zero steps was accepted");
+    }
+    config.amrEvery = 4;
+    config.amrLevels = 0;
+    if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
+        return fail("refinement off arguments failed: " + error);
+    }
+    if (!contains(arguments, "amrLevels=0") ||
+        hasPrefix(arguments, "amrThreshold=")) {
+        return fail("refinement was off and its settings were sent anyway");
+    }
+
     config.micAudio = true;
     if (!maskui::buildFluidSolverArguments(config, output, arguments, error)) {
         return fail("audio arguments failed: " + error);

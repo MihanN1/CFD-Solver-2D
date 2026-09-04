@@ -154,9 +154,6 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
     const bool gas = config.supportsCompressible &&
                      config.regime == "compressible";
 
-    const bool gas = config.supportsCompressible &&
-                     config.regime == "compressible";
-
     if (!validateGrid(config, error) ||
         !requirePositive("Lx", config.Lx, error) ||
         !requirePositive("Ly", config.Ly, error) ||
@@ -261,6 +258,38 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
         if (!(config.acousticRef > 0.0) || !std::isfinite(config.acousticRef))
             return fail(error, "the 0 dB reference has to be a positive "
                                "pressure");
+        if (config.amrLevels < 0 || config.amrLevels > 4)
+            return fail(error, "refinement is between 0 and 4 levels; four is "
+                               "already sixteen times finer");
+        if (config.amrLevels > 0) {
+            if (config.amrCriterion != "density" &&
+                config.amrCriterion != "vorticity" &&
+                config.amrCriterion != "species" &&
+                config.amrCriterion != "body" &&
+                config.amrCriterion != "everything")
+                return fail(error, "amrCriterion is density, vorticity, "
+                                   "species, body or everything");
+            if (!(config.amrThreshold > 0.0) || !(config.amrThreshold <= 1.0))
+                return fail(error, "amrThreshold is a fraction of the "
+                                   "steepest feature in the domain, so it "
+                                   "lives between 0 and 1");
+            if (config.amrEvery < 1)
+                return fail(error, "the patches have to be rebuilt at least "
+                                   "every step");
+        }
+        if (config.gridStretch != "off" && config.gridStretch != "body" &&
+            config.gridStretch != "wake" && config.gridStretch != "edges")
+            return fail(error, "gridStretch is off, body, wake or edges");
+        if (config.gridStretch != "off") {
+            if (!(config.stretchRatio > 1.0) || !(config.stretchRatio <= 1.5))
+                return fail(error, "stretchRatio is above 1 and at most 1.5. "
+                                   "1 is no stretching at all, and past about "
+                                   "1.2 the scheme quietly drops an order");
+            if (!(config.refineNear > 0.0) || !(config.refineNear <= 1.0))
+                return fail(error, "refineNear is the width of the fine band "
+                                   "as a fraction of the domain, so it lives "
+                                   "between 0 and 1");
+        }
         if (config.micInterval < 1)
             return fail(error, "micInterval is at least one step");
         if (config.micAudioRate < 1000 || config.micAudioRate > 384000)
@@ -360,7 +389,6 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                                    "between 0 and 1");
         }
         if (config.supportsTension && !gas) {
-        if (config.supportsTension && !gas) {
             if (config.mixing != "immiscible" && config.mixing != "miscible")
                 return fail(error, "mixing is immiscible or miscible");
             if (!(config.diffusivity >= 0.0) ||
@@ -378,7 +406,6 @@ bool validateFluidSolverRunConfig(const FluidSolverRunConfig& config,
                                    "tension to pull on: set surfaceTension to "
                                    "zero, or make them immiscible");
         }
-        if (!config.gravityEnabled && !gas)
         if (!config.gravityEnabled && !gas)
             return fail(error, "two fluids with gravity off never separate: "
                                "the density difference is the only thing that "
@@ -563,6 +590,22 @@ bool buildFluidSolverArguments(
                 arguments.push_back("R2=" +
                                     serializeDouble(config.gasConstant2));
                 arguments.push_back("speciesMode=" + config.speciesMode);
+            }
+            arguments.push_back("amrLevels=" +
+                                std::to_string(config.amrLevels));
+            if (config.amrLevels > 0) {
+                arguments.push_back("amrCriterion=" + config.amrCriterion);
+                arguments.push_back("amrThreshold=" +
+                                    serializeDouble(config.amrThreshold));
+                arguments.push_back("amrEvery=" +
+                                    std::to_string(config.amrEvery));
+            }
+            arguments.push_back("gridStretch=" + config.gridStretch);
+            if (config.gridStretch != "off") {
+                arguments.push_back("stretchRatio=" +
+                                    serializeDouble(config.stretchRatio));
+                arguments.push_back("refineNear=" +
+                                    serializeDouble(config.refineNear));
             }
             arguments.push_back(
                 "acousticFields=" +

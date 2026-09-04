@@ -501,11 +501,19 @@ std::optional<VtkPixelSample> sampleVtkPixel(
         return std::nullopt;
     }
 
-    const std::size_t x = static_cast<std::size_t>(
+    std::size_t x = static_cast<std::size_t>(
         std::floor(localX / transform.pixelWidth));
     const std::size_t displayY = static_cast<std::size_t>(
         std::floor(localY / transform.pixelHeight));
-    const std::size_t y = frame.ny - 1u - displayY;
+    std::size_t y = frame.ny - 1u - displayY;
+    if (frame.rectilinear()) {
+        x = frame.columnAt(frame.originX +
+                           (static_cast<double>(x) + 0.5) * frame.spanX() /
+                               static_cast<double>(frame.nx));
+        y = frame.rowAt(frame.originY +
+                        (static_cast<double>(y) + 0.5) * frame.spanY() /
+                            static_cast<double>(frame.ny));
+    }
     const std::size_t index = frame.cellIndex(x, y);
     const double sampleOffset =
         frame.association == VtkDataAssociation::Cell ? 0.5 : 0.0;
@@ -513,10 +521,16 @@ std::optional<VtkPixelSample> sampleVtkPixel(
     VtkPixelSample sample;
     sample.x = x;
     sample.y = y;
-    sample.physicalX = frame.originX +
-        (static_cast<double>(x) + sampleOffset) * frame.spacingX;
-    sample.physicalY = frame.originY +
-        (static_cast<double>(y) + sampleOffset) * frame.spacingY;
+    sample.physicalX =
+        frame.rectilinear()
+            ? frame.cellCentreX(x)
+            : frame.originX +
+                  (static_cast<double>(x) + sampleOffset) * frame.spacingX;
+    sample.physicalY =
+        frame.rectilinear()
+            ? frame.cellCentreY(y)
+            : frame.originY +
+                  (static_cast<double>(y) + sampleOffset) * frame.spacingY;
     sample.pressure = frame.pressure[index];
     sample.speed = frame.velocityMagnitude[index];
     sample.velocityX = frame.velocity[index].x;
@@ -748,7 +762,13 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
 
     TokenCursor cursor(readCursor, readEnd);
     cursor.expect("DATASET");
-    cursor.expect("STRUCTURED_POINTS");
+    const std::string datasetKind = cursor.take();
+    const bool rectilinear = datasetKind == "RECTILINEAR_GRID";
+    if (!rectilinear && datasetKind != "STRUCTURED_POINTS") {
+        throw VtkParseError(
+            "Only STRUCTURED_POINTS and RECTILINEAR_GRID frames are "
+            "supported, not " + datasetKind);
+    }
     cursor.expect("DIMENSIONS");
     const int pointNx = parseInteger(cursor.take(), "DIMENSIONS nx");
     const int pointNy = parseInteger(cursor.take(), "DIMENSIONS ny");
@@ -759,27 +779,97 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
     const std::size_t pointCount =
         checkedGridCount(pointNx, pointNy, "POINT");
 
-    cursor.expect("ORIGIN");
-    const double originX = parseNumber(cursor.take(), "ORIGIN x");
-    const double originY = parseNumber(cursor.take(), "ORIGIN y");
-    const double originZ = parseNumber(cursor.take(), "ORIGIN z");
-    if (!std::isfinite(originX) ||
-        !std::isfinite(originY) ||
-        !std::isfinite(originZ)) {
-        throw VtkParseError("ORIGIN values must be finite");
-    }
+    double originX = 0.0;
+    double originY = 0.0;
+    double spacingX = 0.0;
+    double spacingY = 0.0;
+    std::vector<double> faceX;
+    std::vector<double> faceY;
 
-    cursor.expect("SPACING");
-    const double spacingX = parseNumber(cursor.take(), "SPACING x");
-    const double spacingY = parseNumber(cursor.take(), "SPACING y");
-    const double spacingZ = parseNumber(cursor.take(), "SPACING z");
-    if (!std::isfinite(spacingX) ||
-        !std::isfinite(spacingY) ||
-        !std::isfinite(spacingZ) ||
-        spacingX <= 0.0 ||
-        spacingY <= 0.0) {
-        throw VtkParseError(
-            "SPACING x and y must be positive and all spacing values must be finite");
+    if (rectilinear) {
+        const auto axis = [&](const char* keyword,
+                              int expected,
+                              std::vector<double>& out) {
+            cursor.expect(keyword);
+            const int count = parseInteger(cursor.take(), keyword);
+            if (count != expected) {
+                throw VtkParseError(
+                    std::string(keyword) + " must carry " +
+                    std::to_string(expected) + " values to match DIMENSIONS");
+            }
+            const std::string type = cursor.take();
+            if (type != "float" && type != "double") {
+                throw VtkParseError(
+                    std::string(keyword) + " must be float or double");
+            }
+            out.resize(static_cast<std::size_t>(count));
+            if (binary && type == "float") {
+                std::vector<float> raw(static_cast<std::size_t>(count));
+                cursor.beginBinaryPayload(keyword);
+                cursor.readBigEndianFloats(raw.data(),
+                                           static_cast<std::size_t>(count),
+                                           keyword);
+                cursor.endBinaryPayload(keyword);
+                for (int k = 0; k < count; ++k)
+                    out[static_cast<std::size_t>(k)] =
+                        raw[static_cast<std::size_t>(k)];
+            } else {
+                for (int k = 0; k < count; ++k)
+                    out[static_cast<std::size_t>(k)] =
+                        parseNumber(cursor.take(), keyword);
+            }
+        };
+
+        axis("X_COORDINATES", pointNx, faceX);
+        axis("Y_COORDINATES", pointNy, faceY);
+        std::vector<double> depth;
+        axis("Z_COORDINATES", nz, depth);
+
+        const auto rising = [](const std::vector<double>& values,
+                               const char* what) {
+            for (std::size_t k = 0; k < values.size(); ++k) {
+                if (!std::isfinite(values[k]))
+                    throw VtkParseError(std::string(what) +
+                                        " values must be finite");
+                if (k > 0 && !(values[k] > values[k - 1]))
+                    throw VtkParseError(
+                        std::string(what) +
+                        " must increase: a cell of zero or negative width is "
+                        "not a cell");
+            }
+        };
+        rising(faceX, "X_COORDINATES");
+        rising(faceY, "Y_COORDINATES");
+
+        originX = faceX.front();
+        originY = faceY.front();
+        spacingX = (faceX.back() - faceX.front()) /
+                   std::max<std::size_t>(1, faceX.size() - 1);
+        spacingY = (faceY.back() - faceY.front()) /
+                   std::max<std::size_t>(1, faceY.size() - 1);
+    } else {
+        cursor.expect("ORIGIN");
+        originX = parseNumber(cursor.take(), "ORIGIN x");
+        originY = parseNumber(cursor.take(), "ORIGIN y");
+        const double originZ = parseNumber(cursor.take(), "ORIGIN z");
+        if (!std::isfinite(originX) ||
+            !std::isfinite(originY) ||
+            !std::isfinite(originZ)) {
+            throw VtkParseError("ORIGIN values must be finite");
+        }
+
+        cursor.expect("SPACING");
+        spacingX = parseNumber(cursor.take(), "SPACING x");
+        spacingY = parseNumber(cursor.take(), "SPACING y");
+        const double spacingZ = parseNumber(cursor.take(), "SPACING z");
+        if (!std::isfinite(spacingX) ||
+            !std::isfinite(spacingY) ||
+            !std::isfinite(spacingZ) ||
+            spacingX <= 0.0 ||
+            spacingY <= 0.0) {
+            throw VtkParseError(
+                "SPACING x and y must be positive and all spacing values must be finite");
+        }
     }
 
     const std::string associationToken = cursor.take();
@@ -823,6 +913,10 @@ VtkFrame VtkFrameParser::parse(const std::filesystem::path& path) {
     frame.originY = originY;
     frame.spacingX = spacingX;
     frame.spacingY = spacingY;
+    if (rectilinear) {
+        frame.faceX = std::move(faceX);
+        frame.faceY = std::move(faceY);
+    }
     frame.frameNumber = frameNumberFromFilename(path).value_or(-1);
 
     bool hasPressure = false;
@@ -1409,6 +1503,8 @@ bool sameSeriesLayout(
         frame.ny == reference.ny &&
         frame.originX == reference.originX &&
         frame.originY == reference.originY &&
+        frame.faceX == reference.faceX &&
+        frame.faceY == reference.faceY &&
         frame.spacingX == reference.spacingX &&
         frame.spacingY == reference.spacingY &&
         frame.solid == reference.solid;
@@ -1785,6 +1881,54 @@ void VtkFrameParser::validateSeries(
         const VtkFrame& frame = frames[index];
         validateCompatibility(reference, frame);
     }
+}
+
+} // namespace maskui
+
+namespace maskui {
+
+std::size_t VtkFrame::columnAt(double x) const {
+    if (nx == 0)
+        return 0;
+    if (!rectilinear()) {
+        if (spacingX <= 0.0)
+            return 0;
+        const double cell = (x - originX) / spacingX;
+        if (cell <= 0.0)
+            return 0;
+        const std::size_t index = static_cast<std::size_t>(cell);
+        return index >= nx ? nx - 1 : index;
+    }
+    if (x <= faceX.front())
+        return 0;
+    if (x >= faceX.back())
+        return nx - 1;
+    const auto found = std::upper_bound(faceX.begin(), faceX.end(), x);
+    const std::size_t index =
+        static_cast<std::size_t>(found - faceX.begin());
+    return index == 0 ? 0 : std::min(nx - 1, index - 1);
+}
+
+std::size_t VtkFrame::rowAt(double y) const {
+    if (ny == 0)
+        return 0;
+    if (!rectilinear()) {
+        if (spacingY <= 0.0)
+            return 0;
+        const double cell = (y - originY) / spacingY;
+        if (cell <= 0.0)
+            return 0;
+        const std::size_t index = static_cast<std::size_t>(cell);
+        return index >= ny ? ny - 1 : index;
+    }
+    if (y <= faceY.front())
+        return 0;
+    if (y >= faceY.back())
+        return ny - 1;
+    const auto found = std::upper_bound(faceY.begin(), faceY.end(), y);
+    const std::size_t index =
+        static_cast<std::size_t>(found - faceY.begin());
+    return index == 0 ? 0 : std::min(ny - 1, index - 1);
 }
 
 } // namespace maskui
