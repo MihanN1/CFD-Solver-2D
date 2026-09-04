@@ -2,8 +2,10 @@
 #include "Config.hpp"
 #include "Mesh.hpp"
 #include "Restart.hpp"
+#include "RigidBody.hpp"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -26,14 +28,14 @@ struct GasModel {
 
     void prepare();
 
-    float gammaOf(float y) const {
+    CFD_HD float gammaOf(float y) const {
         if (!species || !active)
             return gamma1;
         const float cp = cp1 + y * (cp2 - cp1);
         const float cv = cv1 + y * (cv2 - cv1);
         return cp / cv;
     }
-    float gasConstantOf(float y) const {
+    CFD_HD float gasConstantOf(float y) const {
         if (!species || !active)
             return R1;
         return R1 + y * (R2 - R1);
@@ -58,13 +60,31 @@ struct Block {
     float* rhoY = nullptr;
 
     const uint8_t* solid = nullptr;
+    const float* solidU = nullptr;
+    const float* solidV = nullptr;
+
+    const float* widths = nullptr;
+    const float* heights = nullptr;
+    const float* centresX = nullptr;
+    const float* centresY = nullptr;
 
     CFD_HD int index(int i, int j) const {
         return (j + ghost) * stride + (i + ghost);
     }
     CFD_HD int cells() const { return stride * rows; }
-    CFD_HD float cellX(int i) const { return x0 + (i + 0.5f) * dx; }
-    CFD_HD float cellY(int j) const { return y0 + (j + 0.5f) * dy; }
+    CFD_HD float widthAt(int i) const {
+        return widths ? widths[i + ghost] : dx;
+    }
+    CFD_HD float heightAt(int j) const {
+        return heights ? heights[j + ghost] : dy;
+    }
+    CFD_HD float cellX(int i) const {
+        return centresX ? centresX[i + ghost] : x0 + (i + 0.5f) * dx;
+    }
+    CFD_HD float cellY(int j) const {
+        return centresY ? centresY[j + ghost] : y0 + (j + 0.5f) * dy;
+    }
+    CFD_HD bool stretched() const { return widths != nullptr; }
 };
 
 struct SideState {
@@ -74,6 +94,7 @@ struct SideState {
     float from = 0.0f;
     float to = 1.0f;
     bool banded = false;
+    bool interior = false;
 };
 
 struct BlockBoundaries {
@@ -82,6 +103,10 @@ struct BlockBoundaries {
     float T0 = 288.15f;
     float mach = 0.5f;
     float inletY = 0.0f;
+    int spanI0 = 0;
+    int spanJ0 = 0;
+    int spanNx = 0;
+    int spanNy = 0;
 };
 
 struct Workspace {
@@ -119,7 +144,9 @@ CompressibleDevice* compressibleCudaCreate(int nx, int ny, int ghost,
                                            bool species);
 void compressibleCudaDestroy(CompressibleDevice* device);
 void compressibleCudaUploadSolid(CompressibleDevice* device,
-                                 const uint8_t* mask);
+                                 const uint8_t* mask,
+                                 const float* velX,
+                                 const float* velY);
 void compressibleCudaUpload(CompressibleDevice* device, int set,
                             const float* const* host);
 void compressibleCudaDownload(CompressibleDevice* device, int set,
@@ -132,6 +159,10 @@ void compressibleCudaStage(CompressibleDevice* device, const Block& shape,
                            float dt, float a, float b, int limiter,
                            float diffusivity);
 #endif
+
+class AmrHierarchy;
+class AmrDriver;
+struct AmrSettings;
 
 class CompressibleRun {
 public:
@@ -157,6 +188,19 @@ private:
     GasModel gas;
     BlockBoundaries sides;
     std::vector<uint8_t> solidMask;
+    std::vector<float> faceX, faceY;
+    std::vector<float> cellWidths, cellHeights;
+    std::vector<float> cellCentresX, cellCentresY;
+    bool stretched = false;
+    std::vector<float> solidVelX;
+    std::vector<float> solidVelY;
+
+    std::vector<RigidBody> bodies;
+    std::vector<RestartData::BodyState> restartBodies;
+    bool bodiesMove = false;
+    bool bodiesFree = false;
+    bool bodyCollisions = false;
+    int contactsReported = 0;
 
     std::vector<float> rho, rhou, rhov, rhoE, rhoY;
     std::vector<float> rho1, rhou1, rhov1, rhoE1, rhoY1;
@@ -173,6 +217,10 @@ private:
     std::vector<std::vector<float>> micSamples;
     std::vector<float> micTimes;
     Workspace work;
+    std::unique_ptr<AmrHierarchy> tree;
+    std::unique_ptr<AmrSettings> amr;
+    std::unique_ptr<AmrDriver> driver;
+    int sinceRegrid = 0;
     bool onDevice = false;
 #ifdef USE_CUDA
     CompressibleDevice* device = nullptr;
@@ -185,6 +233,14 @@ private:
                std::vector<float>& ry);
 
     void allocate();
+    void setUpAmr();
+    void regridIfDue();
+    void reportAmr() const;
+    void writeAmrFrame(int stepNumber) const;
+    void buildGrid();
+    void applyGridToBlock(Block& block) const;
+    int columnAt(float x) const;
+    int rowAt(float y) const;
     void initialise();
     void computeStep();
     float timeStep(const Block& block);
@@ -193,6 +249,14 @@ private:
     void updateAcoustics(float stepDt);
     void sampleMicrophones();
     void writeMicrophones() const;
+    void writeMicrophoneAudio() const;
+
+    void resolveBodyMotion();
+    void reportBodies() const;
+    void bodyForces();
+    void advanceBodies(float stepDt);
+    void applyBodyPoses();
+    void refreshSolidMask();
     void saveVTK(int stepNumber) const;
     void reportStep() const;
 

@@ -48,13 +48,14 @@ __global__ void primitiveKernel(Block in,
 __global__ void fluxXKernel(Block in,
                             cfd::PrimitiveField prim,
                             GasModel gas,
+                            BlockBoundaries sides,
                             int limiter,
                             float* fx) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i > in.nx || j >= in.ny)
         return;
-    cfd::faceFluxX(in, prim, gas, limiter, i, j,
+    cfd::faceFluxX(in, prim, gas, sides, limiter, i, j,
                    fx + (static_cast<long long>(j) * (in.nx + 1) + i) *
                             cfd::kComponents);
 }
@@ -62,13 +63,14 @@ __global__ void fluxXKernel(Block in,
 __global__ void fluxYKernel(Block in,
                             cfd::PrimitiveField prim,
                             GasModel gas,
+                            BlockBoundaries sides,
                             int limiter,
                             float* fy) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i >= in.nx || j > in.ny)
         return;
-    cfd::faceFluxY(in, prim, gas, limiter, i, j,
+    cfd::faceFluxY(in, prim, gas, sides, limiter, i, j,
                    fy + (static_cast<long long>(j) * in.nx + i) *
                             cfd::kComponents);
 }
@@ -177,6 +179,8 @@ struct CompressibleDevice {
 
     float* fields[3][5] = {};
     uint8_t* solid = nullptr;
+    float* solidU = nullptr;
+    float* solidV = nullptr;
     float* fluxX = nullptr;
     float* fluxY = nullptr;
     float* primitive[6] = {};
@@ -214,6 +218,14 @@ CompressibleDevice* compressibleCudaCreate(int nx,
 
     CFD_CUDA(cudaMalloc(&device->solid,
                         static_cast<std::size_t>(nx) * ny * sizeof(uint8_t)));
+    CFD_CUDA(cudaMalloc(&device->solidU,
+                        static_cast<std::size_t>(nx) * ny * sizeof(float)));
+    CFD_CUDA(cudaMalloc(&device->solidV,
+                        static_cast<std::size_t>(nx) * ny * sizeof(float)));
+    CFD_CUDA(cudaMemset(device->solidU, 0,
+                        static_cast<std::size_t>(nx) * ny * sizeof(float)));
+    CFD_CUDA(cudaMemset(device->solidV, 0,
+                        static_cast<std::size_t>(nx) * ny * sizeof(float)));
     CFD_CUDA(cudaMalloc(&device->fluxX,
                         static_cast<std::size_t>(nx + 1) * ny * 5 *
                             sizeof(float)));
@@ -237,6 +249,10 @@ void compressibleCudaDestroy(CompressibleDevice* device) {
                 cudaFree(device->fields[set][c]);
     if (device->solid)
         cudaFree(device->solid);
+    if (device->solidU)
+        cudaFree(device->solidU);
+    if (device->solidV)
+        cudaFree(device->solidV);
     if (device->fluxX)
         cudaFree(device->fluxX);
     if (device->fluxY)
@@ -250,10 +266,18 @@ void compressibleCudaDestroy(CompressibleDevice* device) {
 }
 
 void compressibleCudaUploadSolid(CompressibleDevice* device,
-                                 const uint8_t* mask) {
-    CFD_CUDA(cudaMemcpy(device->solid, mask,
-                        static_cast<std::size_t>(device->nx) * device->ny,
-                        cudaMemcpyHostToDevice));
+                                 const uint8_t* mask,
+                                 const float* velX,
+                                 const float* velY) {
+    const std::size_t cells =
+        static_cast<std::size_t>(device->nx) * device->ny;
+    CFD_CUDA(cudaMemcpy(device->solid, mask, cells, cudaMemcpyHostToDevice));
+    if (velX)
+        CFD_CUDA(cudaMemcpy(device->solidU, velX, cells * sizeof(float),
+                            cudaMemcpyHostToDevice));
+    if (velY)
+        CFD_CUDA(cudaMemcpy(device->solidV, velY, cells * sizeof(float),
+                            cudaMemcpyHostToDevice));
 }
 
 void compressibleCudaUpload(CompressibleDevice* device,
@@ -290,6 +314,8 @@ Block deviceBlock(CompressibleDevice* device, int set, const Block& shape) {
     block.rhoE = device->fields[set][3];
     block.rhoY = device->species ? device->fields[set][4] : nullptr;
     block.solid = device->solid;
+    block.solidU = device->solidU;
+    block.solidV = device->solidV;
     return block;
 }
 
@@ -372,9 +398,9 @@ void compressibleCudaStage(CompressibleDevice* device,
     prim.y = device->primitive[4];
     prim.gamma = device->primitive[5];
 
-    fluxXKernel<<<faceX, threads>>>(in, prim, gas, limiter, device->fluxX);
+    fluxXKernel<<<faceX, threads>>>(in, prim, gas, sides, limiter, device->fluxX);
     CFD_CUDA_LAUNCH("fluxXKernel");
-    fluxYKernel<<<faceY, threads>>>(in, prim, gas, limiter, device->fluxY);
+    fluxYKernel<<<faceY, threads>>>(in, prim, gas, sides, limiter, device->fluxY);
     CFD_CUDA_LAUNCH("fluxYKernel");
     combineKernel<<<cellGrid, threads>>>(in, keep, out, gas, device->fluxX,
                                          device->fluxY, dt, a, b, diffusivity);

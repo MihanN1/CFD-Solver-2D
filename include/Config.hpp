@@ -57,6 +57,18 @@ enum class Regime {
 bool parseRegime(const std::string& text, Regime& out, std::string& error);
 const char* regimeName(Regime regime);
 
+enum class StretchKind {
+    Off,
+    Edges,
+    Body,
+    Wake
+};
+
+std::string stretchKindName(StretchKind kind);
+bool parseStretchKind(const std::string& text, StretchKind& out);
+std::string gridStretchHelp();
+std::string amrHelp();
+
 enum class SpeciesMode {
     Active,
     Passive
@@ -341,6 +353,21 @@ struct Config {
     float acousticRef = 2e-5f;
     std::string microphones = "";
     int micInterval = 1;
+    int amrLevels = 0;
+    int amrEvery = 8;
+    float amrThreshold = 0.2f;
+    int amrBuffer = 2;
+    int amrMinPatch = 8;
+    int amrMaxPatch = 64;
+    std::string amrCriterion = "everything";
+
+    StretchKind gridStretch = StretchKind::Off;
+    float stretchRatio = 1.05f;
+    float refineNear = 0.25f;
+
+    bool micAudio = false;
+    int micAudioRate = 44100;
+    float micAudioSpeed = 1.0f;
 
     // Methods
     void readFromConsole();
@@ -399,6 +426,12 @@ struct Config {
     std::vector<Microphone> resolvedMicrophones() const;
 
     bool listening() const { return !microphones.empty(); }
+    bool recordsAudio() const { return micAudio && !microphones.empty(); }
+    bool adaptive() const { return compressible() && amrLevels > 0; }
+    bool stretchedGrid() const {
+        return compressible() && gridStretch != StretchKind::Off &&
+               stretchRatio > 1.0f;
+    }
 
     std::vector<FlowSource> resolvedSources() const;
 

@@ -1,6 +1,9 @@
 #include "CompressibleKernels.hpp"
 #include "SolverCompressible.hpp"
 
+#include "AmrDriver.hpp"
+#include "AmrHierarchy.hpp"
+
 #include "Progress.hpp"
 #include "Runtime.hpp"
 
@@ -8,10 +11,13 @@
 #include <array>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <limits>
+#include <sstream>
 
 namespace {
 
@@ -47,11 +53,17 @@ void fillGhostCells(Block& block,
                     const BlockBoundaries& sides,
                     const GasModel& gas) {
     const int g = block.ghost;
+    const float rowsTotal = static_cast<float>(
+        sides.spanNy > 0 ? sides.spanNy : block.ny);
+    const float columnsTotal = static_cast<float>(
+        sides.spanNx > 0 ? sides.spanNx : block.nx);
+    const float rowFirst = static_cast<float>(sides.spanJ0);
+    const float columnFirst = static_cast<float>(sides.spanI0);
 
     #pragma omp parallel for schedule(static) if (block.ny >= 64)
     for (int j = 0; j < block.ny; ++j) {
         BlockBoundaries local = sides;
-        local.inletY = (j + 0.5f) / static_cast<float>(block.ny);
+        local.inletY = (rowFirst + j + 0.5f) / rowsTotal;
         for (int k = 1; k <= g; ++k) {
             mirrorSide(block, gas, sides.left, -k, j, k - 1, j, true, local);
             mirrorSide(block, gas, sides.right, block.nx - 1 + k, j,
@@ -62,13 +74,19 @@ void fillGhostCells(Block& block,
     #pragma omp parallel for schedule(static) if (block.nx >= 64)
     for (int i = 0; i < block.nx; ++i) {
         BlockBoundaries local = sides;
-        local.inletY = (i + 0.5f) / static_cast<float>(block.nx);
+        local.inletY = (columnFirst + i + 0.5f) / columnsTotal;
         for (int k = 1; k <= g; ++k) {
             mirrorSide(block, gas, sides.bottom, i, -k, i, k - 1, false, local);
             mirrorSide(block, gas, sides.top, i, block.ny - 1 + k, i,
                        block.ny - k, false, local);
         }
     }
+
+    const bool corner[4] = {
+        !sides.left.interior && !sides.bottom.interior,
+        !sides.right.interior && !sides.bottom.interior,
+        !sides.left.interior && !sides.top.interior,
+        !sides.right.interior && !sides.top.interior};
 
     for (int k = 1; k <= g; ++k)
         for (int m = 1; m <= g; ++m) {
@@ -82,6 +100,8 @@ void fillGhostCells(Block& block,
                 {0, block.ny - 1},
                 {block.nx - 1, block.ny - 1}};
             for (int c = 0; c < 4; ++c) {
+                if (!corner[c])
+                    continue;
                 const Primitive q = primitiveOf(
                     block, gas, block.index(sourceIndex[c][0],
                                             sourceIndex[c][1]));
@@ -105,11 +125,18 @@ void fillSolidCells(Block& block, const GasModel& gas) {
 float blockTimeStep(const Block& block, const GasModel& gas, float cfl) {
     float worst = 0.0f;
 
-    #pragma omp parallel for schedule(static) reduction(max : worst) \
-        if (block.ny >= 64)
-    for (int j = 0; j < block.ny; ++j)
-        for (int i = 0; i < block.nx; ++i)
-            worst = std::max(worst, cellRate(block, gas, i, j));
+    #pragma omp parallel if (block.ny >= 64)
+    {
+        float local = 0.0f;
+
+        #pragma omp for schedule(static) nowait
+        for (int j = 0; j < block.ny; ++j)
+            for (int i = 0; i < block.nx; ++i)
+                local = std::max(local, cellRate(block, gas, i, j));
+
+        #pragma omp critical
+        worst = std::max(worst, local);
+    }
 
     if (!(worst > 0.0f))
         return 0.0f;
@@ -164,14 +191,14 @@ void advanceStage(Block& in,
     #pragma omp parallel for schedule(static) if (ny >= 32)
     for (int j = 0; j < ny; ++j)
         for (int i = 0; i <= nx; ++i)
-            faceFluxX(in, prim, gas, limiterCode, i, j,
+            faceFluxX(in, prim, gas, sides, limiterCode, i, j,
                       fx + (static_cast<std::size_t>(j) * (nx + 1) + i) *
                                kComponents);
 
     #pragma omp parallel for schedule(static) if (ny >= 32)
     for (int j = 0; j <= ny; ++j)
         for (int i = 0; i < nx; ++i)
-            faceFluxY(in, prim, gas, limiterCode, i, j,
+            faceFluxY(in, prim, gas, sides, limiterCode, i, j,
                       fy + (static_cast<std::size_t>(j) * nx + i) *
                                kComponents);
 
@@ -225,16 +252,37 @@ CompressibleRun::CompressibleRun(const Config& configuration, Mesh& meshIn)
     sides.mach = cfg.machInlet;
 
     solidMask.assign(static_cast<std::size_t>(nx) * ny, 0);
+    solidVelX.assign(static_cast<std::size_t>(nx) * ny, 0.0f);
+    solidVelY.assign(static_cast<std::size_t>(nx) * ny, 0.0f);
     for (int id = 0; id < nx * ny; ++id)
         solidMask[id] = mesh.solid[id] ? 1 : 0;
 
     allocate();
+    buildGrid();
+    setUpAmr();
 
 #ifdef USE_CUDA
-    if (cfg.useCuda && runtime::settings().useCuda && compressibleCudaAvailable()) {
+    if (cfg.useCuda && runtime::settings().useCuda && cfg.adaptive()) {
+        std::cout << "\n!!! amrLevels and useCuda cannot both be on. The "
+                     "refinement hierarchy lives on the host\n    and the "
+                     "device kernels know about one grid, so a GPU run would "
+                     "quietly solve the base\n    grid and throw the patches "
+                     "away. This run stays on the CPU.\n\n";
+    }
+    if (cfg.useCuda && runtime::settings().useCuda && stretched) {
+        std::cout << "\n!!! gridStretch and useCuda cannot both be on. The "
+                     "device kernels index one cell size\n    per axis and "
+                     "the stretched metrics live on the host, so a GPU run "
+                     "would quietly\n    solve an even grid instead of the "
+                     "one you asked for. This run stays on the CPU.\n\n";
+    }
+    if (cfg.useCuda && runtime::settings().useCuda && !stretched &&
+        !cfg.adaptive() && compressibleCudaAvailable()) {
         device = compressibleCudaCreate(nx, ny, ghost, cfg.twoSpecies());
-        compressibleCudaUploadSolid(device, solidMask.data());
         onDevice = device != nullptr;
+        if (onDevice)
+            compressibleCudaUploadSolid(device, solidMask.data(),
+                                        solidVelX.data(), solidVelY.data());
     }
 #endif
 }
@@ -295,6 +343,9 @@ Block CompressibleRun::view(std::vector<float>& r,
     block.rhoE = re.data();
     block.rhoY = ry.empty() ? nullptr : ry.data();
     block.solid = solidMask.data();
+    block.solidU = solidVelX.data();
+    block.solidV = solidVelY.data();
+    applyGridToBlock(block);
     return block;
 }
 
@@ -313,8 +364,8 @@ void CompressibleRun::initialise() {
 
     for (int j = 0; j < ny; ++j)
         for (int i = 0; i < nx; ++i) {
-            const float fx = (i + 0.5f) / static_cast<float>(nx);
-            const float fy = (j + 0.5f) / static_cast<float>(ny);
+            const float fx = block.cellX(i) / cfg.Lx;
+            const float fy = block.cellY(j) / cfg.Ly;
 
             Primitive q;
             q.u = speed;
@@ -363,6 +414,46 @@ bool CompressibleRun::setInitialState(RestartData&& state,
         state.stateRhoV.size() != cells || state.stateRhoE.size() != cells)
         return false;
 
+    restartBodies = state.bodies;
+    if (stretched && state.gridFaceX.size() == faceX.size() &&
+        state.gridFaceY.size() == faceY.size()) {
+        faceX = state.gridFaceX;
+        faceY = state.gridFaceY;
+        for (int i = 0; i < nx; ++i) {
+            const std::size_t at = static_cast<std::size_t>(i);
+            cellWidths[at + ghost] = faceX[at + 1] - faceX[at];
+            cellCentresX[at + ghost] =
+                0.5f * (faceX[at] + faceX[at + 1]);
+        }
+        for (int j = 0; j < ny; ++j) {
+            const std::size_t at = static_cast<std::size_t>(j);
+            cellHeights[at + ghost] = faceY[at + 1] - faceY[at];
+            cellCentresY[at + ghost] =
+                0.5f * (faceY[at] + faceY[at + 1]);
+        }
+        for (int k = 1; k <= ghost; ++k) {
+            cellWidths[static_cast<std::size_t>(ghost - k)] =
+                cellWidths[static_cast<std::size_t>(ghost)];
+            cellWidths[static_cast<std::size_t>(ghost + nx - 1 + k)] =
+                cellWidths[static_cast<std::size_t>(ghost + nx - 1)];
+            cellHeights[static_cast<std::size_t>(ghost - k)] =
+                cellHeights[static_cast<std::size_t>(ghost)];
+            cellHeights[static_cast<std::size_t>(ghost + ny - 1 + k)] =
+                cellHeights[static_cast<std::size_t>(ghost + ny - 1)];
+            cellCentresX[static_cast<std::size_t>(ghost - k)] =
+                cellCentresX[static_cast<std::size_t>(ghost - k + 1)] -
+                cellWidths[static_cast<std::size_t>(ghost - k)];
+            cellCentresX[static_cast<std::size_t>(ghost + nx - 1 + k)] =
+                cellCentresX[static_cast<std::size_t>(ghost + nx - 2 + k)] +
+                cellWidths[static_cast<std::size_t>(ghost + nx - 1 + k)];
+            cellCentresY[static_cast<std::size_t>(ghost - k)] =
+                cellCentresY[static_cast<std::size_t>(ghost - k + 1)] -
+                cellHeights[static_cast<std::size_t>(ghost - k)];
+            cellCentresY[static_cast<std::size_t>(ghost + ny - 1 + k)] =
+                cellCentresY[static_cast<std::size_t>(ghost + ny - 2 + k)] +
+                cellHeights[static_cast<std::size_t>(ghost + ny - 1 + k)];
+        }
+    }
     Block block = view(rho, rhou, rhov, rhoE, rhoY);
     const bool species = cfg.twoSpecies() && state.stateRhoY.size() == cells;
     for (int j = 0; j < ny; ++j)
@@ -408,6 +499,11 @@ void CompressibleRun::computeStep() {
     }
 #endif
 
+    if (driver) {
+        driver->advance(current, stage1, stage2, work, dt);
+        return;
+    }
+
     advanceStage(current, current, stage1, sides, gas, dt, 0.0f, 1.0f,
                  cfg.limiter, diffusivity, work);
     advanceStage(stage1, current, stage2, sides, gas, dt, 0.75f, 0.25f,
@@ -441,6 +537,8 @@ float CompressibleRun::timeStep(const Block& block) {
     if (onDevice)
         return compressibleCudaTimeStep(device, block, gas, cfg.CFL);
 #endif
+    if (driver)
+        return driver->finestRate(block, cfg.CFL);
     return blockTimeStep(block, gas, cfg.CFL);
 }
 
@@ -495,8 +593,8 @@ void CompressibleRun::sampleMicrophones() {
     Block block = view(rho, rhou, rhov, rhoE, rhoY);
     micTimes.push_back(static_cast<float>(currentTime));
     for (std::size_t m = 0; m < mics.size(); ++m) {
-        const int i = std::clamp(static_cast<int>(mics[m].x / dx), 0, nx - 1);
-        const int j = std::clamp(static_cast<int>(mics[m].y / dy), 0, ny - 1);
+        const int i = columnAt(mics[m].x);
+        const int j = rowAt(mics[m].y);
         const Primitive q = primitiveOf(block, gas, block.index(i, j));
         micSamples[m].push_back(q.p);
     }
@@ -650,15 +748,6 @@ void CompressibleRun::saveVTK(int stepNumber) const {
         return;
     }
 
-    fout << "# vtk DataFile Version 3.0\n"
-         << "CFD-Solver-2D output, step " << stepNumber << "\n"
-         << "BINARY\n"
-         << "DATASET STRUCTURED_POINTS\n"
-         << "DIMENSIONS " << nx + 1 << " " << ny + 1 << " 1\n"
-         << "ORIGIN 0 0 0\n"
-         << "SPACING " << dx << " " << dy << " 1\n"
-         << "CELL_DATA " << nx * ny << "\n";
-
     const auto writeArray = [&](const float* values, std::size_t count) {
         std::size_t done = 0;
         while (done < count) {
@@ -676,6 +765,29 @@ void CompressibleRun::saveVTK(int stepNumber) const {
             done += take;
         }
     };
+
+    fout << "# vtk DataFile Version 3.0\n"
+         << "CFD-Solver-2D output, step " << stepNumber << "\n"
+         << "BINARY\n";
+    if (stretched) {
+        std::vector<float> depth{0.0f};
+        fout << "DATASET RECTILINEAR_GRID\n"
+             << "DIMENSIONS " << nx + 1 << " " << ny + 1 << " 1\n"
+             << "X_COORDINATES " << nx + 1 << " float\n";
+        writeArray(faceX.data(), faceX.size());
+        fout << "\nY_COORDINATES " << ny + 1 << " float\n";
+        writeArray(faceY.data(), faceY.size());
+        fout << "\nZ_COORDINATES 1 float\n";
+        writeArray(depth.data(), depth.size());
+        fout << "\n";
+    } else {
+        fout << "DATASET STRUCTURED_POINTS\n"
+             << "DIMENSIONS " << nx + 1 << " " << ny + 1 << " 1\n"
+             << "ORIGIN 0 0 0\n"
+             << "SPACING " << dx << " " << dy << " 1\n";
+    }
+    fout << "CELL_DATA " << nx * ny << "\n";
+
 
     const auto writeScalar = [&](const char* name,
                                  const std::vector<float>& values) {
@@ -757,8 +869,25 @@ void CompressibleRun::saveVTK(int stepNumber) const {
     configText += "restartDt=" + std::to_string(dt) + "\n";
     configText += "formatVersion=" + std::to_string(FRAME_FORMAT_VERSION) +
                   "\n";
+    if (bodiesMove) {
+        std::ostringstream bodyLine;
+        bodyLine << "bodyState=";
+        for (const RigidBody& body : bodies) {
+            if (!body.everFree && !body.prescribed)
+                continue;
+            bodyLine << std::setprecision(
+                            std::numeric_limits<double>::max_digits10)
+                     << body.object << ":" << body.x << "," << body.y << ","
+                     << body.theta << ","
+                     << std::setprecision(
+                            std::numeric_limits<float>::max_digits10)
+                     << body.vx << "," << body.vy << "," << body.omega << ";";
+        }
+        bodyLine << "\n";
+        configText += bodyLine.str();
+    }
 
-    const int arrays = cfg.twoSpecies() ? 6 : 5;
+    const int arrays = (cfg.twoSpecies() ? 6 : 5) + (stretched ? 2 : 0);
     fout << "FIELD RestartData " << arrays << "\n";
     fout << "configText 1 " << configText.size() << " char\n";
     fout.write(configText.data(),
@@ -778,6 +907,14 @@ void CompressibleRun::saveVTK(int stepNumber) const {
         writeArray(packed.data(), packed.size());
         fout << "\n";
     };
+
+    if (stretched) {
+        fout << "gridFaceX 1 " << faceX.size() << " float\n";
+        writeArray(faceX.data(), faceX.size());
+        fout << "\ngridFaceY 1 " << faceY.size() << " float\n";
+        writeArray(faceY.data(), faceY.size());
+        fout << "\n";
+    }
 
     writeField("stateRho", rho);
     writeField("stateRhoU", rhou);
@@ -825,6 +962,10 @@ void CompressibleRun::reportStep() const {
 
 void CompressibleRun::run() {
     initialise();
+    resolveBodyMotion();
+    reportBodies();
+    regridIfDue();
+    reportAmr();
 
     std::error_code directoryError;
     std::filesystem::create_directories(outputPath, directoryError);
@@ -863,7 +1004,13 @@ void CompressibleRun::run() {
             dt = clipped;
         }
 
+        regridIfDue();
         computeStep();
+        if (bodiesMove) {
+            syncFromDevice();
+            advanceBodies(dt);
+            syncToDevice();
+        }
         currentTime += dt;
         ++step;
         ++sinceReport;
@@ -875,8 +1022,10 @@ void CompressibleRun::run() {
         updateAcoustics(dt);
         sampleMicrophones();
 
-        if (wanted)
+        if (wanted) {
             saveVTK(step);
+            writeAmrFrame(step);
+        }
 
         progress::update(currentTime);
         if (sinceReport >= std::max(1, cfg.saveInterval)) {
@@ -891,10 +1040,820 @@ void CompressibleRun::run() {
 
     syncFromDevice();
     saveVTK(step);
+    writeAmrFrame(step);
     reportStep();
     writeMicrophones();
+    writeMicrophoneAudio();
     progress::finish(!stopped);
 
     std::cout << "\nSimulation finished at t = " << currentTime << " s after "
               << step << " steps.\n";
+}
+
+void CompressibleRun::resolveBodyMotion() {
+    bodies.clear();
+    bodiesMove = false;
+    bodiesFree = false;
+    if (cfg.bodyMotion.empty())
+        return;
+
+    std::vector<BodyMotion> motions;
+    std::string error;
+    if (!parseBodyMotion(cfg.bodyMotion, motions, error)) {
+        std::cout << "\n!!! " << error << "\n    No body moves.\n";
+        return;
+    }
+    if (motions.empty())
+        return;
+
+    if (mesh.objects.empty()) {
+        std::cout << "\n!!! bodyMotion was given but the domain holds no body "
+                     "at all, so there is nothing to move.\n";
+        return;
+    }
+    if (!mesh.prepareMotion()) {
+        std::cout << "\n!!! the mask this run started from cannot be moved: it "
+                     "came out of a frame rather than\n    a model, and moving "
+                     "a body means cutting its outline again every step. Give "
+                     "the run a geometryFile\n    or profiles= and the bodies "
+                     "will move.\n";
+        return;
+    }
+
+    std::vector<BodyGeometry> geometry(mesh.objects.size() + 1);
+    for (std::size_t id = 1; id < geometry.size(); ++id) {
+        const Mesh::SolidObject& body = mesh.objects[id - 1];
+        geometry[id].cx = static_cast<float>(body.cx);
+        geometry[id].cy = static_cast<float>(body.cy);
+        geometry[id].radius = static_cast<float>(body.radius);
+        geometry[id].area = static_cast<float>(body.area);
+    }
+
+    const float fluidDensity = cfg.pInf / (cfg.R * cfg.T0);
+    std::vector<std::string> notes;
+    buildRigidBodies(motions, geometry, bodies, fluidDensity, notes);
+    for (const std::string& note : notes)
+        std::cout << "\n!!! " << note << "\n";
+
+    for (const RigidBody& body : bodies) {
+        if (body.everFree)
+            bodiesFree = true;
+        if (body.everFree || body.prescribed)
+            bodiesMove = true;
+    }
+    if (!bodiesMove)
+        return;
+    bodyCollisions = cfg.bodyCollisions;
+
+    if (cfg.bodyCoupling == BodyCoupling::Weak)
+        for (RigidBody& body : bodies) {
+            body.addedMass = 0.0f;
+            body.addedInertia = 0.0f;
+        }
+
+    for (RigidBody& body : bodies)
+        body.sampleVelocity(currentTime);
+
+    for (const RestartData::BodyState& saved : restartBodies) {
+        if (saved.object < 1 ||
+            static_cast<std::size_t>(saved.object) >= bodies.size())
+            continue;
+        RigidBody& body = bodies[saved.object];
+        body.x = saved.x;
+        body.y = saved.y;
+        body.theta = saved.theta;
+        if (body.free) {
+            body.vx = saved.vx;
+            body.vy = saved.vy;
+            body.omega = saved.omega;
+        }
+    }
+
+    applyBodyPoses();
+    refreshSolidMask();
+    if (tree && tree->active())
+        for (int which = 0; which < tree->depth(); ++which) {
+            if (tree->level(which).patches.empty())
+                break;
+            tree->setSolidFromPoint(which, solidMask, nx, ny);
+        }
+}
+
+void CompressibleRun::reportBodies() const {
+    if (!bodiesMove)
+        return;
+
+    constexpr float degToRad = 3.14159265358979f / 180.0f;
+    std::cout << "Bodies that travel:\n";
+    for (const RigidBody& body : bodies) {
+        if (!body.everFree && !body.prescribed)
+            continue;
+        std::cout << "  object " << body.object << " at (" << body.cx << ", "
+                  << body.cy << ") m, ";
+        if (body.free)
+            std::cout << "free, mass " << body.mass << " kg, added "
+                      << body.addedMass << " kg";
+        else
+            std::cout << "on rails";
+        if (body.pinX || body.pinY || body.pinRot) {
+            std::cout << ", pinned in";
+            if (body.pinX) std::cout << " x";
+            if (body.pinY) std::cout << " y";
+            if (body.pinRot) std::cout << " rotation";
+        }
+        std::cout << "\n";
+    }
+    if (bodiesFree)
+        std::cout << "  the force on a free body is the pressure integral "
+                     "over its own faces; the wall\n  ghosts mirror about the "
+                     "body velocity, so a moving body pushes on the gas and "
+                     "the\n  gas pushes back.\n";
+    if (bodyCollisions)
+        std::cout << "  bodyCollisions is on, restitution "
+                  << cfg.bodyRestitution << ".\n";
+    (void)degToRad;
+}
+
+void CompressibleRun::applyBodyPoses() {
+    for (const RigidBody& body : bodies) {
+        if (!body.everFree && !body.prescribed)
+            continue;
+        Mesh::BodyPose pose;
+        pose.x = body.x;
+        pose.y = body.y;
+        pose.theta = body.theta;
+        mesh.setPose(body.object, pose);
+    }
+}
+
+void CompressibleRun::refreshSolidMask() {
+    const std::size_t cells = static_cast<std::size_t>(nx) * ny;
+    std::vector<uint8_t> before = solidMask;
+
+    mesh.updateSolid();
+    for (std::size_t id = 0; id < cells; ++id)
+        solidMask[id] = mesh.solid[id] ? 1 : 0;
+
+    const std::vector<int>& owner = mesh.ownership();
+    std::fill(solidVelX.begin(), solidVelX.end(), 0.0f);
+    std::fill(solidVelY.begin(), solidVelY.end(), 0.0f);
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            const std::size_t flat = static_cast<std::size_t>(j) * nx + i;
+            if (!solidMask[flat])
+                continue;
+            const int id = owner.empty() ? 0 : owner[flat];
+            if (id <= 0 || static_cast<std::size_t>(id) >= bodies.size())
+                continue;
+            const RigidBody& body = bodies[id];
+            const float armX =
+                (i + 0.5f) * dx - (body.cx + static_cast<float>(body.x));
+            const float armY =
+                (j + 0.5f) * dy - (body.cy + static_cast<float>(body.y));
+            solidVelX[flat] = body.vx - body.omega * armY;
+            solidVelY[flat] = body.vy + body.omega * armX;
+        }
+
+    Block block = view(rho, rhou, rhov, rhoE, rhoY);
+    for (int j = 0; j < ny; ++j)
+        for (int i = 0; i < nx; ++i) {
+            const std::size_t flat = static_cast<std::size_t>(j) * nx + i;
+            if (solidMask[flat] || !before[flat])
+                continue;
+
+            float sumRho = 0.0f, sumP = 0.0f, sumY = 0.0f;
+            int count = 0;
+            const int offsets[4][2] = {{-1, 0}, {1, 0}, {0, -1}, {0, 1}};
+            for (int k = 0; k < 4; ++k) {
+                const int ni = i + offsets[k][0];
+                const int nj = j + offsets[k][1];
+                if (ni < 0 || ni >= nx || nj < 0 || nj >= ny)
+                    continue;
+                if (solidMask[static_cast<std::size_t>(nj) * nx + ni])
+                    continue;
+                const Primitive n =
+                    primitiveOf(block, gas, block.index(ni, nj));
+                sumRho += n.rho;
+                sumP += n.p;
+                sumY += n.y;
+                ++count;
+            }
+
+            Primitive q;
+            if (count > 0) {
+                const float inv = 1.0f / static_cast<float>(count);
+                q.rho = sumRho * inv;
+                q.p = sumP * inv;
+                q.y = sumY * inv;
+            } else {
+                q.rho = cfg.pInf / (cfg.R * cfg.T0);
+                q.p = cfg.pInf;
+                q.y = 0.0f;
+            }
+            q.u = solidVelX[flat];
+            q.v = solidVelY[flat];
+            q.gamma = gammaOf(gas, q.y);
+            writeState(block, block.index(i, j), q);
+        }
+
+#ifdef USE_CUDA
+    if (onDevice)
+        compressibleCudaUploadSolid(device, solidMask.data(),
+                                    solidVelX.data(), solidVelY.data());
+#endif
+}
+
+void CompressibleRun::bodyForces() {
+    if (!bodiesMove)
+        return;
+
+    for (RigidBody& body : bodies) {
+        body.forceX = 0.0f;
+        body.forceY = 0.0f;
+        body.torque = 0.0f;
+    }
+    if (!bodiesFree)
+        return;
+
+    const std::vector<int>& owner = mesh.ownership();
+    if (owner.empty())
+        return;
+
+    Block block = view(rho, rhou, rhov, rhoE, rhoY);
+    const float faceX = dy;
+    const float faceY = dx;
+
+    const auto push = [&](int solidIndex, float fx, float fy, float px,
+                          float py) {
+        const int id = owner[solidIndex];
+        if (id <= 0 || static_cast<std::size_t>(id) >= bodies.size())
+            return;
+        RigidBody& body = bodies[id];
+        const float armX = px - (body.cx + static_cast<float>(body.x));
+        const float armY = py - (body.cy + static_cast<float>(body.y));
+        body.forceX += fx;
+        body.forceY += fy;
+        body.torque += armX * fy - armY * fx;
+    };
+
+    for (int j = 0; j < ny; ++j) {
+        const int row = j * nx;
+        const float y = (j + 0.5f) * dy;
+        for (int i = 1; i < nx; ++i) {
+            const bool left = solidMask[row + i - 1] != 0;
+            const bool right = solidMask[row + i] != 0;
+            if (left == right)
+                continue;
+            const int fluid = left ? i : i - 1;
+            const Primitive q = primitiveOf(block, gas, block.index(fluid, j));
+            const float force = q.p * faceX * (left ? -1.0f : 1.0f);
+            push(row + (left ? i - 1 : i), force, 0.0f, i * dx, y);
+        }
+    }
+
+    for (int j = 1; j < ny; ++j) {
+        const int row = j * nx;
+        for (int i = 0; i < nx; ++i) {
+            const bool low = solidMask[row - nx + i] != 0;
+            const bool high = solidMask[row + i] != 0;
+            if (low == high)
+                continue;
+            const int fluid = low ? j : j - 1;
+            const Primitive q = primitiveOf(block, gas, block.index(i, fluid));
+            const float force = q.p * faceY * (low ? -1.0f : 1.0f);
+            push((low ? row - nx : row) + i, 0.0f, force, (i + 0.5f) * dx,
+                 j * dy);
+        }
+    }
+}
+
+void CompressibleRun::advanceBodies(float stepDt) {
+    if (!bodiesMove)
+        return;
+
+    if (bodiesFree) {
+        bodyForces();
+        for (RigidBody& body : bodies)
+            if (body.free)
+                body.integrate(stepDt);
+    }
+
+    const double middle = currentTime + 0.5 * static_cast<double>(stepDt);
+    for (RigidBody& body : bodies)
+        if (body.prescribed || body.everFree)
+            body.step(middle, stepDt);
+
+    if (bodyCollisions)
+        resolveBodyCollisions(bodies, mesh.ownership(), mesh.contested(), nx,
+                              ny, cfg.Lx, cfg.Ly, cfg.bodyRestitution, stepDt,
+                              contactsReported);
+
+    for (RigidBody& body : bodies)
+        if (body.prescribed || body.everFree)
+            body.advancePose(stepDt);
+
+    applyBodyPoses();
+    refreshSolidMask();
+}
+
+void CompressibleRun::writeMicrophoneAudio() const {
+    if (!cfg.recordsAudio() || mics.empty() || micTimes.size() < 8)
+        return;
+
+    const double first = micTimes.front();
+    const double span = micTimes.back() - first;
+    if (!(span > 0.0))
+        return;
+
+    const double speed = cfg.micAudioSpeed > 0.0f ? cfg.micAudioSpeed : 1.0;
+    const int rate = cfg.micAudioRate;
+    const double audioSeconds = span / speed;
+    const long long frames =
+        static_cast<long long>(audioSeconds * rate);
+    if (frames < 2)
+        return;
+
+    const std::size_t samples = micTimes.size();
+    std::cout << "\nAudio (" << rate << " Hz, " << audioSeconds
+              << " s per file";
+    if (speed != 1.0)
+        std::cout << ", " << span << " s of flow slowed by " << (1.0 / speed)
+                  << "x";
+    std::cout << "):\n";
+
+    for (std::size_t m = 0; m < mics.size(); ++m) {
+        const std::vector<float>& channel = micSamples[m];
+        if (channel.size() != samples)
+            continue;
+
+        double mean = 0.0;
+        for (float value : channel)
+            mean += value;
+        mean /= static_cast<double>(samples);
+
+        std::vector<double> track(static_cast<std::size_t>(frames), 0.0);
+        std::size_t cursor = 0;
+        for (long long k = 0; k < frames; ++k) {
+            const double windowStart =
+                first + span * static_cast<double>(k) / frames;
+            const double windowEnd =
+                first + span * static_cast<double>(k + 1) / frames;
+
+            while (cursor + 1 < samples && micTimes[cursor] < windowStart)
+                ++cursor;
+
+            double sum = 0.0;
+            int count = 0;
+            for (std::size_t s = cursor;
+                 s < samples && micTimes[s] < windowEnd; ++s) {
+                sum += channel[s] - mean;
+                ++count;
+            }
+            if (count > 0) {
+                track[static_cast<std::size_t>(k)] =
+                    sum / static_cast<double>(count);
+                continue;
+            }
+
+            const double when = 0.5 * (windowStart + windowEnd);
+            std::size_t hi = cursor;
+            while (hi + 1 < samples && micTimes[hi] < when)
+                ++hi;
+            const std::size_t lo = hi > 0 ? hi - 1 : 0;
+            const double t0 = micTimes[lo];
+            const double t1 = micTimes[hi];
+            const double weight =
+                t1 > t0 ? (when - t0) / (t1 - t0) : 0.0;
+            track[static_cast<std::size_t>(k)] =
+                (channel[lo] - mean) +
+                weight * (channel[hi] - channel[lo]);
+        }
+
+        double drift = 0.0;
+        for (double value : track)
+            drift += value;
+        drift /= static_cast<double>(track.size());
+
+        double peak = 0.0;
+        for (double& value : track) {
+            value -= drift;
+            peak = std::max(peak, std::fabs(value));
+        }
+        const double gain = peak > 0.0 ? 0.9 * 32767.0 / peak : 0.0;
+
+        char name[64];
+        std::snprintf(name, sizeof(name), "microphone%zu.wav", m + 1);
+        const std::filesystem::path file = outputPath / name;
+        std::ofstream out(file, std::ios::binary);
+        if (!out.is_open())
+            continue;
+
+        const uint32_t dataBytes = static_cast<uint32_t>(frames * 2);
+        const uint32_t sampleRate = static_cast<uint32_t>(rate);
+        const auto put32 = [&](uint32_t value) {
+            const unsigned char raw[4] = {
+                static_cast<unsigned char>(value & 0xFF),
+                static_cast<unsigned char>((value >> 8) & 0xFF),
+                static_cast<unsigned char>((value >> 16) & 0xFF),
+                static_cast<unsigned char>((value >> 24) & 0xFF)};
+            out.write(reinterpret_cast<const char*>(raw), 4);
+        };
+        const auto put16 = [&](uint16_t value) {
+            const unsigned char raw[2] = {
+                static_cast<unsigned char>(value & 0xFF),
+                static_cast<unsigned char>((value >> 8) & 0xFF)};
+            out.write(reinterpret_cast<const char*>(raw), 2);
+        };
+
+        out.write("RIFF", 4);
+        put32(36 + dataBytes);
+        out.write("WAVE", 4);
+        out.write("fmt ", 4);
+        put32(16);
+        put16(1);
+        put16(1);
+        put32(sampleRate);
+        put32(sampleRate * 2);
+        put16(2);
+        put16(16);
+        out.write("data", 4);
+        put32(dataBytes);
+
+        for (double value : track) {
+            double scaled = value * gain;
+            scaled = std::max(-32768.0, std::min(32767.0, scaled));
+            put16(static_cast<uint16_t>(static_cast<int16_t>(
+                scaled >= 0.0 ? scaled + 0.5 : scaled - 0.5)));
+        }
+        out.close();
+
+        char line[220];
+        std::snprintf(line, sizeof(line),
+                      "  mic %zu -> %s, full scale is %.4g Pa of fluctuation",
+                      m + 1, name, peak);
+        std::cout << line << "\n";
+    }
+    std::cout << "Written next to the frames in "
+              << pathToConsole(outputPath) << "\n";
+}
+
+namespace {
+
+std::vector<float> stretchAxis(int count,
+                               double length,
+                               double ratio,
+                               double from,
+                               double to) {
+    std::vector<float> widths(static_cast<std::size_t>(count), 0.0f);
+    if (count < 1)
+        return widths;
+    if (!(ratio > 1.0) || count < 4) {
+        const float even = static_cast<float>(length / count);
+        std::fill(widths.begin(), widths.end(), even);
+        return widths;
+    }
+
+    const double even = length / count;
+    const int first = std::clamp(static_cast<int>(from / even), 0, count - 1);
+    const int last = std::clamp(static_cast<int>(to / even), first, count - 1);
+
+    std::vector<double> weight(static_cast<std::size_t>(count), 1.0);
+    double total = 0.0;
+    for (int i = 0; i < count; ++i) {
+        int away = 0;
+        if (i < first)
+            away = first - i;
+        else if (i > last)
+            away = i - last;
+        weight[static_cast<std::size_t>(i)] = std::pow(ratio, away);
+        total += weight[static_cast<std::size_t>(i)];
+    }
+    for (int i = 0; i < count; ++i)
+        widths[static_cast<std::size_t>(i)] = static_cast<float>(
+            length * weight[static_cast<std::size_t>(i)] / total);
+    return widths;
+}
+
+std::vector<float> edgeAxis(int count, double length, double ratio) {
+    std::vector<float> widths(static_cast<std::size_t>(count), 0.0f);
+    if (count < 1)
+        return widths;
+    if (!(ratio > 1.0) || count < 4) {
+        const float even = static_cast<float>(length / count);
+        std::fill(widths.begin(), widths.end(), even);
+        return widths;
+    }
+    std::vector<double> weight(static_cast<std::size_t>(count), 1.0);
+    double total = 0.0;
+    for (int i = 0; i < count; ++i) {
+        const int away = std::min(i, count - 1 - i);
+        weight[static_cast<std::size_t>(i)] = std::pow(ratio, away);
+        total += weight[static_cast<std::size_t>(i)];
+    }
+    for (int i = 0; i < count; ++i)
+        widths[static_cast<std::size_t>(i)] = static_cast<float>(
+            length * weight[static_cast<std::size_t>(i)] / total);
+    return widths;
+}
+
+}
+
+void CompressibleRun::buildGrid() {
+    stretched = cfg.stretchedGrid();
+
+    const std::size_t across = static_cast<std::size_t>(nx) + 2 * ghost;
+    const std::size_t along = static_cast<std::size_t>(ny) + 2 * ghost;
+    cellWidths.assign(across, dx);
+    cellHeights.assign(along, dy);
+    cellCentresX.assign(across, 0.0f);
+    cellCentresY.assign(along, 0.0f);
+    faceX.assign(static_cast<std::size_t>(nx) + 1, 0.0f);
+    faceY.assign(static_cast<std::size_t>(ny) + 1, 0.0f);
+
+    std::vector<float> widths(static_cast<std::size_t>(nx), dx);
+    std::vector<float> heights(static_cast<std::size_t>(ny), dy);
+
+    if (stretched) {
+        double lowX = 0.5 * cfg.Lx, highX = 0.5 * cfg.Lx;
+        double lowY = 0.5 * cfg.Ly, highY = 0.5 * cfg.Ly;
+        bool found = false;
+        for (int j = 0; j < ny; ++j)
+            for (int i = 0; i < nx; ++i) {
+                if (!solidMask[static_cast<std::size_t>(j) * nx + i])
+                    continue;
+                const double x = (i + 0.5) * dx;
+                const double y = (j + 0.5) * dy;
+                if (!found) {
+                    lowX = highX = x;
+                    lowY = highY = y;
+                    found = true;
+                    continue;
+                }
+                lowX = std::min(lowX, x);
+                highX = std::max(highX, x);
+                lowY = std::min(lowY, y);
+                highY = std::max(highY, y);
+            }
+
+        const double padX = 0.5 * cfg.refineNear * cfg.Lx;
+        const double padY = 0.5 * cfg.refineNear * cfg.Ly;
+        const double ratio = cfg.stretchRatio;
+
+        switch (cfg.gridStretch) {
+        case StretchKind::Edges:
+            widths = edgeAxis(nx, cfg.Lx, ratio);
+            heights = edgeAxis(ny, cfg.Ly, ratio);
+            break;
+        case StretchKind::Wake:
+            widths = stretchAxis(nx, cfg.Lx, ratio,
+                                 std::max(0.0, lowX - padX), cfg.Lx);
+            heights = stretchAxis(ny, cfg.Ly, ratio,
+                                  std::max(0.0, lowY - padY),
+                                  std::min<double>(cfg.Ly, highY + padY));
+            break;
+        case StretchKind::Body:
+        default:
+            widths = stretchAxis(nx, cfg.Lx, ratio,
+                                 std::max(0.0, lowX - padX),
+                                 std::min<double>(cfg.Lx, highX + padX));
+            heights = stretchAxis(ny, cfg.Ly, ratio,
+                                  std::max(0.0, lowY - padY),
+                                  std::min<double>(cfg.Ly, highY + padY));
+            break;
+        }
+    }
+
+    double walkX = 0.0;
+    for (int i = 0; i < nx; ++i) {
+        faceX[static_cast<std::size_t>(i)] = static_cast<float>(walkX);
+        cellWidths[static_cast<std::size_t>(i) + ghost] =
+            widths[static_cast<std::size_t>(i)];
+        cellCentresX[static_cast<std::size_t>(i) + ghost] =
+            static_cast<float>(walkX + 0.5 * widths[static_cast<std::size_t>(i)]);
+        walkX += widths[static_cast<std::size_t>(i)];
+    }
+    faceX[static_cast<std::size_t>(nx)] = static_cast<float>(walkX);
+
+    double walkY = 0.0;
+    for (int j = 0; j < ny; ++j) {
+        faceY[static_cast<std::size_t>(j)] = static_cast<float>(walkY);
+        cellHeights[static_cast<std::size_t>(j) + ghost] =
+            heights[static_cast<std::size_t>(j)];
+        cellCentresY[static_cast<std::size_t>(j) + ghost] =
+            static_cast<float>(walkY +
+                               0.5 * heights[static_cast<std::size_t>(j)]);
+        walkY += heights[static_cast<std::size_t>(j)];
+    }
+    faceY[static_cast<std::size_t>(ny)] = static_cast<float>(walkY);
+
+    for (int k = 1; k <= ghost; ++k) {
+        cellWidths[static_cast<std::size_t>(ghost - k)] =
+            cellWidths[static_cast<std::size_t>(ghost)];
+        cellWidths[static_cast<std::size_t>(ghost + nx - 1 + k)] =
+            cellWidths[static_cast<std::size_t>(ghost + nx - 1)];
+        cellHeights[static_cast<std::size_t>(ghost - k)] =
+            cellHeights[static_cast<std::size_t>(ghost)];
+        cellHeights[static_cast<std::size_t>(ghost + ny - 1 + k)] =
+            cellHeights[static_cast<std::size_t>(ghost + ny - 1)];
+
+        cellCentresX[static_cast<std::size_t>(ghost - k)] =
+            cellCentresX[static_cast<std::size_t>(ghost - k + 1)] -
+            cellWidths[static_cast<std::size_t>(ghost - k)];
+        cellCentresX[static_cast<std::size_t>(ghost + nx - 1 + k)] =
+            cellCentresX[static_cast<std::size_t>(ghost + nx - 2 + k)] +
+            cellWidths[static_cast<std::size_t>(ghost + nx - 1 + k)];
+        cellCentresY[static_cast<std::size_t>(ghost - k)] =
+            cellCentresY[static_cast<std::size_t>(ghost - k + 1)] -
+            cellHeights[static_cast<std::size_t>(ghost - k)];
+        cellCentresY[static_cast<std::size_t>(ghost + ny - 1 + k)] =
+            cellCentresY[static_cast<std::size_t>(ghost + ny - 2 + k)] +
+            cellHeights[static_cast<std::size_t>(ghost + ny - 1 + k)];
+    }
+}
+
+void CompressibleRun::applyGridToBlock(Block& block) const {
+    if (!stretched)
+        return;
+    block.widths = cellWidths.data();
+    block.heights = cellHeights.data();
+    block.centresX = cellCentresX.data();
+    block.centresY = cellCentresY.data();
+}
+
+int CompressibleRun::columnAt(float x) const {
+    if (!stretched)
+        return std::clamp(static_cast<int>(x / dx), 0, nx - 1);
+    for (int i = 0; i < nx; ++i)
+        if (x < faceX[static_cast<std::size_t>(i) + 1])
+            return i;
+    return nx - 1;
+}
+
+int CompressibleRun::rowAt(float y) const {
+    if (!stretched)
+        return std::clamp(static_cast<int>(y / dy), 0, ny - 1);
+    for (int j = 0; j < ny; ++j)
+        if (y < faceY[static_cast<std::size_t>(j) + 1])
+            return j;
+    return ny - 1;
+}
+
+void CompressibleRun::setUpAmr() {
+    if (!cfg.adaptive())
+        return;
+
+    amr = std::make_unique<AmrSettings>();
+    amr->levels = cfg.amrLevels;
+    amr->regridEvery = cfg.amrEvery;
+    amr->threshold = cfg.amrThreshold;
+    amr->buffer = cfg.amrBuffer;
+    amr->minSide = cfg.amrMinPatch;
+    amr->maxSide = cfg.amrMaxPatch;
+    parseAmrCriterion(cfg.amrCriterion, amr->criterion);
+
+    tree = std::make_unique<AmrHierarchy>();
+    tree->build(*amr, nx, ny, dx, dy, cfg.twoSpecies());
+
+    driver = std::make_unique<AmrDriver>(
+        *tree, gas, sides, cfg.limiter,
+        cfg.twoSpecies() ? cfg.diffusivity : 0.0f);
+}
+
+void CompressibleRun::regridIfDue() {
+    if (!tree || !amr)
+        return;
+    if (sinceRegrid > 0 && sinceRegrid < amr->regridEvery) {
+        ++sinceRegrid;
+        return;
+    }
+    sinceRegrid = 1;
+
+    Block current = view(rho, rhou, rhov, rhoE, rhoY);
+    tree->regrid(current, gas, *amr, solidMask);
+}
+
+void CompressibleRun::reportAmr() const {
+    if (!tree || !tree->active())
+        return;
+    std::vector<int> patches;
+    std::vector<long long> cells;
+    tree->describe(patches, cells);
+    const long long base = static_cast<long long>(nx) * ny;
+    long long total = base;
+    std::cout << "Adaptive mesh: base " << nx << " x " << ny << " = " << base
+              << " cells\n";
+    for (std::size_t which = 0; which < patches.size(); ++which) {
+        total += cells[which];
+        std::cout << "  level " << (which + 1) << ": " << patches[which]
+                  << " patches, " << cells[which] << " cells, "
+                  << (1 << (which + 1)) << "x finer\n";
+    }
+    const double equivalent =
+        static_cast<double>(base) *
+        std::pow(4.0, static_cast<double>(patches.size()));
+    std::cout << "  " << total << " cells against " << equivalent
+              << " for the same resolution everywhere";
+    if (equivalent > 0.0)
+        std::cout << ", " << (100.0 * total / equivalent) << "% of it";
+    std::cout << "\n";
+}
+
+void CompressibleRun::writeAmrFrame(int stepNumber) const {
+    if (!tree || !tree->active())
+        return;
+
+    std::error_code directoryError;
+    std::filesystem::create_directories(outputPath, directoryError);
+
+    const std::string stem =
+        framePrefix + "_" + std::to_string(stepNumber) + "_amr";
+    std::vector<std::string> written;
+
+    const auto writeAxis = [](std::ostream& out, const char* name, int count,
+                              double origin, double step) {
+        out << "        <" << name << ">\n          <DataArray type=\"Float32\" "
+            << "format=\"ascii\" NumberOfComponents=\"1\">\n           ";
+        for (int k = 0; k <= count; ++k)
+            out << ' ' << (origin + k * step);
+        out << "\n          </DataArray>\n        </" << name << ">\n";
+    };
+
+    for (int which = 0; which < tree->depth(); ++which) {
+        const AmrLevel& here = tree->level(which);
+        for (std::size_t index = 0; index < here.patches.size(); ++index) {
+            const AmrPatch& patch = here.patches[index];
+            const std::string name = stem + "_L" + std::to_string(which + 1) +
+                                     "_P" + std::to_string(index) + ".vtr";
+            std::ofstream out(outputPath / name);
+            if (!out.is_open())
+                continue;
+
+            Block block = patch.view(0, here.dx, here.dy);
+            const int pnx = patch.box.nx;
+            const int pny = patch.box.ny;
+            out << "<?xml version=\"1.0\"?>\n"
+                << "<VTKFile type=\"RectilinearGrid\" version=\"0.1\" "
+                   "byte_order=\"LittleEndian\">\n"
+                << "  <RectilinearGrid WholeExtent=\"0 " << pnx << " 0 " << pny
+                << " 0 0\">\n"
+                << "    <Piece Extent=\"0 " << pnx << " 0 " << pny
+                << " 0 0\">\n"
+                << "      <Coordinates>\n";
+            writeAxis(out, "DataArray", pnx, patch.box.i0 * here.dx, here.dx);
+            writeAxis(out, "DataArray", pny, patch.box.j0 * here.dy, here.dy);
+            out << "        <DataArray type=\"Float32\" format=\"ascii\" "
+                   "NumberOfComponents=\"1\">\n           0 0\n"
+                   "        </DataArray>\n"
+                << "      </Coordinates>\n"
+                << "      <CellData Scalars=\"density\">\n";
+
+            const auto field = [&](const char* label, auto value) {
+                out << "        <DataArray type=\"Float32\" Name=\"" << label
+                    << "\" format=\"ascii\">\n         ";
+                for (int j = 0; j < pny; ++j)
+                    for (int i = 0; i < pnx; ++i)
+                        out << ' ' << value(i, j);
+                out << "\n        </DataArray>\n";
+            };
+
+            field("density", [&](int i, int j) {
+                return primitiveOf(block, gas, block.index(i, j)).rho;
+            });
+            field("pressure", [&](int i, int j) {
+                return primitiveOf(block, gas, block.index(i, j)).p;
+            });
+            field("velocityX", [&](int i, int j) {
+                return primitiveOf(block, gas, block.index(i, j)).u;
+            });
+            field("velocityY", [&](int i, int j) {
+                return primitiveOf(block, gas, block.index(i, j)).v;
+            });
+            field("solid", [&](int i, int j) {
+                return static_cast<int>(
+                    patch.solid[static_cast<std::size_t>(j) * pnx + i]);
+            });
+            field("level", [&](int, int) { return which + 1; });
+
+            out << "      </CellData>\n    </Piece>\n  </RectilinearGrid>\n"
+                << "</VTKFile>\n";
+            written.push_back(name);
+        }
+    }
+
+    std::ofstream index(outputPath / (stem + ".vtm"));
+    if (!index.is_open())
+        return;
+    index << "<?xml version=\"1.0\"?>\n"
+          << "<VTKFile type=\"vtkMultiBlockDataSet\" version=\"1.0\" "
+             "byte_order=\"LittleEndian\">\n"
+          << "  <vtkMultiBlockDataSet>\n"
+          << "    <Block index=\"0\" name=\"base\">\n"
+          << "      <DataSet index=\"0\" file=\"" << framePrefix << "_"
+          << stepNumber << ".vtk\"/>\n"
+          << "    </Block>\n";
+    for (std::size_t which = 0; which < written.size(); ++which)
+        index << "    <Block index=\"" << (which + 1) << "\" name=\""
+              << written[which] << "\">\n      <DataSet index=\"0\" file=\""
+              << written[which] << "\"/>\n    </Block>\n";
+    index << "  </vtkMultiBlockDataSet>\n</VTKFile>\n";
 }
