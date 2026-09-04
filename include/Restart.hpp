@@ -31,6 +31,8 @@ struct RestartData {
 
     std::vector<float> stateRho, stateRhoU, stateRhoV, stateRhoE, stateRhoY;
 
+    std::vector<float> gridFaceX, gridFaceY;
+
     std::vector<std::pair<std::string, std::vector<float>>> extras;
 
     struct BodyState {

@@ -2,6 +2,14 @@
 (from Kuzya: i dunno how it works, i have a feeling it's something alive, and changes by itself <3. TOTALLY NOT ME COMMITING 12 TIMES)
 # CFD-Solver-2D
 
+> **PROJECT FULLY DONE, NO UPDATES PLANNED.**
+>
+> 1.0 is the last one. Adaptive mesh refinement was the last thing on the list
+> and it is in: a stretched grid where you want the cells, patches of a finer
+> grid where the flow wants them. Everything before it is still here and still
+> behaves the way it did - the golden master is 88 frames at 0.000e+00 against
+> 0.8, and it has been through every branch since.
+
 **A 2D incompressible Navier‑Stokes solver for external flows around arbitrary profiles.**
 
 CFD‑Solver‑2D is an educational/research project that implements a finite‑difference CFD solver for unsteady viscous incompressible flow. It uses the **Chorin projection method** on a **staggered MAC grid** with an **immersed boundary** technique to handle complex geometries. The code is written in C++17 and features:
@@ -238,6 +246,10 @@ CFD-Solver-2D/
 │   ├── ConservationTests.cpp       <- divergence, mass balance, hydrostatics
 │   ├── ConvectionTests.cpp         <- the schemes against each other
 │   ├── RestartTests.cpp            <- a continuation against a straight run
+│   ├── TurbulenceTests.cpp         <- the two models against what they claim
+│   ├── CompressibleTests.cpp       <- Sod, an oblique shock, two gases, the
+│   │                                  acoustics, a driven body, a written wav,
+│   │                                  a stretched grid and the refinement
 │   └── BackendAgreementTests.cpp   <- AVX2 and OpenMP on against off
 ├── src/
 │   ├── main.cpp
@@ -248,6 +260,12 @@ CFD-Solver-2D/
 │   ├── Mesh.cpp
 │   ├── Restart.cpp
 │   ├── Solver.cpp
+│   ├── SolverCompressible.cpp      <- the compressible solver and its run
+│   ├── SolverCompressibleCuda.cu   <- the same kernels on a GPU
+│   ├── AmrHierarchy.cpp            <- patches, tagging, clustering, ghosts
+│   ├── AmrDriver.cpp               <- subcycling down the levels
+│   ├── RigidBody.cpp               <- bodies that travel, and their collisions
+│   ├── Turbulence.cpp
 │   ├── Multigrid.cpp
 │   ├── MultigridCuda.cu
 │   ├── app.rc.in                   <- icon and version block, Windows only
@@ -472,6 +490,15 @@ above 0.1, `nu=0`.
 | `sliceAngleX` `sliceAngleZ` `sliceRotation` | float, deg | 0 | any finite |
 | `invertSection` | switch | 0 | 1 / 0 |
 | `wallMotion` | list | empty | `<object>:rot=90,slideX=0.5;<object>:slip=1` — an object either moves or slips, see below |
+| `amrLevels` | int | 0 | refinement levels over the base grid, compressible only, see below |
+| `amrCriterion` | name | `everything` | `density` / `vorticity` / `species` / `body` / `everything` |
+| `amrThreshold` | float | 0.2 | how steep a feature has to be, as a fraction of the steepest |
+| `amrEvery` | int, steps | 8 | base steps between regrids |
+| `amrBuffer` | int, cells | 2 | padding round the tagged region |
+| `amrMinPatch` `amrMaxPatch` | int, cells | 8 / 64 | bounds on a patch side |
+| `gridStretch` | name | `off` | `off` / `body` / `wake` / `edges`, compressible only, see below |
+| `stretchRatio` | float | 1.05 | largest ratio between one cell and the next |
+| `refineNear` | float | 0.25 | width of the fine band, as a fraction of the domain |
 | `bodyMotion` | list | empty | `<object>:vx=0.2,omega=45;<object>:free=1,mass=2` — bodies that travel, in either regime, see below |
 | `bodyCoupling` | name | `added` | `weak` / `added` / `strong`, only read by a free body |
 | `bodyIterations` | int | 4 | most force/motion passes inside one step, only read by `strong` |
@@ -1580,10 +1607,184 @@ Two things are worth knowing before trusting a number out of this:
   about it and it is not wrong, only slower - and only when bodies actually
   move.
 
+### Cells do not have to be the same size
+
+    "Fluid Solver.exe" regime=compressible geometryFile=wing.obj ^
+                       nx=400 ny=200 gridStretch=body stretchRatio=1.05 ^
+                       refineNear=0.3 machInlet=0.8
+
+Every run before this one had one `dx` and one `dy` for the whole grid. The
+compressible solver does not any more: `Block` carries a width per column and a
+height per row, and the far field costs what it is worth instead of what the
+body needs.
+
+`gridStretch=body` finds what the mask holds, keeps a band `refineNear` wide
+around it at full resolution, and grows the cells outside it by `stretchRatio`
+each step. `wake` does the same but lets the fine band run to the downstream
+edge. `edges` puts the fine cells against the walls instead, which is what a
+duct wants. `off` is the even grid and is still the default; nothing about a run
+that does not ask for stretching changed, down to the bit.
+
+**The part that is easy to get wrong.** A MUSCL reconstruction takes a slope
+and extrapolates it half a cell to the face. Written the obvious way that is
+
+    face = centre + 0.5 * limit(centre - back, forward - centre)
+
+and the `0.5` is doing two jobs at once: it is half of *this* cell, and the
+differences it is limiting are implicitly *per cell*. On an even grid those are
+the same number. On a stretched one they are three different numbers, and the
+scheme quietly stops being second order. What is written here instead is
+
+    face = centre + (width/2) * limit((centre - back) / hBack,
+                                      (forward - centre) / hForward)
+
+with `hBack` and `hForward` the real distances between cell centres. The
+limiters are all homogeneous of degree one, so on an even grid this collapses
+to exactly the old expression - the same floats in the same order, which is why
+turning stretching off is not merely close to 0.9 but identical to it.
+
+**CUDA and gridStretch do not go together, and the run says so rather than
+pretending.** The device kernels carry one cell size per axis and the stretched
+metrics live on the host; a GPU run would quietly solve an even grid instead of
+the one that was asked for. Asking for both prints four lines and stays on the
+CPU.
+
+The divergence is finite volume and needs nothing else: `(F_right - F_left) /
+width` is conservative on any grid. `dt` takes the local cell, so the smallest
+cell sets the step - which is the price of stretching and the reason
+`stretchRatio` has a ceiling.
+
+**Frames come out as `RECTILINEAR_GRID`** with the face coordinates written
+out, which ParaView opens natively. The frame also carries `gridFaceX` and
+`gridFaceY` in its restart block, so a continued run lands on the same grid
+rather than a regenerated one - which matters, because with moving bodies the
+mask that the grid was built from is not the mask at the end. An unstretched
+run still writes `STRUCTURED_POINTS` exactly as before.
+
+**What it is checked against.** Two things, and the first is the one with
+teeth. A second order scheme reproduces a *linear* profile exactly on any grid:
+the slope is exact and so is the extrapolation. So the test lays a linear
+density down on a 4:1 geometric grid, takes one stage, and reads the flux
+divergence back out - it should be `u * dρ/dx` and nothing else. It comes out
+8.4e-4 off in the worst cell, which is the float32 noise floor for a difference
+of two fluxes of that size; the obvious `0.5 * limit(differences)` form gives
+3.0e-3 on the same grid, and the threshold sits between them. Second, a smooth
+bump on the same grid at 200 and 400 cells converges at order 1.5 - a limiter
+clips at a smooth peak and a 4:1 stretch costs more, so that is what working
+looks like, and anything near 1 means it really has collapsed.
+
+Worth saying plainly, because it would be easy to claim more: for a *smoothly*
+stretched grid the two forms differ only at higher order and both converge at
+second order. The naive one bites where the cell ratio changes abruptly - at
+the edge of the fine band, which is exactly where this solver puts one.
+
+### Refinement in patches
+
+    "Fluid Solver.exe" regime=compressible caseType=shockTube ^
+                       nx=128 ny=64 Lx=1 Ly=0.5 geometryFile=empty ^
+                       amrLevels=1 amrEvery=2 amrThreshold=0.02
+
+`gridStretch` puts the small cells where you say. This puts them where the flow
+says, and moves them as it moves.
+
+Levels of rectangular patches sit over the base grid, each one halving the cell
+size of the level above it. Cells are tagged by `amrCriterion` - a density jump
+for shocks and contacts, vorticity for wakes and shear, a composition gradient
+where two gases meet, the cells against a solid, or all four - padded by
+`amrBuffer`, and clustered into boxes by a signature-and-split pass that cuts a
+region at the widest gap in its tag histogram, or at the sharpest bend when
+there is no gap. That is Berger-Rigoutsos, and the whole point of it is that
+one long thin feature becomes one long thin patch instead of a square box round
+everything.
+
+A patch is a `Block`. That is the whole reason branch 7 was written the way it
+was: not one kernel needed touching. `advanceStage`, `blockTimeStep`, `hllc`,
+the reconstruction, the solid fill - a patch runs the same code the base grid
+runs, on its own arrays, with its own spacing.
+
+**Time subcycles.** A level takes two steps for every one the level above it
+takes, which is what keeps every level at the same CFL rather than dragging the
+whole run down to the finest cell. Between them the patches refill their ghost
+cells from the level above by limited linear interpolation - which reproduces a
+constant exactly, and averages back to the coarse value it came from - and from
+their siblings where they overlap. Afterwards the four fine cells under each
+coarse cell are averaged back down into it, so the base grid always carries the
+best answer the hierarchy has.
+
+**The bug this shape of code invites**, written down because it cost an
+afternoon: `advanceStage` fills the ghost cells from `BlockBoundaries` before
+it does anything else. Run it on a patch and the patch gets the *domain's*
+walls and inlets imposed on its own four edges - on top of the ghosts that were
+just interpolated for it - and every patch becomes a little closed box that
+rings. The shock tube blew up to the pressure floor in twenty-five steps.
+`SideState` now carries an `interior` flag, a patch marks the sides that do not
+reach the edge of the domain, and `mirrorSide` returns immediately for those.
+A patch that *does* touch the domain edge still gets the real boundary, and it
+gets it at the right place, because `BlockBoundaries` also carries where the
+block sits in the domain - a banded inlet is a fraction of the domain, not of
+the patch.
+
+**And a real bug it uncovered in the base solver.** Chasing conservation showed
+mass being created at the domain walls of every compressible run ever made
+here. Branch 7 replaced the wall flux with an explicit one for *solid* faces,
+because a mirrored state only cancels to zero mass flux before the
+reconstruction breaks the symmetry - and then left the domain walls solving the
+same broken Riemann problem. They are explicit now too. A closed shock tube
+bouncing off all four walls for two milliseconds conserves mass to 7e-6, where
+it used not to.
+
+**What it is worth.** A 128x64 tube with one level: 9728 cells against the
+32768 a uniform fine grid would need, 30% of them, and the answer on the base
+grid comes out 21% closer to a 256x128 reference than the plain coarse run.
+
+**What is not in it, and this matters.** There is no flux correction at
+coarse-fine boundaries. The textbook Berger-Colella scheme keeps a register of
+the fine fluxes along each patch edge and replaces the coarse flux with their
+average, so the composite is conservative to the last bit. I wrote one. It is
+not here, because it did not work: with the register on, the mass drift of a
+frozen grid went from 1.35e-3 to 1.56e-3, and a gain sweep - full, half,
+quarter, reversed - moved the number around inside the noise without ever
+improving it. A correction I derived twice and cannot show to help is not a
+correction, it is a second bug hiding behind the first, so it came out.
+
+What is left instead is worth knowing exactly:
+
+- With the patches following the flow, which is how it is meant to be run, a
+  closed box conserves mass to about 1e-5 to 1e-6.
+- Freeze the grid - `amrEvery` larger than the run - and let a wave sit on a
+  patch edge for hundreds of steps, and it drifts to about 1e-3.
+- `amrEvery=2` costs a regrid every other step and is cheap; the regrid carries
+  the old fine data into the new patches wherever they overlap and only
+  interpolates from the coarse where there was none, so following the flow
+  closely costs accuracy nothing. Regridding *without* that carry-over is worse
+  than no refinement at all - it was, before I added it: the first version came
+  out 22% *worse* than the plain coarse run, because every regrid threw the
+  fine solution away and re-interpolated it from the coarse one.
+
+**Output.** The ordinary `.vtk` frame is still written on the base grid, with
+the fine levels averaged into it, so everything that could read a frame before
+still can and the UI needs to know nothing. Beside it goes a `.vtm` with one
+`.vtr` per patch carrying density, pressure, velocity, the mask and the level
+number, which ParaView opens as a hierarchy and draws at full resolution.
+
+`amrLevels` and `gridStretch` refuse each other: refinement halves a cell to
+make a patch and has nothing to halve when every cell is already a different
+size. `amrLevels` and `useCuda` refuse each other too, out loud and on the way
+past rather than by quietly solving the base grid - the hierarchy lives on the
+host and the device kernels know about one grid.
+
+`amrLevels` is refused for `regime=incompressible`, and not out of tidiness:
+the pressure solve is global, and a multigrid hierarchy over a patch hierarchy
+is a different solver rather than a setting.
+
 ### Keys it refuses
 
 Turbulence, gravity, surface tension, sources and the cavity
-preset are all incompressible-only, and asking for one of them alongside
+preset are all incompressible-only, and `gridStretch` and `amrLevels` are
+compressible-only the
+other way round - the projection solver indexes a flat array with one `dx`, and
+the multigrid halves that grid to build its hierarchy; neither survives cells of
+different sizes. They are all and asking for one of them alongside
 `regime=compressible` stops the run before it starts with a sentence saying
 which and why - rather than being quietly ignored, which is the failure mode
 where you find out three hours later that gravity was off. Acoustics the other
@@ -1592,7 +1793,7 @@ infinite by construction.
 
 ### Checked against
 
-`CompressibleTests`, six cases, and three of them have an exact answer rather
+`CompressibleTests`, nine cases, and four of them have an exact answer rather
 than a measured one.
 
 **Sod's shock tube against the exact Riemann solution.** Not a table - the
@@ -1627,6 +1828,26 @@ count matching `totalTime / micAudioSpeed` to within 2%, the peak at 0.9 of
 full scale because that is what peak normalisation means, and the mean inside
 1% of the peak because a wav is a fluctuation and a DC offset in a 16 bit
 sample is silence with a rail on it.
+
+**A stretched grid**, above: a straight line carried exactly, and a smooth bump
+converging.
+
+**The refinement hierarchy, on its own.** A perfectly uniform field must tag
+nothing - if it tags anything the criterion is measuring round-off. A clear
+density block must produce patches. And a uniform state interpolated onto two
+levels of patches, ghost cells included, must come back exactly uniform, and
+average back down without moving the coarse state: the test measures 0.0e+00
+for both, because a constant is the one thing every interpolation has to
+reproduce and the one thing that catches an index slip.
+
+**The refinement hierarchy, running.** Three shock tubes in a closed box - 64
+cells, 64 cells with one level over them, 128 cells - and the refined run has
+to land closer to the 128-cell answer than the plain 64-cell run does. It lands
+7.4e-05 away where the plain run is 4.5e-03 away. The test also refuses a
+refined run that comes out *identical* to the fine reference, because that
+means the patches covered the whole domain and no coarse-fine boundary was ever
+exercised; and it checks the closed box holds its mass to better than 5e-4,
+which it does at 8.6e-5.
 
 ## Turbulence
 

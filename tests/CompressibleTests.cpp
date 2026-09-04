@@ -1,5 +1,7 @@
 #include "TestHarness.hpp"
 
+#include "AmrHierarchy.hpp"
+
 #include <cstdio>
 #include <cstdint>
 #include <cstdlib>
@@ -735,6 +737,466 @@ int main() {
                       "for %.4f s of flow, peak %d, mean %.1f",
                       frames, cfg.micAudioRate, frames / cfg.micAudioRate,
                       cfg.totalTime, peak, mean);
+        report(line);
+    }
+
+    {
+        struct Sample {
+            int cells;
+            double error;
+            double peak;
+        };
+
+        const double speed = 100.0;
+        const double pressure = 1.0e5;
+        const double centre = 0.5;
+        const double width = 0.12;
+        const double squeeze = 0.4;
+
+        const auto measure = [&](int count, bool linear) {
+            const auto density = [&](double x) {
+                if (linear)
+                    return 1.0 + 0.3 * x;
+                const double s = (x - centre) / width;
+                return 1.0 + 0.2 * std::exp(-s * s);
+            };
+            const auto slope = [&](double x) {
+                if (linear)
+                    return 0.3;
+                const double s = (x - centre) / width;
+                return 0.2 * std::exp(-s * s) * (-2.0 * s / width);
+            };
+            const int rows = 8;
+            const int ghost = 2;
+            const int stride = count + 2 * ghost;
+            const int lines = rows + 2 * ghost;
+            const std::size_t total =
+                static_cast<std::size_t>(stride) * lines;
+
+            const int first = count * 3 / 10;
+            const int last = count * 7 / 10;
+            const double ratio =
+                std::pow(4.0, 1.0 / std::max(1, count * 3 / 10));
+            std::vector<double> weight(static_cast<std::size_t>(count), 1.0);
+            double weightSum = 0.0;
+            for (int i = 0; i < count; ++i) {
+                int away = 0;
+                if (i < first)
+                    away = first - i;
+                else if (i > last)
+                    away = i - last;
+                weight[static_cast<std::size_t>(i)] =
+                    std::pow(ratio, away);
+                weightSum += weight[static_cast<std::size_t>(i)];
+            }
+            std::vector<float> faces(static_cast<std::size_t>(count) + 1);
+            double walk = 0.0;
+            for (int i = 0; i < count; ++i) {
+                faces[static_cast<std::size_t>(i)] =
+                    static_cast<float>(walk);
+                walk += weight[static_cast<std::size_t>(i)] / weightSum;
+            }
+            faces[static_cast<std::size_t>(count)] =
+                static_cast<float>(walk);
+
+            std::vector<float> widths(static_cast<std::size_t>(stride));
+            std::vector<float> centresX(static_cast<std::size_t>(stride));
+            for (int i = 0; i < count; ++i) {
+                const std::size_t at = static_cast<std::size_t>(i);
+                widths[at + ghost] = faces[at + 1] - faces[at];
+                centresX[at + ghost] = 0.5f * (faces[at] + faces[at + 1]);
+            }
+            for (int k = 1; k <= ghost; ++k) {
+                widths[static_cast<std::size_t>(ghost - k)] =
+                    widths[static_cast<std::size_t>(ghost)];
+                widths[static_cast<std::size_t>(ghost + count - 1 + k)] =
+                    widths[static_cast<std::size_t>(ghost + count - 1)];
+                centresX[static_cast<std::size_t>(ghost - k)] =
+                    centresX[static_cast<std::size_t>(ghost - k + 1)] -
+                    widths[static_cast<std::size_t>(ghost - k)];
+                centresX[static_cast<std::size_t>(ghost + count - 1 + k)] =
+                    centresX[static_cast<std::size_t>(ghost + count - 2 + k)] +
+                    widths[static_cast<std::size_t>(ghost + count - 1 + k)];
+            }
+
+            const float rowHeight = static_cast<float>(0.2 / rows);
+            std::vector<float> heights(static_cast<std::size_t>(lines),
+                                       rowHeight);
+            std::vector<float> centresY(static_cast<std::size_t>(lines));
+            for (int j = -ghost; j < rows + ghost; ++j)
+                centresY[static_cast<std::size_t>(j + ghost)] =
+                    (j + 0.5f) * rowHeight;
+
+            std::vector<float> rho(total), rhou(total), rhov(total),
+                rhoE(total);
+            std::vector<float> keepRho(total), keepRhoU(total),
+                keepRhoV(total), keepRhoE(total);
+            std::vector<float> outRho(total), outRhoU(total), outRhoV(total),
+                outRhoE(total);
+            std::vector<float> empty;
+
+            const auto shape = [&](std::vector<float>& r,
+                                   std::vector<float>& ru,
+                                   std::vector<float>& rv,
+                                   std::vector<float>& re) {
+                Block block;
+                block.nx = count;
+                block.ny = rows;
+                block.ghost = ghost;
+                block.stride = stride;
+                block.rows = lines;
+                block.dx = 1.0f / count;
+                block.dy = rowHeight;
+                block.rho = r.data();
+                block.rhou = ru.data();
+                block.rhov = rv.data();
+                block.rhoE = re.data();
+                block.rhoY = nullptr;
+                block.widths = widths.data();
+                block.heights = heights.data();
+                block.centresX = centresX.data();
+                block.centresY = centresY.data();
+                return block;
+            };
+
+            Block in = shape(rho, rhou, rhov, rhoE);
+            GasModel gas;
+            gas.prepare();
+
+            for (int j = -ghost; j < rows + ghost; ++j)
+                for (int i = -ghost; i < count + ghost; ++i) {
+                    const int id = in.index(i, j);
+                    const double x = in.cellX(i);
+                    const double d = density(x);
+                    rho[static_cast<std::size_t>(id)] =
+                        static_cast<float>(d);
+                    rhou[static_cast<std::size_t>(id)] =
+                        static_cast<float>(d * speed);
+                    rhov[static_cast<std::size_t>(id)] = 0.0f;
+                    rhoE[static_cast<std::size_t>(id)] = static_cast<float>(
+                        pressure / (gas.gamma1 - 1.0) +
+                        0.5 * d * speed * speed);
+                }
+            keepRho = rho;
+            keepRhoU = rhou;
+            keepRhoV = rhov;
+            keepRhoE = rhoE;
+
+            Block keep = shape(keepRho, keepRhoU, keepRhoV, keepRhoE);
+            Block out = shape(outRho, outRhoU, outRhoV, outRhoE);
+
+            BlockBoundaries sides;
+            sides.pInf = static_cast<float>(pressure);
+            sides.left.kind = BoundaryKind::Outlet;
+            sides.right.kind = BoundaryKind::Outlet;
+            sides.bottom.kind = BoundaryKind::Slip;
+            sides.top.kind = BoundaryKind::Slip;
+
+            Workspace work;
+            const float step = 1.0e-4f;
+            advanceStage(in, keep, out, sides, gas, step, 0.0f, 1.0f,
+                         LimiterKind::VanLeer, 0.0f, work);
+
+            const int skip = count / 10;
+            double error = 0.0;
+            double magnitude = 0.0;
+            double peak = 0.0;
+            const int middle = rows / 2;
+            for (int i = skip; i < count - skip; ++i) {
+                const int id = in.index(i, middle);
+                const double numeric =
+                    (static_cast<double>(rho[static_cast<std::size_t>(id)]) -
+                     outRho[static_cast<std::size_t>(id)]) /
+                    step;
+                const double exact = speed * slope(in.cellX(i));
+                const double cell = in.widthAt(i);
+                error += std::fabs(numeric - exact) * cell;
+                magnitude += std::fabs(exact) * cell;
+                if (std::fabs(exact) > 1.0e-9)
+                    peak = std::max(peak,
+                                    std::fabs(numeric - exact) /
+                                        std::fabs(exact));
+            }
+            return Sample{count, magnitude > 0.0 ? error / magnitude : 0.0,
+                          peak};
+        };
+
+        const Sample straight = measure(200, true);
+        if (straight.peak > 1.5e-3)
+            return fail("a straight line is not carried exactly on a "
+                        "stretched grid: the operator is off by " +
+                        std::to_string(straight.peak) +
+                        " in the worst cell, where it should be off by "
+                        "nothing at all. A second "
+                        "order scheme reproduces a linear profile exactly on "
+                        "ANY grid - the slope is exact and the extrapolation "
+                        "to the face is exact - and it stops doing so the "
+                        "moment the slope is taken as a plain difference and "
+                        "the face is put half a cell away instead of half of "
+                        "THIS cell away");
+
+        const Sample coarse = measure(200, false);
+        const Sample fine = measure(400, false);
+        if (!(coarse.error > 0.0) || !(fine.error > 0.0))
+            return fail("the stretched grid order test measured no error at "
+                        "all, which means it measured nothing");
+        const double order =
+            std::log(coarse.error / fine.error) / std::log(2.0);
+        if (order < 1.2)
+            return fail("the compressible operator converges at order " +
+                        std::to_string(order) +
+                        " on a 4:1 stretched grid. A limiter clips at a "
+                        "smooth peak and a strong stretch costs more, so 1.3 "
+                        "is what this measures when it is working - anything "
+                        "near 1 means the operator has actually collapsed to "
+                        "first order");
+
+        char line[240];
+        std::snprintf(line, sizeof(line),
+                      "stretched     a straight line off by %.2e in the worst cell of "
+                      "a 4:1 geometric grid, a smooth bump %.4g at 200 "
+                      "cells and %.4g at 400, order %.2f",
+                      straight.peak, coarse.error, fine.error, order);
+        report(line);
+    }
+
+    {
+        const int nx = 64;
+        const int ny = 32;
+        const int ghost = 2;
+        const int stride = nx + 2 * ghost;
+        const int lines = ny + 2 * ghost;
+        const std::size_t total =
+            static_cast<std::size_t>(stride) * lines;
+
+        std::vector<float> rho(total, 1.225f);
+        std::vector<float> rhou(total, 1.225f * 30.0f);
+        std::vector<float> rhov(total, 0.0f);
+        std::vector<float> rhoE(total, 0.0f);
+        std::vector<uint8_t> mask(static_cast<std::size_t>(nx) * ny, 0);
+
+        GasModel gas;
+        gas.prepare();
+        const float energy = 101325.0f / (gas.gamma1 - 1.0f) +
+                             0.5f * 1.225f * 30.0f * 30.0f;
+        std::fill(rhoE.begin(), rhoE.end(), energy);
+
+        Block base;
+        base.nx = nx;
+        base.ny = ny;
+        base.ghost = ghost;
+        base.stride = stride;
+        base.rows = lines;
+        base.dx = 1.0f / nx;
+        base.dy = 0.5f / ny;
+        base.rho = rho.data();
+        base.rhou = rhou.data();
+        base.rhov = rhov.data();
+        base.rhoE = rhoE.data();
+        base.solid = mask.data();
+
+        AmrSettings settings;
+        settings.levels = 2;
+        settings.threshold = 0.0f;
+        settings.buffer = 2;
+        settings.minSide = 8;
+        settings.maxSide = 32;
+        settings.criterion = AmrCriterion::Density;
+
+        AmrHierarchy tree;
+        tree.build(settings, nx, ny, base.dx, base.dy, false);
+
+        std::vector<uint8_t> tags;
+        tree.tagFrom(base, gas, settings, tags);
+        for (uint8_t flag : tags)
+            if (flag)
+                return fail("a perfectly uniform field was tagged for "
+                            "refinement, so the criterion is measuring noise");
+
+        for (int j = 12; j < 20; ++j)
+            for (int i = 20; i < 30; ++i)
+                rho[static_cast<std::size_t>(base.index(i, j))] = 2.0f;
+        tree.regrid(base, gas, settings, mask);
+        if (tree.level(0).patches.empty())
+            return fail("a clear density jump produced no patches at all");
+        for (int which = 0; which < tree.depth(); ++which) {
+            if (tree.level(which).patches.empty())
+                break;
+            tree.seedLevel(which, base);
+        }
+
+        for (int j = 12; j < 20; ++j)
+            for (int i = 20; i < 30; ++i)
+                rho[static_cast<std::size_t>(base.index(i, j))] = 1.225f;
+        for (int which = 0; which < tree.depth(); ++which) {
+            if (tree.level(which).patches.empty())
+                break;
+            tree.seedLevel(which, base);
+        }
+
+        double worstSeed = 0.0;
+        for (int which = 0; which < tree.depth(); ++which) {
+            const AmrLevel& here = tree.level(which);
+            for (const AmrPatch& patch : here.patches) {
+                Block fine =
+                    const_cast<AmrPatch&>(patch).view(0, here.dx, here.dy);
+                for (int j = -ghost; j < patch.box.ny + ghost; ++j)
+                    for (int i = -ghost; i < patch.box.nx + ghost; ++i) {
+                        const int at = fine.index(i, j);
+                        worstSeed = std::max<double>(
+                            worstSeed,
+                            std::fabs(fine.rho[at] - 1.225f) / 1.225);
+                        worstSeed = std::max<double>(
+                            worstSeed,
+                            std::fabs(fine.rhou[at] - 1.225f * 30.0f) /
+                                (1.225 * 30.0));
+                    }
+            }
+        }
+        if (worstSeed > 1.0e-5)
+            return fail("interpolating a uniform state onto a patch changed "
+                        "it by " + std::to_string(worstSeed) +
+                        " of itself, ghost cells included. A constant is the "
+                        "one thing every interpolation has to reproduce");
+
+        Block copy = base;
+        std::vector<float> saveRho = rho;
+        std::vector<float> saveRhoU = rhou;
+        std::vector<float> saveRhoV = rhov;
+        std::vector<float> saveRhoE = rhoE;
+        AmrBox whole;
+        whole.nx = nx;
+        whole.ny = ny;
+        tree.averageDownFor(0, -1, copy, whole);
+        double worstDown = 0.0;
+        for (std::size_t at = 0; at < rho.size(); ++at) {
+            worstDown = std::max<double>(
+                worstDown, std::fabs(rho[at] - saveRho[at]));
+            worstDown = std::max<double>(
+                worstDown, std::fabs(rhou[at] - saveRhoU[at]));
+        }
+        if (worstDown > 1.0e-3)
+            return fail("averaging a uniform fine level back down changed the "
+                        "coarse state by " + std::to_string(worstDown));
+
+        std::vector<int> patches;
+        std::vector<long long> cells;
+        tree.describe(patches, cells);
+        char line[240];
+        std::snprintf(line, sizeof(line),
+                      "amr grid      %d patches on level 1 and %d on level 2, "
+                      "%lld extra cells over a %d base, uniform state "
+                      "reproduced to %.1e",
+                      patches.empty() ? 0 : patches[0],
+                      patches.size() > 1 ? patches[1] : 0, tree.cellCount(),
+                      nx * ny, worstSeed);
+        report(line);
+    }
+
+    {
+        const auto tubeCase = [&](const std::filesystem::path& out,
+                                  int cells,
+                                  int levels) {
+            Config cfg = gasConfig(out);
+            cfg.Lx = 1.0f;
+            cfg.Ly = 0.5f;
+            cfg.nx = cells;
+            cfg.ny = cells / 2;
+            cfg.caseType = CaseType::ShockTube;
+            cfg.boundaries = closedBoundaries();
+            cfg.totalTime = 0.0003;
+            cfg.amrLevels = levels;
+            cfg.amrEvery = 2;
+            cfg.amrThreshold = 0.35f;
+            return cfg;
+        };
+
+        RestartData coarseFrame;
+        if (!runCase(tubeCase(root / "amrcoarse", 64, 0), coarseFrame, error))
+            return fail("the coarse reference run failed: " + error);
+        RestartData amrFrame;
+        if (!runCase(tubeCase(root / "amron", 64, 1), amrFrame, error))
+            return fail("the refined run failed: " + error);
+        RestartData fineFrame;
+        if (!runCase(tubeCase(root / "amrfine", 128, 0), fineFrame, error))
+            return fail("the fine reference run failed: " + error);
+
+        const std::size_t cells =
+            static_cast<std::size_t>(coarseFrame.nx) * coarseFrame.ny;
+        if (coarseFrame.stateRho.size() != cells ||
+            amrFrame.stateRho.size() != cells)
+            return fail("the refined run did not come back on the base grid, "
+                        "and the frame is supposed to stay readable by "
+                        "everything that could read it before");
+
+        std::vector<double> reference(cells, 0.0);
+        for (int j = 0; j < coarseFrame.ny; ++j)
+            for (int i = 0; i < coarseFrame.nx; ++i) {
+                const std::size_t a =
+                    static_cast<std::size_t>(2 * j) * fineFrame.nx + 2 * i;
+                const std::size_t b = a + 1;
+                const std::size_t c =
+                    static_cast<std::size_t>(2 * j + 1) * fineFrame.nx + 2 * i;
+                const std::size_t d = c + 1;
+                reference[static_cast<std::size_t>(j) * coarseFrame.nx + i] =
+                    0.25 * (fineFrame.stateRho[a] + fineFrame.stateRho[b] +
+                            fineFrame.stateRho[c] + fineFrame.stateRho[d]);
+            }
+
+        const auto distance = [&](const std::vector<float>& field) {
+            double total = 0.0;
+            for (std::size_t at = 0; at < cells; ++at)
+                total += std::fabs(field[at] - reference[at]);
+            return total / static_cast<double>(cells);
+        };
+
+        const double plain = distance(coarseFrame.stateRho);
+        const double refined = distance(amrFrame.stateRho);
+        if (!(plain > 0.0))
+            return fail("the coarse run matched the fine one exactly, which "
+                        "means the comparison is not comparing anything");
+        if (refined < 1.0e-6)
+            return fail("the refined run came out identical to the fine "
+                        "reference, which means the patches covered the "
+                        "whole domain and the test never touched a "
+                        "coarse-fine boundary");
+        if (refined >= plain)
+            return fail("refinement made the answer worse, not better: " +
+                        std::to_string(refined) + " against " +
+                        std::to_string(plain) +
+                        " for the plain coarse run. A level of refinement "
+                        "that does not move the base grid toward the fine "
+                        "answer is paying for nothing");
+
+        double startMass = 0.0;
+        double endMass = 0.0;
+        for (std::size_t at = 0; at < cells; ++at)
+            endMass += amrFrame.stateRho[at];
+        {
+            RestartData first;
+            const std::filesystem::path opening =
+                root / "amron" / "solution_0.vtk";
+            if (!loadRestart(opening, first, error))
+                return fail("the refined run's first frame is unreadable: " +
+                            error);
+            for (float value : first.stateRho)
+                startMass += value;
+        }
+        const double drift = std::fabs(endMass - startMass) / startMass;
+        if (drift > 5.0e-4)
+            return fail("a closed box lost or gained " +
+                        std::to_string(drift) +
+                        " of its mass with refinement on. Averaging a fine "
+                        "patch back down is conservative by construction, so "
+                        "anything above round-off means the patches and the "
+                        "base are not exchanging the same fluxes");
+
+        char line[240];
+        std::snprintf(line, sizeof(line),
+                      "amr run       one level, %.3e against the fine answer "
+                      "where the plain coarse run manages %.3e, %.0f%% "
+                      "closer, mass drift %.1e",
+                      refined, plain, 100.0 * (1.0 - refined / plain), drift);
         report(line);
     }
 

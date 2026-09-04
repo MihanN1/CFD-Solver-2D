@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.28)
 
 project(CFD-Solver-2D
-    VERSION 0.9.0
+    VERSION 1.0.0
     LANGUAGES CXX
 )
 
@@ -177,6 +177,8 @@ set(CFD_CORE_SOURCES
     src/Phase.cpp
     src/RigidBody.cpp
     src/Turbulence.cpp
+    src/AmrHierarchy.cpp
+    src/AmrDriver.cpp
     src/SolverCompressible.cpp
     src/Restart.cpp
     src/Mesh.cpp

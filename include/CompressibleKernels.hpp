@@ -180,29 +180,61 @@ CFD_HD inline void hllc(const Primitive& left,
     }
 }
 
+struct Spacing {
+    float back = 1.0f;
+    float forward = 1.0f;
+    float half = 0.5f;
+};
+
 CFD_HD inline Primitive reconstruct(const Primitive& centre,
                                     const Primitive& back,
                                     const Primitive& forward,
                                     float side,
                                     int limiter,
-                                    const GasModel& gas) {
+                                    const GasModel& gas,
+                                    const Spacing& step) {
+    const float reach = side * step.half;
+    const float invBack = 1.0f / step.back;
+    const float invForward = 1.0f / step.forward;
+    const auto edge = [&](float low, float middle, float high) {
+        return middle + reach * limitSlope((middle - low) * invBack,
+                                           (high - middle) * invForward,
+                                           limiter);
+    };
+
     Primitive out = centre;
-    out.rho = centre.rho + side * 0.5f *
-                               limitSlope(centre.rho - back.rho,
-                                          forward.rho - centre.rho, limiter);
-    out.u = centre.u + side * 0.5f * limitSlope(centre.u - back.u,
-                                                forward.u - centre.u, limiter);
-    out.v = centre.v + side * 0.5f * limitSlope(centre.v - back.v,
-                                                forward.v - centre.v, limiter);
-    out.p = centre.p + side * 0.5f * limitSlope(centre.p - back.p,
-                                                forward.p - centre.p, limiter);
-    out.y = centre.y + side * 0.5f * limitSlope(centre.y - back.y,
-                                                forward.y - centre.y, limiter);
+    out.rho = edge(back.rho, centre.rho, forward.rho);
+    out.u = edge(back.u, centre.u, forward.u);
+    out.v = edge(back.v, centre.v, forward.v);
+    out.p = edge(back.p, centre.p, forward.p);
+    out.y = edge(back.y, centre.y, forward.y);
     out.rho = fmaxf(out.rho, kFloor);
     out.p = fmaxf(out.p, kFloor);
     out.y = clampTo(out.y, 0.0f, 1.0f);
     out.gamma = gammaOf(gas, out.y);
     return out;
+}
+
+CFD_HD inline Spacing spacingX(const Block& block, int i) {
+    Spacing step;
+    if (!block.widths)
+        return step;
+    const float here = block.widthAt(i);
+    step.back = 0.5f * (block.widthAt(i - 1) + here);
+    step.forward = 0.5f * (here + block.widthAt(i + 1));
+    step.half = 0.5f * here;
+    return step;
+}
+
+CFD_HD inline Spacing spacingY(const Block& block, int j) {
+    Spacing step;
+    if (!block.heights)
+        return step;
+    const float here = block.heightAt(j);
+    step.back = 0.5f * (block.heightAt(j - 1) + here);
+    step.forward = 0.5f * (here + block.heightAt(j + 1));
+    step.half = 0.5f * here;
+    return step;
 }
 
 CFD_HD inline void mirrorSide(Block& block,
@@ -214,6 +246,8 @@ CFD_HD inline void mirrorSide(Block& block,
                 int mirrorJ,
                 bool horizontal,
                 const BlockBoundaries& sides) {
+    if (side.interior)
+        return;
     const int target = block.index(i, j);
     const int source = block.index(mirrorI, mirrorJ);
     Primitive q = primitiveOf(block, gas, source);
@@ -365,9 +399,16 @@ CFD_HD inline void solidCell(Block& block,
     writeState(block, block.index(i, j), q);
 }
 
+CFD_HD inline bool blocksFlow(const SideState& side) {
+    return !side.interior && (side.kind == BoundaryKind::Wall ||
+                              side.kind == BoundaryKind::MovingWall ||
+                              side.kind == BoundaryKind::Slip);
+}
+
 CFD_HD inline void faceFluxX(const Block& in,
                              const PrimitiveField& prim,
                              const GasModel& gas,
+                             const BlockBoundaries& sides,
                              int limiter,
                              int i,
                              int j,
@@ -379,19 +420,27 @@ CFD_HD inline void faceFluxX(const Block& in,
     const Primitive centreRight = prim.at(id);
     const Primitive forwardRight = prim.at(id + 1);
 
-    const Primitive left =
-        reconstruct(centreLeft, backLeft, centreRight, 1.0f, limiter, gas);
-    const Primitive right =
-        reconstruct(centreRight, centreLeft, forwardRight, -1.0f, limiter, gas);
+    const Primitive left = reconstruct(centreLeft, backLeft, centreRight,
+                                       1.0f, limiter, gas,
+                                       spacingX(in, i - 1));
+    const Primitive right = reconstruct(centreRight, centreLeft, forwardRight,
+                                        -1.0f, limiter, gas, spacingX(in, i));
 
-    const bool solidLeft = in.solid && i > 0 && in.solid[j * nx + i - 1];
-    const bool solidRight = in.solid && i < nx && in.solid[j * nx + i];
+    const bool maskLeft = in.solid && i > 0 && in.solid[j * nx + i - 1];
+    const bool maskRight = in.solid && i < nx && in.solid[j * nx + i];
+    const bool solidLeft = maskLeft || (i == 0 && blocksFlow(sides.left));
+    const bool solidRight = maskRight || (i == nx && blocksFlow(sides.right));
     if (solidLeft || solidRight) {
         float wallPressure = 0.0f;
         if (solidLeft != solidRight) {
             const Primitive& side = solidLeft ? right : left;
-            const float wall =
-                in.solidU ? in.solidU[j * nx + (solidLeft ? i - 1 : i)] : 0.0f;
+            float wall = 0.0f;
+            if (in.solidU) {
+                if (maskLeft)
+                    wall = in.solidU[j * nx + i - 1];
+                else if (maskRight)
+                    wall = in.solidU[j * nx + i];
+            }
             const float approach =
                 solidLeft ? wall - side.u : side.u - wall;
             const float speedOfSound = sqrtf(side.gamma * side.p / side.rho);
@@ -412,6 +461,7 @@ CFD_HD inline void faceFluxX(const Block& in,
 CFD_HD inline void faceFluxY(const Block& in,
                              const PrimitiveField& prim,
                              const GasModel& gas,
+                             const BlockBoundaries& sides,
                              int limiter,
                              int i,
                              int j,
@@ -425,19 +475,26 @@ CFD_HD inline void faceFluxY(const Block& in,
     const Primitive centreHigh = prim.at(id);
     const Primitive forwardHigh = prim.at(id + step);
 
-    const Primitive low =
-        reconstruct(centreLow, backLow, centreHigh, 1.0f, limiter, gas);
-    const Primitive high =
-        reconstruct(centreHigh, centreLow, forwardHigh, -1.0f, limiter, gas);
+    const Primitive low = reconstruct(centreLow, backLow, centreHigh, 1.0f,
+                                      limiter, gas, spacingY(in, j - 1));
+    const Primitive high = reconstruct(centreHigh, centreLow, forwardHigh,
+                                       -1.0f, limiter, gas, spacingY(in, j));
 
-    const bool solidLow = in.solid && j > 0 && in.solid[(j - 1) * nx + i];
-    const bool solidHigh = in.solid && j < ny && in.solid[j * nx + i];
+    const bool maskLow = in.solid && j > 0 && in.solid[(j - 1) * nx + i];
+    const bool maskHigh = in.solid && j < ny && in.solid[j * nx + i];
+    const bool solidLow = maskLow || (j == 0 && blocksFlow(sides.bottom));
+    const bool solidHigh = maskHigh || (j == ny && blocksFlow(sides.top));
     if (solidLow || solidHigh) {
         float wallPressure = 0.0f;
         if (solidLow != solidHigh) {
             const Primitive& side = solidLow ? high : low;
-            const float wall =
-                in.solidV ? in.solidV[(solidLow ? j - 1 : j) * nx + i] : 0.0f;
+            float wall = 0.0f;
+            if (in.solidV) {
+                if (maskLow)
+                    wall = in.solidV[(j - 1) * nx + i];
+                else if (maskHigh)
+                    wall = in.solidV[j * nx + i];
+            }
             const float approach =
                 solidLow ? wall - side.v : side.v - wall;
             const float speedOfSound = sqrtf(side.gamma * side.p / side.rho);
@@ -479,8 +536,8 @@ CFD_HD inline void combine(const Block& in,
         return;
     }
 
-    const float invDx = 1.0f / in.dx;
-    const float invDy = 1.0f / in.dy;
+    const float invDx = 1.0f / in.widthAt(i);
+    const float invDy = 1.0f / in.heightAt(j);
     const long long xLow =
         (static_cast<long long>(j) * (nx + 1) + i) * kComponents;
     const long long xHigh = xLow + kComponents;
@@ -511,8 +568,20 @@ CFD_HD inline void combine(const Block& in,
             in.rhoY[id + in.stride] / fmaxf(in.rho[id + in.stride], kFloor);
         const float south =
             in.rhoY[id - in.stride] / fmaxf(in.rho[id - in.stride], kFloor);
-        const float laplacian = (east - 2.0f * here + west) * invDx * invDx +
-                                (north - 2.0f * here + south) * invDy * invDy;
+        float laplacian;
+        if (in.stretched()) {
+            const Spacing across = spacingX(in, i);
+            const Spacing along = spacingY(in, j);
+            laplacian = ((east - here) / across.forward -
+                         (here - west) / across.back) *
+                            invDx +
+                        ((north - here) / along.forward -
+                         (here - south) / along.back) *
+                            invDy;
+        } else {
+            laplacian = (east - 2.0f * here + west) * invDx * invDx +
+                        (north - 2.0f * here + south) * invDy * invDy;
+        }
         updated[4] += dt * diffusivity * in.rho[id] * laplacian;
     }
 
@@ -542,8 +611,8 @@ CFD_HD inline float cellRate(const Block& block,
         return 0.0f;
     const Primitive q = primitiveOf(block, gas, block.index(i, j));
     const float speedOfSound = sqrtf(q.gamma * q.p / q.rho);
-    return (fabsf(q.u) + speedOfSound) / block.dx +
-           (fabsf(q.v) + speedOfSound) / block.dy;
+    return (fabsf(q.u) + speedOfSound) / block.widthAt(i) +
+           (fabsf(q.v) + speedOfSound) / block.heightAt(j);
 }
 
 CFD_HD inline void fillPrimitive(const Block& block,

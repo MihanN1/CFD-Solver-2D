@@ -46,7 +46,9 @@ const char* const kKeys[] = {
     "regime", "gamma", "R", "gamma2", "R2", "T0", "pInf", "machInlet",
     "speciesMode", "acousticFields", "acousticWindow", "acousticRef",
     "microphones", "micInterval", "micAudio", "micAudioRate",
-    "micAudioSpeed",
+    "micAudioSpeed", "gridStretch", "stretchRatio", "refineNear",
+    "amrLevels", "amrEvery", "amrThreshold", "amrBuffer", "amrMinPatch",
+    "amrMaxPatch", "amrCriterion",
     "restart", "restartFile", "addTime",
     "gravityMode", "convection", "limiter", "timeScheme",
     "caseType", "lidSpeed", "steadyTolerance",
@@ -347,6 +349,92 @@ bool parseRegime(const std::string& text, Regime& out, std::string& error) {
                      "keys the pressure solve needed are refused rather than "
                      "quietly ignored");
     return false;
+}
+
+std::string stretchKindName(StretchKind kind) {
+    switch (kind) {
+    case StretchKind::Edges:
+        return "edges";
+    case StretchKind::Body:
+        return "body";
+    case StretchKind::Wake:
+        return "wake";
+    case StretchKind::Off:
+    default:
+        return "off";
+    }
+}
+
+bool parseStretchKind(const std::string& text, StretchKind& out) {
+    const std::string name = toLower(cleanValue(text));
+    if (name == "off" || name == "none" || name == "0" || name.empty()) {
+        out = StretchKind::Off;
+        return true;
+    }
+    if (name == "edges" || name == "walls") {
+        out = StretchKind::Edges;
+        return true;
+    }
+    if (name == "body" || name == "profile" || name == "1") {
+        out = StretchKind::Body;
+        return true;
+    }
+    if (name == "wake" || name == "downstream") {
+        out = StretchKind::Wake;
+        return true;
+    }
+    return false;
+}
+
+std::string amrHelp() {
+    return "--- amrLevels --------------------------------------------------\n"
+           "Adaptive mesh refinement, compressible only. amrLevels=0 is off "
+           "and is\n"
+           "every run before this one. Each level halves the cell size over "
+           "the patches\n"
+           "it covers, so amrLevels=2 resolves four times finer where it "
+           "matters and\n"
+           "nowhere else.\n"
+           "amrCriterion picks what counts as matters: density is shocks and "
+           "contacts,\n"
+           "  vorticity is wakes and shear, species is where two gases meet, "
+           "body is the\n"
+           "  cells against a solid, everything is all four and is the "
+           "default.\n"
+           "amrThreshold is how steep a feature has to be before it is worth "
+           "refining,\n"
+           "  as a fraction of the steepest one in the domain.\n"
+           "amrBuffer pads the tagged region so a feature cannot run off its "
+           "own patch\n"
+           "  between regrids, and amrEvery is how many base steps pass "
+           "between them.\n"
+           "amrMinPatch and amrMaxPatch bound the patch side in base cells.\n"
+           "Frames come out as an ordinary .vtk on the base grid plus a .vtm "
+           "with one\n"
+           ".vtr per patch, which ParaView opens as a hierarchy.\n";
+}
+
+std::string gridStretchHelp() {
+    return "--- gridStretch ------------------------------------------------\n"
+           "The compressible solver does not need every cell to be the same "
+           "size.\n"
+           "gridStretch=off  every cell the same, which is every run before "
+           "this one.\n"
+           "gridStretch=body cells shrink toward the body and grow toward the "
+           "far field.\n"
+           "gridStretch=wake same, but the fine band follows the wake "
+           "downstream too.\n"
+           "gridStretch=edges cells shrink toward the walls, for a duct or a "
+           "boundary layer.\n"
+           "stretchRatio is how much one cell may grow over its neighbour. "
+           "1.05 is\n"
+           "  five percent, which is the usual ceiling; over about 1.2 the "
+           "scheme starts\n"
+           "  losing the second order it is supposed to have.\n"
+           "refineNear is how wide the fine band is, as a fraction of the "
+           "domain.\n"
+           "The frames come out as RECTILINEAR_GRID, which ParaView reads "
+           "natively.\n";
 }
 
 const char* regimeName(Regime regime) {
@@ -1469,6 +1557,10 @@ bool Config::ask(const std::string& key, const std::string& prompt) {
     // confirmation menu shows the same block.
     if (name == "wallMotion")
         std::cout << wallMotionHelp();
+    if (name == "gridStretch")
+        std::cout << gridStretchHelp();
+    if (name == "amrLevels" || name == "amrCriterion")
+        std::cout << amrHelp();
     if (name == "bodyMotion")
         std::cout << bodyMotionHelp();
     if (name == "profiles")
@@ -1899,6 +1991,17 @@ void Config::print() const {
         if (acousticFields)
             std::cout << "  acousticWindow   = " << acousticWindow << " s, 0 dB at "
                       << acousticRef << " Pa\n";
+        std::cout << "  amrLevels        = " << amrLevels;
+        if (amrLevels > 0)
+            std::cout << ", " << amrCriterion << ", threshold "
+                      << amrThreshold << ", regrid every " << amrEvery
+                      << " steps";
+        std::cout << "\n";
+        std::cout << "  gridStretch      = " << stretchKindName(gridStretch);
+        if (gridStretch != StretchKind::Off)
+            std::cout << ", ratio " << stretchRatio << ", band "
+                      << refineNear;
+        std::cout << "\n";
         std::cout << "  microphones      = "
                   << (microphones.empty() ? "none" : microphones) << "\n";
         if (!microphones.empty()) {
@@ -1980,6 +2083,23 @@ std::vector<Profile> Config::resolvedProfiles() const {
 
 bool Config::regimeConsistent(std::string& error) const {
     if (!compressible()) {
+        if (amrLevels > 0) {
+            error = "amrLevels is compressible only. Adaptive refinement here "
+                    "means patches of a finer grid over the base one, and the "
+                    "projection solver's pressure solve is global - a "
+                    "multigrid hierarchy over a patch hierarchy is a "
+                    "different solver, not a setting. Drop amrLevels=, or add "
+                    "regime=compressible.";
+            return false;
+        }
+        if (gridStretch != StretchKind::Off) {
+            error = "gridStretch is compressible only. The projection solver "
+                    "indexes a flat array with one dx and one dy, and the "
+                    "multigrid halves that grid to build its hierarchy - "
+                    "neither survives cells of different sizes. Drop "
+                    "gridStretch=, or add regime=compressible.";
+            return false;
+        }
         if (acousticFields || !microphones.empty()) {
             error = "acousticFields and microphones are compressible only. "
                     "An incompressible run has no acoustics to record: the "
@@ -2009,6 +2129,14 @@ bool Config::regimeConsistent(std::string& error) const {
         error = "sources are incompressible only. A source that pushes fluid "
                 "out of itself needs a pressure solve to make room for it, "
                 "and there is not one here. Drop sources=.";
+        return false;
+    }
+    if (amrLevels > 0 && gridStretch != StretchKind::Off) {
+        error = "amrLevels and gridStretch do not go together. Refinement "
+                "halves a cell to make a patch, and it has nothing to halve "
+                "when every cell is already a different size. Pick one: "
+                "gridStretch puts the small cells where you say, amrLevels "
+                "puts them where the flow says and moves them.";
         return false;
     }
     if (multiphase() && mixing == MixingKind::Immiscible) {
@@ -2154,6 +2282,16 @@ std::string Config::serialize() const {
         << "micAudio=" << (micAudio ? 1 : 0) << "\n"
         << "micAudioRate=" << micAudioRate << "\n"
         << "micAudioSpeed=" << micAudioSpeed << "\n"
+        << "gridStretch=" << stretchKindName(gridStretch) << "\n"
+        << "stretchRatio=" << stretchRatio << "\n"
+        << "refineNear=" << refineNear << "\n"
+        << "amrLevels=" << amrLevels << "\n"
+        << "amrEvery=" << amrEvery << "\n"
+        << "amrThreshold=" << amrThreshold << "\n"
+        << "amrBuffer=" << amrBuffer << "\n"
+        << "amrMinPatch=" << amrMinPatch << "\n"
+        << "amrMaxPatch=" << amrMaxPatch << "\n"
+        << "amrCriterion=" << amrCriterion << "\n"
         << "turbulence=" << turbulenceKindName(turbulence) << "\n"
         << "Cs=" << Cs << "\n"
         << "turbIntensity=" << turbIntensity << "\n"
@@ -2519,6 +2657,67 @@ bool Config::setParam(const std::string& key,
                        "micInterval is how many steps pass between samples, "
                        "and it sets the sampling rate: every step is the "
                        "highest frequency the run can resolve at all", error);
+    else if (k == "amrLevels")
+        ok = assignInt(amrLevels, k, value, 0, 4,
+                       "amrLevels is how many refinement levels sit over the "
+                       "base grid. 0 is off, each one halves the cell size "
+                       "where it is needed, and four is already 16 times "
+                       "finer", error);
+    else if (k == "amrEvery")
+        ok = assignInt(amrEvery, k, value, 1, 100000,
+                       "amrEvery is how many base steps pass between "
+                       "regrids. Too rarely and a shock walks off its own "
+                       "patch; too often and the regrid costs more than it "
+                       "saves", error);
+    else if (k == "amrThreshold")
+        ok = assignFloat(amrThreshold, k, value, 0.001f, 1.0f,
+                         "amrThreshold is how steep a feature has to be "
+                         "before it is worth refining, as a fraction of the "
+                         "steepest one in the domain", error);
+    else if (k == "amrBuffer")
+        ok = assignInt(amrBuffer, k, value, 0, 64,
+                       "amrBuffer is how many cells of padding go round the "
+                       "tagged region, so a feature cannot leave its patch "
+                       "between regrids", error);
+    else if (k == "amrMinPatch")
+        ok = assignInt(amrMinPatch, k, value, 2, 4096,
+                       "amrMinPatch is the smallest side a patch may have, "
+                       "in base cells. Below about 8 the ghost layers cost "
+                       "more than the interior", error);
+    else if (k == "amrMaxPatch")
+        ok = assignInt(amrMaxPatch, k, value, 4, 8192,
+                       "amrMaxPatch is the largest side a patch may have, in "
+                       "base cells", error);
+    else if (k == "amrCriterion") {
+        const std::string name = toLower(cleanValue(value));
+        ok = name == "density" || name == "shock" || name == "vorticity" ||
+             name == "wake" || name == "species" || name == "mixing" ||
+             name == "body" || name == "wall" || name == "everything" ||
+             name == "all";
+        if (ok)
+            amrCriterion = name;
+        else
+            error = badValue("amrCriterion", cleanValue(value),
+                             "it is density, vorticity, species, body or "
+                             "everything");
+    }
+    else if (k == "gridStretch") {
+        ok = parseStretchKind(value, gridStretch);
+        if (!ok)
+            error = badValue("gridStretch", cleanValue(value),
+                             "it is off, body, wake or edges. off is the even "
+                             "grid every run before this one used");
+    }
+    else if (k == "stretchRatio")
+        ok = assignFloat(stretchRatio, k, value, 1.0f, 1.5f,
+                         "stretchRatio is how much one cell may grow over its "
+                         "neighbour. 1 is off, 1.05 is the usual ceiling, and "
+                         "past about 1.2 the scheme quietly drops to first "
+                         "order", error);
+    else if (k == "refineNear")
+        ok = assignFloat(refineNear, k, value, 0.01f, 1.0f,
+                         "refineNear is how wide the fine band is, as a "
+                         "fraction of the domain", error);
     else if (k == "micAudio")
         ok = assignBool(micAudio, k, value, error);
     else if (k == "micAudioRate")

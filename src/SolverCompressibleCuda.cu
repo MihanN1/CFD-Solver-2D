@@ -48,13 +48,14 @@ __global__ void primitiveKernel(Block in,
 __global__ void fluxXKernel(Block in,
                             cfd::PrimitiveField prim,
                             GasModel gas,
+                            BlockBoundaries sides,
                             int limiter,
                             float* fx) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i > in.nx || j >= in.ny)
         return;
-    cfd::faceFluxX(in, prim, gas, limiter, i, j,
+    cfd::faceFluxX(in, prim, gas, sides, limiter, i, j,
                    fx + (static_cast<long long>(j) * (in.nx + 1) + i) *
                             cfd::kComponents);
 }
@@ -62,13 +63,14 @@ __global__ void fluxXKernel(Block in,
 __global__ void fluxYKernel(Block in,
                             cfd::PrimitiveField prim,
                             GasModel gas,
+                            BlockBoundaries sides,
                             int limiter,
                             float* fy) {
     const int i = blockIdx.x * blockDim.x + threadIdx.x;
     const int j = blockIdx.y * blockDim.y + threadIdx.y;
     if (i >= in.nx || j > in.ny)
         return;
-    cfd::faceFluxY(in, prim, gas, limiter, i, j,
+    cfd::faceFluxY(in, prim, gas, sides, limiter, i, j,
                    fy + (static_cast<long long>(j) * in.nx + i) *
                             cfd::kComponents);
 }
@@ -396,9 +398,9 @@ void compressibleCudaStage(CompressibleDevice* device,
     prim.y = device->primitive[4];
     prim.gamma = device->primitive[5];
 
-    fluxXKernel<<<faceX, threads>>>(in, prim, gas, limiter, device->fluxX);
+    fluxXKernel<<<faceX, threads>>>(in, prim, gas, sides, limiter, device->fluxX);
     CFD_CUDA_LAUNCH("fluxXKernel");
-    fluxYKernel<<<faceY, threads>>>(in, prim, gas, limiter, device->fluxY);
+    fluxYKernel<<<faceY, threads>>>(in, prim, gas, sides, limiter, device->fluxY);
     CFD_CUDA_LAUNCH("fluxYKernel");
     combineKernel<<<cellGrid, threads>>>(in, keep, out, gas, device->fluxX,
                                          device->fluxY, dt, a, b, diffusivity);

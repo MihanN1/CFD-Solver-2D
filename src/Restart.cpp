@@ -658,6 +658,10 @@ bool loadRestart(const std::filesystem::path& file,
                         ok = readFloats(fin, out.stateRhoE, count);
                     else if (arrayName == "stateRhoY")
                         ok = readFloats(fin, out.stateRhoY, count);
+                    else if (arrayName == "gridFaceX")
+                        ok = readFloats(fin, out.gridFaceX, count);
+                    else if (arrayName == "gridFaceY")
+                        ok = readFloats(fin, out.gridFaceY, count);
                     else
                         ok = skipBytes(
                             fin, static_cast<std::streamoff>(count * 4));
